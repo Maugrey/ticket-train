@@ -3,10 +3,20 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
+import json
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import control_guard
 import token_usage
+import train_supervisor
 
 
 def valid_state() -> dict:
@@ -31,6 +41,7 @@ def valid_state() -> dict:
                 "checkpoint_crossed": False,
             },
             "review_pass_budgets": {},
+            "verification_gates": {},
             "duplicate_session_inventory": [],
             "unmeasured_phase_inventory": [],
             "cost_anomaly_status": "clear",
@@ -38,6 +49,7 @@ def valid_state() -> dict:
                 "integrated_ticket_count": 0,
                 "token_reporting_status": "complete",
                 "session_usage_ledger_ready": True,
+                "verification_summary_ready": True,
                 "manual_validation_summary_ready": True,
                 "attention_points_summary_ready": True,
                 "task_inventory_ready": True,
@@ -98,6 +110,84 @@ class TokenUsageTests(unittest.TestCase):
         assert match is not None
         self.assertEqual(match.group("family"), "run:T-1:review")
         self.assertEqual(match.group("attempt"), "2")
+
+
+def valid_verification_gate() -> dict:
+    return {
+        "implementation_contract_revision": "implementation-1",
+        "verification_contract_revision": "verification-1",
+        "execution_pair_base": "base-sha",
+        "implementation_thread_id": "thread-impl-123",
+        "implementation_branch": "codex/T-1-implementation",
+        "acceptance_test_thread_id": "thread-test-123",
+        "acceptance_test_branch": "codex/T-1-acceptance-tests",
+        "acceptance_test_commit": "test-sha",
+        "independent_test_authorship": "complete",
+        "implementation_disclosed_before_test_commit": False,
+        "acceptance_coverage_status": "complete",
+        "baseline_red_status": "demonstrated",
+        "baseline_red_base": "base-sha",
+        "acceptance_tests_integrated": True,
+        "integrated_green_status": "passed",
+        "integrated_green_head": "ticket-sha",
+        "ticket_head": "ticket-sha",
+        "environment_parity_status": "passed",
+        "environment_fingerprint": "local-supabase:test-config-hash",
+        "supabase_auth_applicable": True,
+        "supabase_auth_verification_status": "passed",
+        "privileged_credentials_setup_only": True,
+        "automatable_manual_scenarios": [],
+        "unresolved_validation_failures": [],
+        "logs_captured": True,
+    }
+
+
+class VerificationGateTests(unittest.TestCase):
+    def test_valid_supabase_verification_gate(self) -> None:
+        self.assertEqual(
+            control_guard.verification_gate_issues("T-1", valid_verification_gate()),
+            [],
+        )
+
+    def test_privileged_supabase_boundary_bypass_is_rejected(self) -> None:
+        gate = valid_verification_gate()
+        gate["privileged_credentials_setup_only"] = False
+        issues = control_guard.verification_gate_issues("T-1", gate)
+        self.assertTrue(any("privileged credentials" in issue for issue in issues))
+
+    def test_stale_green_head_is_rejected(self) -> None:
+        gate = valid_verification_gate()
+        gate["ticket_head"] = "new-ticket-sha"
+        issues = control_guard.verification_gate_issues("T-1", gate)
+        self.assertTrue(any("green head differs" in issue for issue in issues))
+
+    def test_shared_implementation_and_test_thread_is_rejected(self) -> None:
+        gate = valid_verification_gate()
+        gate["acceptance_test_thread_id"] = gate["implementation_thread_id"]
+        issues = control_guard.verification_gate_issues("T-1", gate)
+        self.assertTrue(any("reused one thread" in issue for issue in issues))
+
+    def test_supervisor_records_verification_event(self) -> None:
+        state = valid_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            args = argparse.Namespace(
+                state=path,
+                ticket="T-1",
+                event_json=json.dumps(
+                    {
+                        "verification_contract_revision": "verification-1",
+                        "baseline_red_status": "demonstrated",
+                    }
+                ),
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                train_supervisor.verification_event(args)
+            updated = json.loads(path.read_text(encoding="utf-8"))
+            gate = updated["control"]["verification_gates"]["T-1"]
+            self.assertEqual(gate["verification_contract_revision"], "verification-1")
+            self.assertEqual(gate["baseline_red_status"], "demonstrated")
 
 
 if __name__ == "__main__":

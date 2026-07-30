@@ -38,6 +38,8 @@ ACCEPTABLE_COPILOT_STATUS = {
 }
 ACCEPTABLE_ROUTING_STATUS = {"conformant", "documented-fallback"}
 ACCEPTABLE_COST_STATUS = {"clear", "checkpoint-resolved", "checkpoint-open"}
+ACCEPTABLE_RED_STATUS = {"demonstrated", "not-applicable"}
+ACCEPTABLE_ENVIRONMENT_STATUS = {"passed", "not-applicable"}
 TERMINAL_TICKET_STATES = {
     "ANALYSIS_REPORTED",
     "REPORTED",
@@ -185,6 +187,104 @@ def validate_cost_controls(control: dict[str, Any], issues: list[str]) -> None:
         )
 
 
+def verification_gate_issues(ticket_id: str, gate: Any) -> list[str]:
+    issues: list[str] = []
+    prefix = f"verification gate {ticket_id}"
+    if not isinstance(gate, dict):
+        return [f"{prefix} must be an object"]
+
+    required_truthy = {
+        "implementation_contract_revision": "implementation contract revision",
+        "verification_contract_revision": "verification contract revision",
+        "execution_pair_base": "execution-pair base",
+        "implementation_thread_id": "implementation thread ID",
+        "implementation_branch": "implementation branch",
+        "acceptance_test_thread_id": "acceptance-test thread ID",
+        "acceptance_test_branch": "acceptance-test branch",
+        "acceptance_test_commit": "acceptance-test commit",
+        "integrated_green_head": "integrated-green head",
+        "ticket_head": "ticket head",
+    }
+    for field, label in required_truthy.items():
+        if not gate.get(field):
+            issues.append(f"{prefix} is missing {label}")
+
+    if gate.get("implementation_thread_id") == gate.get("acceptance_test_thread_id"):
+        issues.append(f"{prefix} reused one thread for implementation and independent tests")
+    if gate.get("implementation_branch") == gate.get("acceptance_test_branch"):
+        issues.append(f"{prefix} reused one branch for implementation and independent tests")
+
+    if gate.get("independent_test_authorship") != "complete":
+        issues.append(f"{prefix} independent test authorship is incomplete")
+    if gate.get("implementation_disclosed_before_test_commit") is not False:
+        issues.append(f"{prefix} did not preserve independent initial test authorship")
+    if gate.get("acceptance_coverage_status") != "complete":
+        issues.append(f"{prefix} acceptance coverage is incomplete")
+
+    red_status = gate.get("baseline_red_status")
+    if red_status not in ACCEPTABLE_RED_STATUS:
+        issues.append(f"{prefix} baseline-red evidence is invalid")
+    elif red_status == "demonstrated":
+        if not gate.get("baseline_red_base"):
+            issues.append(f"{prefix} baseline-red base is missing")
+        elif gate.get("baseline_red_base") != gate.get("execution_pair_base"):
+            issues.append(f"{prefix} baseline-red base differs from execution-pair base")
+    elif red_status == "not-applicable" and not gate.get("baseline_red_not_applicable_reason"):
+        issues.append(f"{prefix} baseline-red non-applicability needs a reason")
+
+    if gate.get("acceptance_tests_integrated") is not True:
+        issues.append(f"{prefix} independent tests are not integrated")
+    if gate.get("integrated_green_status") != "passed":
+        issues.append(f"{prefix} integrated-green evidence is not passed")
+    if (
+        gate.get("integrated_green_head")
+        and gate.get("ticket_head")
+        and gate.get("integrated_green_head") != gate.get("ticket_head")
+    ):
+        issues.append(f"{prefix} green head differs from ticket head")
+
+    environment_status = gate.get("environment_parity_status")
+    if environment_status not in ACCEPTABLE_ENVIRONMENT_STATUS:
+        issues.append(f"{prefix} environment parity is incomplete")
+    elif environment_status == "passed" and not gate.get("environment_fingerprint"):
+        issues.append(f"{prefix} environment fingerprint is missing")
+    if gate.get("supabase_auth_applicable") is True:
+        if environment_status != "passed":
+            issues.append(f"{prefix} Supabase/Auth requires passed environment parity")
+        if gate.get("supabase_auth_verification_status") != "passed":
+            issues.append(f"{prefix} Supabase/Auth/RLS validation is not passed")
+        if gate.get("privileged_credentials_setup_only") is not True:
+            issues.append(f"{prefix} privileged credentials may have bypassed the user boundary")
+    elif gate.get("supabase_auth_verification_status") not in {
+        "not-applicable",
+        "passed",
+    }:
+        issues.append(f"{prefix} Supabase/Auth applicability is unresolved")
+
+    manual_scenarios = gate.get("automatable_manual_scenarios")
+    if not isinstance(manual_scenarios, list):
+        issues.append(f"{prefix} automatable_manual_scenarios must be a list")
+    elif manual_scenarios:
+        issues.append(f"{prefix} leaves automatable scenarios to the user")
+
+    unresolved = gate.get("unresolved_validation_failures")
+    if not isinstance(unresolved, list):
+        issues.append(f"{prefix} unresolved_validation_failures must be a list")
+    elif unresolved:
+        issues.append(f"{prefix} has unresolved validation failures")
+    if gate.get("logs_captured") is not True:
+        issues.append(f"{prefix} validation logs are not captured")
+    return issues
+
+
+def validate_verification_gates(control: dict[str, Any], issues: list[str]) -> dict[str, Any]:
+    gates = control.get("verification_gates")
+    if not isinstance(gates, dict):
+        issues.append("control.verification_gates must be an object")
+        return {}
+    return gates
+
+
 def validate_common(state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     issues: list[str] = []
     control = state.get("control")
@@ -198,6 +298,7 @@ def validate_common(state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
 
     validate_phases(control, issues)
     validate_cost_controls(control, issues)
+    validate_verification_gates(control, issues)
 
     launch_unknown = as_list(
         control.get("launch_unknown_phase_keys"),
@@ -265,12 +366,16 @@ def validate_completion(state: dict[str, Any], include_common: bool = True) -> l
         return issues + ["missing control.finalization object"]
 
     ticket_states = control.get("requested_ticket_states")
+    verification_gates = control.get("verification_gates")
     if not isinstance(ticket_states, dict) or not ticket_states:
         issues.append("control.requested_ticket_states must list every requested ticket")
     else:
         for ticket_id, ticket_state in ticket_states.items():
             if ticket_state not in TERMINAL_TICKET_STATES:
                 issues.append(f"requested ticket is not terminal: {ticket_id} ({ticket_state})")
+            if ticket_state in {"REPORTED", "MERGED_INTO_TRAIN"}:
+                gate = verification_gates.get(ticket_id) if isinstance(verification_gates, dict) else None
+                issues.extend(verification_gate_issues(str(ticket_id), gate))
 
     execution_mode = state.get("execution_mode") or state.get("executionMode")
     integrated = state.get("integrated_ticket_count")
@@ -315,6 +420,8 @@ def validate_completion(state: dict[str, Any], include_common: bool = True) -> l
         issues.append("token reporting status is missing")
     if finalization.get("session_usage_ledger_ready") is not True:
         issues.append("session usage ledger is not ready")
+    if finalization.get("verification_summary_ready") is not True:
+        issues.append("functional verification summary is not ready")
     if finalization.get("manual_validation_summary_ready") is not True:
         issues.append("manual validation summary is not ready")
     if finalization.get("attention_points_summary_ready") is not True:
@@ -341,8 +448,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate whether a ticket-train orchestrator may yield or complete."
     )
-    parser.add_argument("mode", choices=("check-yield", "check-completion"))
+    parser.add_argument(
+        "mode", choices=("check-yield", "check-completion", "check-verification")
+    )
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--ticket")
     return parser
 
 
@@ -352,8 +462,15 @@ def main() -> int:
         state = load_state(args.state)
         if args.mode == "check-yield":
             issues = validate_yield(state)
-        else:
+        elif args.mode == "check-completion":
             issues = validate_completion(state)
+        else:
+            if not args.ticket:
+                raise GuardError("check-verification requires --ticket")
+            control = state.get("control")
+            gates = control.get("verification_gates") if isinstance(control, dict) else None
+            gate = gates.get(args.ticket) if isinstance(gates, dict) else None
+            issues = verification_gate_issues(args.ticket, gate)
     except GuardError as error:
         issues = [str(error)]
     render_result(args.mode, args.state, issues)

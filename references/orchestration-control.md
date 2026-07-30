@@ -16,7 +16,8 @@
 ## Control-plane invariants
 
 Use the main conversation as the only orchestrator. Every triage, analysis,
-implementation, review, follow-up review, and final-train review phase must run
+implementation, independent acceptance-test authoring, review, follow-up
+review, and final-train review phase must run
 in a separate user-visible Codex thread when thread-management tools are
 available.
 
@@ -129,6 +130,8 @@ actual_reasoning_effort
 result_summary
 artifacts = thread | branch | commit | pull_request | reviewed_head
 tests_and_checks
+verification_contract_and_coverage
+red_green_and_environment_evidence
 findings_or_decisions
 residual_risks
 requested_or_recommended_next_action
@@ -216,6 +219,7 @@ visible_thread_inventory
 proportionality_profile_revision
 train_size_budget
 review_pass_budgets
+verification_gates
 session_usage_ledger
 duplicate_session_inventory
 unmeasured_phase_inventory
@@ -233,6 +237,7 @@ Use `scripts/train_supervisor.py` for deterministic reconciliation:
 python scripts/train_supervisor.py thread-event --state <manifest> --event-json <changed-wait-snapshot-json>
 python scripts/train_supervisor.py github-snapshot --state <manifest> --repo <owner/name> --pr <number>
 python scripts/train_supervisor.py test-result --state <manifest> --phase-key <key> --command <command> --exit-code <code> --head <sha> --duration-seconds <seconds> --log <log-file>
+python scripts/train_supervisor.py verification-event --state <manifest> --ticket <ticket-id> --event-json <changed-verification-evidence-json>
 python scripts/train_supervisor.py status --state <manifest>
 ```
 
@@ -240,7 +245,7 @@ The thread connector remains responsible for waiting on user-visible tasks;
 feed only changed snapshots to the controller. The controller records task
 transitions, reads GitHub status through deterministic `gh --json` output,
 extracts bounded test errors, hashes full external logs, and updates the
-manifest atomically. Use the model only after the controller reports a
+manifest and verification gate atomically. Use the model only after the controller reports a
 transition, failure, blocker, or decision.
 
 ## Deterministic yield guard
@@ -267,6 +272,7 @@ Maintain a `control` object in the run manifest for the read-only guard script:
       "checkpoint_crossed": false
     },
     "review_pass_budgets": {},
+    "verification_gates": {},
     "duplicate_session_inventory": [],
     "unmeasured_phase_inventory": [],
     "cost_anomaly_status": "clear",
@@ -299,6 +305,7 @@ Maintain a `control` object in the run manifest for the read-only guard script:
       "finding_ledger_status": null,
       "token_reporting_status": null,
       "session_usage_ledger_ready": false,
+      "verification_summary_ready": false,
       "manual_validation_summary_ready": false,
       "attention_points_summary_ready": false,
       "task_inventory_ready": false,
@@ -318,6 +325,7 @@ Before yielding or publishing a completion/checkpoint report, run:
 ```powershell
 python scripts/control_guard.py check-yield --state <run-manifest.json>
 python scripts/control_guard.py check-completion --state <run-manifest.json>
+python scripts/control_guard.py check-verification --state <run-manifest.json> --ticket <ticket-id>
 ```
 
 Use the skill's absolute script path when outside the skill directory. Treat a
@@ -327,7 +335,8 @@ reconciliation.
 
 The guard also enforces user-visible execution, proportionality and size state,
 one complete review per stable scope, at most two automatic remediation cycles,
-and explicit token-ledger coverage. A failed cost guard never authorizes lower
+independent functional readiness before review, and explicit token-ledger
+coverage. A failed cost guard never authorizes lower
 quality; it triggers the root-cause checkpoint in
 [efficiency-policy.md](efficiency-policy.md).
 
@@ -378,6 +387,10 @@ On restart, context compaction, or user resumption:
    inventory complete reviews and remediation cycles by stable scope, run the
    session ledger, and record duplicates and unmeasured phases. Preserve old
    work and classify it honestly; do not rerun it solely to populate new fields.
+   For manifests created before independent verification, derive contracts and
+   coverage from existing evidence where trustworthy. Mark missing red,
+   environment, or Supabase/Auth evidence honestly and run only the missing
+   gate before further review or merge; do not fabricate historical proof.
 3. Reconcile every recorded client ID, thread ID, branch, worktree, pull
    request, commit, gate, usage snapshot, and launch-unknown phase.
 4. Capture completed child results that were not yet recorded.

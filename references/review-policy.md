@@ -16,6 +16,14 @@
 ## Review setup
 
 Review every live ticket pull request before merge into the train.
+Dispatch the complete review only after the functional-readiness gate in
+[verification-policy.md](verification-policy.md) passes.
+
+The acceptance-test pull request targets the implementation branch and exists
+for durable independent authorship and integration. It does not consume the
+ticket's complete-review pass. Validate its provenance, scope, baseline-red
+evidence, and merge result; the complete reviewer later reviews the integrated
+production and test diff together.
 
 Use a reviewer thread that:
 
@@ -24,6 +32,9 @@ Use a reviewer thread that:
 - uses the model and reasoning effort selected from the effective intrinsic criticality and complexity under [model-routing.md](model-routing.md);
 - receives the ticket, approved analysis, acceptance criteria, project guidance, pull-request URL, base and head revisions, and test evidence;
 - receives the proportionality profile and compact implementation contract;
+- receives the verification contract, independent test commit and pull
+  request, acceptance-coverage map, baseline-red evidence, exact-head green
+  evidence, environment fingerprints, and applicable Supabase/Auth status;
 - does not receive the worker's private reasoning or expected review outcome;
 - does not modify the branch.
 
@@ -48,6 +59,11 @@ finding inventory in the first report. It must not defer discoverable findings
 to later complete passes. Separate every recommendation into minimum required
 correction, optional hardening, or explicitly deferred post-MVP work under
 [efficiency-policy.md](efficiency-policy.md).
+
+The reviewer verifies test sufficiency; it does not author an omitted
+acceptance suite during the complete review. If functional readiness is
+incomplete or its evidence is invalid, return the ticket to verification
+without consuming the complete-review budget.
 
 ## Reviewer output
 
@@ -84,6 +100,14 @@ reviewed_base_and_head
 trusted_test_evidence_reused
 independent_risk_targeted_checks
 new_or_changed_risk_surface
+functional_readiness_verified
+acceptance_coverage_verified
+baseline_red_evidence_verified
+exact_head_green_evidence_verified
+environment_parity_verified
+supabase_auth_rls_evidence_verified_or_not_applicable
+privileged_test_bypass_absent
+manual_only_justifications_valid
 finding_inventory_complete = yes | no
 minimum_required_correction
 optional_hardening
@@ -104,6 +128,12 @@ risk surfaces, such as authorization, concurrency, migration, compatibility,
 or data integrity. Do not rerun the full project suite solely to duplicate
 trustworthy exact-head evidence unless project rules require an independent
 run.
+
+For Supabase/Auth/RLS work, verify that privileged credentials were used only
+for fixture setup and cleanup. User-path assertions must run through the real
+anonymous or authenticated boundary. A green result produced through
+`service_role`, direct SQL, or an admin client does not prove ordinary-user
+authorization.
 
 If CI is missing, stale, failing for infrastructure reasons, or cannot prove
 the exact reviewed commit, run the project-required local checks and disclose
@@ -191,18 +221,21 @@ For actionable findings:
 
 1. Open one bounded collection window for available Codex, Copilot, CI, and
    human findings.
-2. Send one deduplicated remediation packet with file, line, severity,
+2. For every confirmed behavioral defect, require a reproducing regression
+   test with pre-fix red and post-fix green evidence.
+3. Send one deduplicated remediation packet with file, line, severity,
    evidence, expected outcome, source, disposition, test request, compact
    implementation contract, and proportionality-profile revision to a fresh
    remediation thread.
-3. Have the remediator update the same ticket branch and worktree.
-4. Run affected tests and required project checks.
-5. Push the update.
-6. Capture the remediation thread's non-overlapping usage.
-7. Have the independent reviewer inspect the remediation diff, unresolved
+4. Have the remediator update the same ticket branch and worktree.
+5. Run affected independent acceptance tests, regression tests, environment
+   checks, and required project checks.
+6. Push the update.
+7. Capture the remediation thread's non-overlapping usage.
+8. Have the independent reviewer inspect the remediation diff, unresolved
    findings, ledger dispositions, and affected risk surface.
-8. Capture the re-review interval.
-9. Repeat once if necessary. After two remediation/follow-up cycles, stop and
+9. Capture the re-review interval.
+10. Repeat once if necessary. After two remediation/follow-up cycles, stop and
    perform the root-cause and cost-anomaly checkpoint from
    [efficiency-policy.md](efficiency-policy.md); never start a third automatic
    cycle.
@@ -265,6 +298,8 @@ Use an independent final-train reviewer that:
 - receives the exact final pull-request base and head, integrated ticket
   digests, dependency outcomes, complete diff, exact-head test evidence, and
   train finding ledger;
+- receives cross-ticket acceptance results and, when applicable, clean-reset
+  Supabase migration/Auth/RLS/environment evidence for the exact train head;
 - reviews cross-ticket behavior, integration invariants, scope composition,
   migrations, contracts, access boundaries, deployment concerns, integration
   glue, and regressions not visible in isolated ticket diffs;
@@ -341,6 +376,10 @@ A ticket pull request may merge into the train only when:
 - the branch is based on the current train or has been refreshed;
 - required automated tests pass;
 - project-required checks pass;
+- its verification contract has complete acceptance coverage;
+- independent baseline-red and exact-head integrated-green evidence is valid;
+- environment parity and applicable Supabase/Auth/RLS validation passed;
+- no objectively automatable ordinary scenario was delegated to the user;
 - independent automated review has no blocking findings;
 - Copilot, CI, and review comments have a recorded disposition;
 - every blocking ledger finding is verified fixed;

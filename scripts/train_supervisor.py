@@ -210,6 +210,69 @@ def test_result(args: argparse.Namespace) -> None:
     sys.stdout.write(json.dumps(artifact, ensure_ascii=False) + "\n")
 
 
+def verification_event(args: argparse.Namespace) -> None:
+    state = load_json(args.state)
+    event = json.loads(args.event_json)
+    if not isinstance(event, dict):
+        raise ValueError("Verification event JSON must be an object")
+    ctl = control(state)
+    gates = ctl.setdefault("verification_gates", {})
+    if not isinstance(gates, dict):
+        raise ValueError("control.verification_gates must be an object")
+    gate = gates.setdefault(args.ticket, {})
+    if not isinstance(gate, dict):
+        raise ValueError(f"Verification gate must be an object: {args.ticket}")
+
+    allowed = {
+        "implementation_contract_revision",
+        "verification_contract_revision",
+        "execution_pair_base",
+        "implementation_thread_id",
+        "implementation_branch",
+        "acceptance_test_thread_id",
+        "acceptance_test_branch",
+        "acceptance_test_commit",
+        "acceptance_test_pull_request",
+        "independent_test_authorship",
+        "implementation_disclosed_before_test_commit",
+        "acceptance_coverage_status",
+        "baseline_red_status",
+        "baseline_red_base",
+        "baseline_red_not_applicable_reason",
+        "acceptance_tests_integrated",
+        "integrated_green_status",
+        "integrated_green_head",
+        "ticket_head",
+        "environment_parity_status",
+        "environment_fingerprint",
+        "supabase_auth_applicable",
+        "supabase_auth_verification_status",
+        "privileged_credentials_setup_only",
+        "automatable_manual_scenarios",
+        "unresolved_validation_failures",
+        "logs_captured",
+    }
+    unknown = sorted(set(event) - allowed)
+    if unknown:
+        raise ValueError("Unsupported verification fields: " + ", ".join(unknown))
+
+    changed: list[str] = []
+    for key, value in event.items():
+        if gate.get(key) != value:
+            gate[key] = value
+            changed.append(key)
+    if not changed:
+        sys.stdout.write(json.dumps({"status": "unchanged", "changed_fields": []}) + "\n")
+        return
+    append_event(
+        state,
+        {"type": "verification", "ticket_id": args.ticket, "changed_fields": changed},
+    )
+    finalize_update(state, f"verification:{args.ticket}:updated")
+    save_json(args.state, state)
+    sys.stdout.write(json.dumps({"status": "updated", "changed_fields": changed}) + "\n")
+
+
 def status(args: argparse.Namespace) -> None:
     state = load_json(args.state)
     ctl = control(state)
@@ -258,6 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--duration-seconds", type=float, required=True)
     test.add_argument("--log", type=Path, required=True)
     test.set_defaults(handler=test_result)
+
+    verification = subparsers.add_parser("verification-event")
+    verification.add_argument("--state", type=Path, required=True)
+    verification.add_argument("--ticket", required=True)
+    verification.add_argument("--event-json", required=True)
+    verification.set_defaults(handler=verification_event)
 
     show = subparsers.add_parser("status")
     show.add_argument("--state", type=Path, required=True)

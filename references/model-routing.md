@@ -8,6 +8,7 @@
 - Strict routing enforcement
 - Analysis routing
 - Implementation routing
+- Independent acceptance-test routing
 - Initial automated review routing
 - Final train review routing
 - Follow-up review routing
@@ -20,6 +21,9 @@ Use intrinsic criticality and complexity directly. Do not derive a combined cont
 
 - Route the full analysis from provisional triage values.
 - Route implementation from the values confirmed by the full analysis.
+- Route independent acceptance-test authoring from effective intrinsic
+  criticality and verification complexity through the implementation matrix,
+  with a `Terra/H` minimum.
 - Route initial automated review from the higher per-dimension values between
   the analysis and the actual implementation diff.
 - Route focused follow-up review from current effective intrinsic criticality
@@ -274,6 +278,30 @@ For the bounded `HIGH`/`MAXIMUM` plan-contract validation required by
 higher than the selected implementation setting and cap it at `Sol/H`. It is a
 completeness check, not a second technical analysis. Return broader uncertainty
 to the analyzer instead of raising this phase's effort.
+
+## Independent acceptance-test routing
+
+Classify verification complexity independently from implementation complexity:
+
+- `LOW`: one deterministic behavior, local fixture, direct oracle, no material
+  role or environment variation;
+- `MEDIUM`: several scenarios or layers, stable integration, clear fixtures and
+  expected results;
+- `HIGH`: roles/RLS, Auth sessions or cookies, concurrency, migration,
+  multi-layer E2E, environment parity, or several interacting negative paths;
+- `MAXIMUM`: hosted and local parity, multi-system identity or data lifecycle,
+  recovery testing, weak oracle, or several interdependent environments.
+
+Resolve effective intrinsic criticality and verification complexity through
+the implementation matrix above. Replace only `Terra/M` with `Terra/H`; every
+other cell remains exact. This minimum protects independent oracle quality
+without promoting ordinary work to Sol or XH.
+
+Create a fresh visible acceptance-test thread with explicit model and effort.
+It receives the verification contract, not the implementation diff. Require
+the same routing-conformance record as any other routed phase. Deterministic
+red/green, environment, and test-command execution does not require a new
+model setting or model turn.
 
 ## Initial automated review routing
 

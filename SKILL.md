@@ -1,6 +1,6 @@
 ---
 name: ticket-train
-description: Explicitly orchestrate bounded, cost-controlled trains of implementation tickets from a user-provided source. Use when the user invokes $ticket-train to triage and analyze tickets in separate visible threads, apply a product proportionality profile, supervise event-driven phase transitions with durable recovery, route model and reasoning effort strictly, reconcile plans, implement on ticket branches and worktrees, run one exhaustive review plus grouped remediation and targeted re-review, create and validate the final train pull request, report manual tests and attention points, measure per-session and per-phase token usage, enforce human gates, and stop at ticket-count or review-surface checkpoints. Do not use for ordinary one-off coding tasks or without explicit invocation.
+description: Explicitly orchestrate bounded, cost-controlled trains of implementation tickets from a user-provided source. Use when the user invokes $ticket-train to triage tickets in visible threads, apply a product proportionality profile, reconcile plans, run implementation and independent acceptance-test authoring in parallel branches and worktrees, enforce red/green functional and environment gates including Supabase/Auth/RLS when applicable, route model effort strictly, run one exhaustive review plus grouped remediation and targeted re-review, validate the final train pull request, report manual tests and attention points, measure per-session and per-phase token usage, enforce human gates, and stop at ticket-count or review-surface checkpoints. Do not use for ordinary one-off coding tasks or without explicit invocation.
 ---
 
 # Ticket Train
@@ -22,6 +22,9 @@ Read these references before starting:
 - [efficiency-policy.md](references/efficiency-policy.md) for proportionality,
   scope budgets, compact contracts, review-pass limits, deterministic
   supervision, log handling, and token-cost anomaly controls.
+- [verification-policy.md](references/verification-policy.md) for independent
+  parallel acceptance-test authoring, red/green evidence, functional readiness,
+  environment parity, Supabase/Auth/RLS validation, and manual-test boundaries.
 
 Before any write-enabled implementation or pull-request review, also read:
 
@@ -63,6 +66,8 @@ Before triage, resolve and echo:
 16. Review-pass budget, fixed to one complete pass and at most two grouped
     remediation/follow-up cycles per stable scope.
 17. Cost-control policy, fixed to `strict-quality-preserving`.
+18. Verification policy, fixed to `parallel-independent-red-green`.
+19. Environment tiers required by the selected tickets.
 
 Require the user to provide or confirm the ticket source and selection. Never invent a source by scanning TODOs, comments, or arbitrary repository files.
 
@@ -97,6 +102,8 @@ In dry-run mode:
 - produce analysis, dependency, collision, scheduling, validation-gate, and model-routing reports;
 - produce the proportionality profile, scope-budget assessment, compact
   implementation-contract simulation, and review-pass simulation;
+- produce a verification-contract, test-branch, red/green, environment-parity,
+  and functional-readiness simulation;
 - report exact-if-available token usage for orchestration and analysis;
 - simulate branch, pull-request, and train ordering.
 
@@ -121,6 +128,8 @@ Use separate user-visible Codex threads when the thread-management tools are ava
 - one read-only batch triage thread with an explicit `Terra/H` override;
 - one analysis thread per ticket;
 - one implementation thread per ticket branch/worktree;
+- one independent acceptance-test thread per active implementation, using a
+  separate branch and worktree from the same train commit;
 - one independent read-only review thread per ticket pull request.
 - one fresh compact remediation thread per grouped correction cycle, retaining
   the ticket branch and worktree;
@@ -152,6 +161,12 @@ internal slices, worker self-review, complete-review count, remediation-cycle
 count, log artifacts, all authoritative and duplicate sessions, unmeasured
 phases, and cost-anomaly checkpoints.
 
+Track the verification-contract revision, execution-pair base, independent
+test thread/branch/worktree/commit/pull request, acceptance-coverage map,
+baseline-red and integrated-green evidence, environment fingerprints,
+Supabase/Auth gate when applicable, validation failures, regression tests, and
+manual-only automation justifications.
+
 Never use `fork_thread` for a train phase. Do not replace user-visible ticket
 threads with hidden subagents unless the user explicitly permits that fallback
 for the affected phase after the visible-thread failure is reported. Approval
@@ -161,6 +176,8 @@ Limit active work:
 
 - maximum five simultaneous analysis threads;
 - maximum two simultaneous implementation threads;
+- maximum one independent acceptance-test thread per active implementation;
+- maximum two simultaneous implementation/test execution pairs;
 - maximum one integration into the train at a time;
 - maximum five tickets integrated into a train before a mandatory checkpoint.
 
@@ -204,44 +221,57 @@ At a high level:
 14. Build dependency and collision maps and apply the cumulative train-size
     checkpoint.
 15. Before each implementation, reconcile its conditional analysis against the current train and merged predecessors.
-16. Materialize the compact implementation contract. For `HIGH` or `MAXIMUM`
-    complexity, run the bounded plan-contract validation.
-17. Schedule only proven-independent implementations in parallel.
-18. Route each implementation worker from the confirmed classification.
-19. Create each ticket branch from the current train state and use internal
-    testable slices for large coherent tickets.
-20. Require the worker's same-phase self-review, then open the ticket pull
-    request against the train.
-21. Run tests and reassess both dimensions from the actual diff.
-22. Route one exhaustive independent automated review through the
+16. Materialize compact implementation and verification contracts. For `HIGH`
+    or `MAXIMUM` complexity, run the bounded plan-contract validation.
+17. Schedule only proven-independent ticket execution pairs in parallel.
+18. Route the implementation and independent acceptance-test workers from the
+    confirmed classification and verification complexity.
+19. Create implementation and acceptance-test branches/worktrees from the same
+    exact train commit. Keep test authorship independent until its first commit
+    and baseline-red evidence are durable.
+20. Use internal implementation slices for large coherent tickets and require
+    the worker's same-phase self-review.
+21. Push both branches, open the ticket pull request as draft, and integrate
+    the independent test commit through a test pull request into the ticket
+    branch or an equivalent durable merge.
+22. Run baseline-red, exact-head integrated-green, environment-parity, and
+    applicable Supabase/Auth/RLS checks. Adjudicate failures before review.
+23. Run `control_guard.py check-verification` and mark the ticket pull request
+    ready for automated code review only when functional readiness passes.
+24. Reassess both dimensions from the final production and test diff.
+25. Route one exhaustive independent automated review through the
     initial-review matrix and require its complete finding inventory.
-23. Consolidate Codex, Copilot, CI, and human findings into one deduplicated
+26. Consolidate Codex, Copilot, CI, and human findings into one deduplicated
     disposition ledger, then send one grouped remediation packet to a fresh
     compact remediation thread on the same branch and worktree.
-24. Run a targeted re-review by default. Permit another full review only for
+27. Require a reproducing regression test for every confirmed behavioral
+    defect, then run a targeted re-review by default. Permit another full review only for
     the material scope changes listed in the efficiency policy, never merely
     because the train base advanced.
-25. Stop automatic remediation after two cycles and perform a root-cause and
+28. Stop automatic remediation after two cycles and perform a root-cause and
     cost-anomaly checkpoint instead of looping.
-26. Measure non-overlapping triage, analysis, consolidation, reconciliation,
-    plan-contract validation, implementation, initial review, remediation, follow-up review, final train
+29. Measure non-overlapping triage, analysis, consolidation, reconciliation,
+    plan-contract validation, implementation, acceptance-test authoring,
+    red/green/environment validation, initial review, remediation, follow-up review, final train
     validation, and orchestration usage.
-27. Apply the matrix-based human pre-merge gate selected by the run mode.
-28. Serialize merges into the train.
-29. Report each integrated ticket and its ticket total in the main thread.
-30. When the requested live queue finishes or a ticket-count or size
+30. Apply the matrix-based human pre-merge gate selected by the run mode.
+31. Serialize merges into the train.
+32. Report each integrated ticket and its ticket total in the main thread.
+33. When the requested live queue finishes or a ticket-count or size
     checkpoint is reached, freeze finalization, push the train, and create or update one
     final train pull request against the base branch.
-31. Review cross-ticket interactions and unreviewed integration surfaces in
+34. Run integrated cross-ticket acceptance and applicable clean-reset
+    Supabase/Auth/RLS checks on the exact train head.
+35. Review cross-ticket interactions and unreviewed integration surfaces in
     the current final pull request, reuse trustworthy unchanged ticket-review
     evidence, consolidate all feedback, and apply the same grouped-remediation
     and targeted-re-review limits.
-32. Report the final pull request, its exact reviewed head, readiness, a
+36. Report the final pull request, its exact reviewed head, readiness, a
     deduplicated manual validation plan, and separate code and application
     attention points.
-33. Report the measured run total with baseline/final/delta for every known
+37. Report the measured run total with baseline/final/delta for every known
     session, including duplicate attempts and explicitly unmeasured phases.
-34. Keep the train frozen after five integrated tickets or a cumulative-size
+38. Keep the train frozen after five integrated tickets or a cumulative-size
     checkpoint until the user merges it or explicitly authorizes more tickets.
 
 For sequential or dependent tickets, complete the predecessor's implementation, automated validation, required human validation, and train merge before starting the dependent implementation. Do not delay the dependent analysis.
@@ -257,6 +287,10 @@ Pause and report a blocker when:
 - a material product or architecture decision is missing;
 - required credentials, connectors, permissions, or environments are unavailable;
 - mandatory automated tests fail after reasonable remediation;
+- independent acceptance coverage, red/green evidence, environment parity, or
+  the functional-readiness gate is incomplete;
+- a required Supabase/Auth/RLS check is environment-blocked or used privileged
+  credentials to prove an ordinary user path;
 - automated review still has blocking findings;
 - the final train pull request cannot be created or updated during live
   finalization;
@@ -319,6 +353,11 @@ to important file diffs in the final pull-request diff when GitHub provides
 stable anchors. Explain architecture impact, technical decisions, important
 symbols, tests, review findings, accepted or rejected Copilot comments,
 residual risks, and gate decisions without reproducing the entire code change.
+
+Include the independent test pull request or commit, verification-contract
+coverage, baseline-red and exact-head green evidence, environment fingerprint,
+Supabase/Auth status when applicable, regression tests, and the concrete
+reason for every scenario left to human validation.
 
 At live completion and every ticket-count or size checkpoint, include the final train
 pull-request link and exact reviewed head. Provide only the manual tests that

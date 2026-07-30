@@ -25,6 +25,7 @@ Use these default limits:
 
 ```text
 complete_analysis_passes_per_ticket = 1
+acceptance_test_authoring_passes_per_ticket = 1
 complete_ticket_reviews_per_stable_scope = 1
 complete_final_train_reviews_per_stable_scope = 1
 remediation_cycles_per_ticket = 2
@@ -41,6 +42,11 @@ Do not reduce model effort below the applicable routing matrix, omit required
 tests, suppress findings, or broaden acceptance of risk to meet a cost target.
 When a limit is reached, stop the automatic loop and perform the root-cause
 checkpoint below.
+
+Parallel independent acceptance-test authoring is a quality-neutral cost
+shift: spend one compact bounded phase before review to avoid using exhaustive
+review and remediation as functional debugging. Follow
+[verification-policy.md](verification-policy.md).
 
 ## Mandatory proportionality profile
 
@@ -162,6 +168,9 @@ allowed_scope_and_no_go_scope
 expected_contract_data_and_architecture_impacts
 likely_files_and_symbols
 required_tests_and_test_oracles
+verification_contract_revision
+independent_test_path_ownership
+required_environment_tiers
 dependencies_and_collision_constraints
 proportionality_profile_revision
 open_decisions = none
@@ -215,9 +224,16 @@ Return the checklist result and final diff summary. This is not a substitute
 for independent review and must not create a separate model turn solely for
 report formatting.
 
+The implementation worker does not own the independent acceptance suite. Its
+self-review and unit tests run concurrently with the acceptance-test worker in
+[verification-policy.md](verification-policy.md). Do not delay independent
+test authorship until implementation completion and do not expose the
+implementation diff before the test worker's initial commit.
+
 ## Review-pass budget
 
-Run one exhaustive independent review of the complete stable ticket diff. The
+Run one exhaustive independent review of the complete stable ticket diff only
+after the functional-readiness gate passes. The
 reviewer must return its complete finding inventory in one response, including
 all severities and all assessed risk surfaces. Do not drip findings across
 successive complete reviews.
@@ -337,6 +353,7 @@ these occurs:
 
 - a duplicate phase or session exists;
 - a phase has already consumed its one complete pass;
+- acceptance-test authoring would be regenerated instead of amended narrowly;
 - a third remediation cycle would be required;
 - a thread compacted more than once or its context can no longer be handed off
   compactly;

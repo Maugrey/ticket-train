@@ -105,6 +105,11 @@ orchestrator-coordination
 <ticket-id>:analysis-reconciliation
 <ticket-id>:plan-contract-validation
 <ticket-id>:implementation
+<ticket-id>:acceptance-test-authoring
+<ticket-id>:baseline-red-validation
+<ticket-id>:integrated-green-validation
+<ticket-id>:environment-parity-validation
+<ticket-id>:test-remediation
 <ticket-id>:review-initial
 <ticket-id>:remediation-codex
 <ticket-id>:remediation-copilot
@@ -120,12 +125,18 @@ When main-thread phases cannot be isolated without overlapping windows, report o
 
 For each requested ticket, sum its non-overlapping initial analysis,
 analysis-consolidation, analysis-reconciliation, plan-contract validation,
-implementation, initial review, remediation, and follow-up review deltas, even when the ticket ends
+implementation, acceptance-test authoring, test remediation, initial review,
+remediation, and follow-up review deltas, even when the ticket ends
 blocked, failed, or cancelled. For the run total, add batch triage, ticket
 totals, final-train validation, final-train review, final-train remediation,
 final-train follow-up review, and the non-overlapping orchestrator delta.
 
 Do not count the same thread interval twice. Parallel execution changes elapsed time, not accounting rules.
+
+Baseline-red, integrated-green, and environment validation are normally
+deterministic command phases with zero child-model tokens. Still report their
+duration, logs, and `0` model tokens when confirmed; use `unavailable` rather
+than zero when the execution boundary was not captured.
 
 Do not create extra model turns solely to separate Codex and Copilot
 remediation usage. Use `remediation-combined` when the worker processes a

@@ -48,6 +48,8 @@ supervision_mode = active-until-terminal
 liveness_reporting = transitions-only | explicit user override
 proportionality_profile_revision = required
 cost_control_policy = strict-quality-preserving
+verification_policy = parallel-independent-red-green
+max_active_execution_pairs = 2
 complete_review_limit_per_stable_scope = 1
 remediation_cycle_limit = 2
 material_files_per_train_checkpoint = 60
@@ -109,6 +111,9 @@ Use these roles:
   `Terra/H` thread without producing a technical plan.
 - **Analyzer:** inspect one ticket and repository state in read-only mode.
 - **Worker:** implement one ticket in its branch and worktree.
+- **Acceptance-test worker:** independently author black-box acceptance,
+  integration, E2E, access, migration, and environment tests in a parallel
+  branch/worktree from the same train commit.
 - **Reviewer:** independently review one ticket pull request in read-only mode.
 - **Plan-contract validator:** perform one bounded independent completeness
   check for a `HIGH` or `MAXIMUM` implementation contract without repeating
@@ -147,11 +152,28 @@ valid_if
 invalid_if
 analysis_reconciliation_status
 implementation_contract_revision
+verification_contract_revision
 plan_contract_validation_status
 ticket_size_budget
 train_size_budget
 internal_slices
 worker_self_review_status
+execution_pair_base
+acceptance_test_thread_id
+acceptance_test_branch
+acceptance_test_worktree
+acceptance_test_commit
+acceptance_test_pull_request
+acceptance_coverage_status
+baseline_red_status
+baseline_red_base
+integrated_green_status
+integrated_green_head
+environment_parity_status
+environment_fingerprint
+supabase_auth_verification_status
+manual_only_scenarios
+functional_readiness_status
 effective_intrinsic_criticality
 effective_complexity
 analysis_model
@@ -177,6 +199,11 @@ analysis_initial_token_usage
 analysis_consolidation_token_usage
 analysis_reconciliation_token_usage
 implementation_token_usage
+acceptance_test_authoring_token_usage
+baseline_red_validation_token_usage
+integrated_green_validation_token_usage
+environment_parity_validation_token_usage
+test_remediation_token_usage
 review_initial_token_usage
 remediation_codex_token_usage
 remediation_copilot_token_usage
@@ -243,11 +270,19 @@ DISCOVERED
 -> RECONCILING_ANALYSIS
 -> ANALYSIS_VALID | ANALYSIS_REFRESHED
 -> IMPLEMENTATION_CONTRACT_READY
+-> VERIFICATION_CONTRACT_READY
 -> PLAN_CONTRACT_VALIDATED
 -> READY_FOR_IMPLEMENTATION
--> IMPLEMENTING
+-> EXECUTION_PAIR_RUNNING
+   -> IMPLEMENTING
+   -> AUTHORING_ACCEPTANCE_TESTS
 -> IMPLEMENTED
+-> ACCEPTANCE_TESTS_AUTHORED
+-> BASELINE_RED_VALIDATED
+-> TESTS_INTEGRATED
 -> AUTOMATED_TESTS
+-> FUNCTIONAL_VALIDATION
+-> FUNCTIONAL_READY
 -> EFFECTIVE_CLASSIFIED
 -> AUTO_REVIEW
 -> FIXING
@@ -339,6 +374,11 @@ Require each analyzer to:
     `explicitly_deferred_post_mvp`.
 17. Estimate material file, migration/data-transformation, and structural
     domain counts, and identify epic evidence.
+18. Produce the versioned verification contract from
+    [verification-policy.md](verification-policy.md), including acceptance,
+    state, role, negative, recovery, environment, red, and green oracles.
+19. Identify applicable Supabase/Auth/RLS/SSR-cookie/redirect/storage/hosted
+    environment surfaces and the required local or staging tier.
 
 The orchestrator checks completeness and consistency of the classification
 evidence without repeating the technical analysis. Route missing evidence,
@@ -412,6 +452,13 @@ Pass compact, phase-specific handoffs:
   base commit, and dependency signals;
 - implementation receives the approved analysis revision, selected variant,
   current train commit, scope, tests, and durable references;
+- acceptance-test authoring receives the approved verification contract,
+  proportionality profile, exact execution-pair base, project test guidance,
+  declared test paths, and non-secret environment contract, but no
+  implementation diff or private worker reasoning before its initial commit;
+- functional validation receives the exact implementation and test commits,
+  baseline-red evidence, combined head, environment fingerprints, commands,
+  and durable logs;
 - review receives the ticket, approved analysis digest, exact base/head,
   final diff, trusted test evidence, and open finding ledger;
 - follow-up review receives the remediation diff, unresolved findings,
@@ -423,6 +470,8 @@ Pass compact, phase-specific handoffs:
 Every handoff also carries the proportionality-profile revision. Before
 implementation, replace the full analysis history with the versioned compact
 implementation contract from [efficiency-policy.md](efficiency-policy.md).
+Give the independent test worker the separate versioned verification contract
+from [verification-policy.md](verification-policy.md).
 Remediation always receives a fresh compact packet; it keeps the same branch
 and worktree but not the implementation conversation history.
 
@@ -487,9 +536,11 @@ Before every implementation:
 5. Reclassify intrinsic criticality and complexity after a material revision.
 6. Reapply the human analysis matrix when the plan changed materially.
 7. Recompute ticket and cumulative train size budgets.
-8. Materialize the compact implementation contract.
+8. Materialize the compact implementation and verification contracts.
 9. For `HIGH` or `MAXIMUM` complexity, complete the bounded independent
    plan-contract validation.
+10. Resolve test-path ownership, execution-pair base, environment tiers, and
+    every material oracle before either execution worker starts.
 
 Do not request new human approval for an unchanged plan, a previously approved variant, or a non-material refresh. Do not start implementation until reconciliation and every applicable analysis gate are complete.
 
@@ -508,7 +559,9 @@ Use non-overlapping deltas for reused analyzer or other explicitly reused
 phase threads. Remediation and focused re-review use fresh sessions. Report:
 
 - phase usage after triage, initial analysis, dependency consolidation,
-  analysis reconciliation, plan-contract validation, implementation, initial review, remediation,
+  analysis reconciliation, plan-contract validation, implementation,
+  acceptance-test authoring, baseline-red validation, integrated-green
+  validation, environment-parity validation, test remediation, initial review, remediation,
   follow-up review, final train validation, final train review, final train
   remediation, and final train follow-up review;
 - a ticket total after its final automated review and remediation;
@@ -533,6 +586,9 @@ After collecting the selected analyses:
 5. Treat implementation uncertainty as sequential.
 6. Apply the cumulative file, migration/data-transformation, structural-domain,
    and epic checkpoints from [efficiency-policy.md](efficiency-policy.md).
+7. Schedule one acceptance-test worker beside each implementation worker.
+   Treat production paths, independent test paths, and shared test helpers as
+   separate collision domains. Keep at most two ticket execution pairs active.
 
 Do not use the maximum concurrency as a utilization target.
 
@@ -541,14 +597,19 @@ Do not use the maximum concurrency as a utilization target.
 For live execution:
 
 1. Create one train branch from the resolved base branch.
-2. Create each ticket branch from the train head that is valid for that ticket.
-3. Use one worktree per active ticket branch.
-4. Push the ticket branch and open a pull request targeting the train.
-5. Keep ticket pull requests narrow and short-lived.
-6. Merge ticket pull requests into the train only after all applicable gates.
-7. At live finalization, push the train and create or update one final pull
+2. Create each implementation branch and independent acceptance-test branch
+   from the same train head that is valid for that ticket.
+3. Use separate worktrees for implementation and acceptance-test branches.
+4. Push both branches and open the ticket pull request as draft against the
+   train. Open a test pull request into the implementation branch, or preserve
+   an equivalent durable test-commit merge.
+5. Keep ticket and test pull requests narrow and short-lived.
+6. Integrate independent tests into the implementation branch, pass functional
+   readiness, and only then dispatch complete code review.
+7. Merge ticket pull requests into the train only after all applicable gates.
+8. At live finalization, push the train and create or update one final pull
    request from the train into the resolved base branch.
-8. Keep the final pull request open across remediation updates and, when the
+9. Keep the final pull request open across remediation updates and, when the
    user explicitly continues the train, across the next authorized batch.
 
 Follow repository naming rules. Otherwise use the `codex/` prefix and names such as:
@@ -556,6 +617,7 @@ Follow repository naming rules. Otherwise use the `codex/` prefix and names such
 ```text
 codex/train-<date-or-scope>
 codex/<ticket-id>-<short-slug>
+codex/<ticket-id>-acceptance-tests
 ```
 
 Preserve project-required AI attribution in commits and pull-request descriptions.
@@ -575,10 +637,11 @@ The worker must:
 2. Re-read the ticket analysis, project instructions, and current train base.
 3. Use the implementation model and effort selected from [model-routing.md](model-routing.md).
 4. Stay within the approved scope.
-5. Implement the ticket and required tests.
+5. Implement the ticket and implementation-proximate unit tests. Do not author
+   or weaken the independent acceptance suite.
 6. Avoid unrelated refactors and formatting churn.
 7. Run targeted checks and project-required checks.
-8. Push the branch and open or update its pull request.
+8. Push the branch and open or update its draft pull request.
 9. For large coherent tickets, implement named internal testable slices in the
    same branch and pull request.
 10. Perform the same-phase worker self-review required by
@@ -588,31 +651,47 @@ The worker must:
     categories.
 12. Let the orchestrator measure the completed implementation thread.
 
-Launch the worker and every reviewer through the visible-thread protocol in
+Launch the worker, acceptance-test worker, and every reviewer through the visible-thread protocol in
 [orchestration-control.md](orchestration-control.md). A launch-tool error does
 not authorize direct implementation in the orchestrator, a conversation fork,
 or a hidden worker.
 
-After implementation:
+In parallel, the independent acceptance-test worker follows
+[verification-policy.md](verification-policy.md). It writes tests from the
+approved verification contract on its separate branch, proves their baseline
+red state, and commits before receiving the implementation diff.
 
-1. Reassess effective intrinsic criticality and complexity from the actual diff.
-2. Keep the higher value per dimension between analysis and implementation.
-3. Report scope expansion and any newly applicable human gate.
-4. Route the independent reviewer from the effective values under [model-routing.md](model-routing.md).
-5. Run one exhaustive independent review under
+After both initial workers complete:
+
+1. Capture both commits and baseline-red evidence.
+2. Integrate the independent test commit into the implementation branch.
+3. Run the exact-head integrated-green, project-required, environment-parity,
+   and applicable Supabase/Auth/RLS checks.
+4. Adjudicate every failure as implementation, test, environment, contract, or
+   infrastructure before changing artifacts. Do not spend a complete review on
+   a functionally unready ticket.
+5. Run `control_guard.py check-verification` for the ticket.
+6. Reassess effective intrinsic criticality and complexity from the complete
+   production and test diff.
+7. Keep the higher value per dimension between analysis and implementation.
+8. Report scope expansion and any newly applicable human gate.
+9. Route the independent reviewer from the effective values under [model-routing.md](model-routing.md).
+10. Run one exhaustive independent review under
    [review-policy.md](review-policy.md) and require the complete finding
    inventory in its first response.
-6. Merge Codex, Copilot, CI, and human findings into the deduplicated ledger
+11. Merge Codex, Copilot, CI, and human findings into the deduplicated ledger
    from [review-policy.md](review-policy.md).
-7. Route accepted actionable findings to one fresh compact remediation thread
+12. Route accepted actionable findings to one fresh compact remediation thread
    in one batch while retaining the ticket branch and worktree.
-8. Re-review only the remediation delta, unresolved findings, dispositions,
+13. Add a reproducing regression test for every confirmed behavioral defect.
+14. Re-review only the remediation delta, unresolved findings, dispositions,
    and affected risk surface unless a material change requires a full review.
-9. Allow at most two grouped remediation and focused-review cycles. If blocking
+15. Allow at most two grouped remediation and focused-review cycles. If blocking
    findings remain, stop for root-cause reassessment instead of beginning a
    third automatic cycle.
-10. Measure each non-overlapping remediation and review interval without
-    creating extra turns solely to separate token attribution.
+16. Measure each non-overlapping test-authoring, validation, remediation, and
+    review interval without creating extra turns solely to separate token
+    attribution.
 
 ## Sequential execution
 
@@ -620,25 +699,32 @@ For sequential or dependent tickets:
 
 1. Analyze every selected ticket under the parallel-conditional policy without waiting for predecessors.
 2. Complete the predecessor's analysis gate.
-3. Implement the predecessor.
-4. Complete its automated tests, review, and required human pre-merge validation.
+3. Run the predecessor's implementation and independent acceptance-test
+   authoring in parallel from the same execution-pair base.
+4. Complete its red/green, environment, functional-readiness, automated review,
+   and required human pre-merge validation.
 5. Merge the predecessor pull request into the train.
 6. Reconcile the dependent ticket's analysis against the updated train.
 7. Complete any renewed human analysis gate caused by a material revision.
-8. Implement the dependent ticket.
+8. Launch the dependent ticket's implementation/test pair.
 
 Do not pre-create dependent worktrees from a stale train base.
 
 ## Parallel execution
 
-Run at most two parallel implementations, and only for tickets proven independent.
+Run at most two parallel implementation/test pairs, and only for tickets
+proven independent. The acceptance worker beside an implementation is part of
+that pair, not a third independent ticket.
 
 Serialize integration:
 
 1. Merge one validated ticket into the train.
-2. Update every remaining ticket branch onto the new train.
+2. Update every remaining implementation and acceptance-test branch onto the
+   new train before its initial test integration; after test integration,
+   update the combined ticket branch.
 3. Confirm it still merges cleanly.
-4. Rerun affected tests.
+4. Reconcile the verification contract, invalidate affected red/green or
+   environment evidence, and rerun affected tests and functional readiness.
 5. Run a targeted integration-impact review against the new base. Run a new
    complete review only when the refresh materially changes architecture, a
    critical migration or data strategy, an authorization/privacy boundary,
@@ -661,12 +747,16 @@ Finalize in this order:
 
 1. Freeze train finalization and do not start another implementation while its
    evidence is being collected.
-2. Run the proportional project-required verification suite, reusing
+2. Run integrated cross-ticket acceptance scenarios on the exact train head.
+   For applicable Supabase work, reset the representative environment, apply
+   migrations in delivery order, seed roles, and rerun affected Auth/RLS and
+   environment-parity checks.
+3. Run the proportional project-required verification suite, reusing
    trustworthy exact-head ticket evidence and adding integration-level checks.
-3. Push the current train head.
-4. Create or update one final train pull request targeting the resolved base
+4. Push the current train head.
+5. Create or update one final train pull request targeting the resolved base
    branch and record its URL and exact head.
-5. Route one independent final-train review through
+6. Route one independent final-train review through
    the initial automated-review matrix. Derive one train-level classification
    from consolidated evidence and use the highest selected ticket
    initial-review setting as its floor. Do not combine a criticality row from
@@ -678,41 +768,42 @@ Finalize in this order:
    initial-review setting, the resulting floor, requested setting, actual
    setting, and routing conformance before accepting the review. A pre-PR
    branch review cannot substitute for this final pull-request review.
-6. Collect exact-head CI results and available Copilot, Codex, and human
+7. Collect exact-head CI results and available Copilot, Codex, and human
    comments into one deduplicated train finding ledger.
-7. Technically assess every Copilot suggestion. Never apply it automatically
+8. Technically assess every Copilot suggestion. Never apply it automatically
    and never ask the user to triage ordinary findings.
-8. Batch compatible accepted findings once. When ticket-specific context is
+9. Batch compatible accepted findings once. When ticket-specific context is
    material, request a compact targeted handoff; apply accepted fixes from a
    fresh remediation branch and fresh remediation thread based on the current train. Classify
    each remediation batch from its actual risk and complexity, route it through
    the implementation matrix, and use a dedicated final-train remediation
    worker for cross-ticket findings.
-9. Merge at most one remediation pull request into the train at a time. The
+10. Merge at most one remediation pull request into the train at a time. The
    final train pull request updates automatically with the train head. Apply
    any human pre-merge gate required by the remediation classification and
    approval mode.
-10. After every head update, invalidate only evidence affected by the changed
+11. After every head update, invalidate only evidence affected by the changed
     risk surface, rerun affected and required checks, and route targeted
     verification through the follow-up-review matrix and complete-review
     ceiling. Expand to a full review only for the material invalidation
     triggers in [efficiency-policy.md](efficiency-policy.md). Stop after two
     final remediation cycles for root-cause reassessment.
-11. Declare the final pull request ready only when its recorded head matches
-    the train, mandatory exact-head checks pass, automated review has no
-    blocking finding, and every available comment has a disposition.
-12. If Copilot is not configured, unavailable, or does not respond within the
+12. Declare the final pull request ready only when its recorded head matches
+    the train, integrated functional and environment verification covers that
+    head, mandatory exact-head checks pass, automated review has no blocking
+    finding, and every available comment has a disposition.
+13. If Copilot is not configured, unavailable, or does not respond within the
     bounded monitoring window, report that status. Do not block indefinitely
     unless repository policy or the user made Copilot review mandatory.
-13. Build the concise manual validation plan and code/application attention
+14. Build the concise manual validation plan and code/application attention
     summaries required by [report-template.md](report-template.md).
-14. Capture final train validation, review, remediation, follow-up review, and
+15. Capture final train validation, review, remediation, follow-up review, and
     final pre-report orchestration usage separately when counters permit it.
-15. Produce the completion or checkpoint report for every requested ticket,
+16. Produce the completion or checkpoint report for every requested ticket,
     including blocked, failed, cancelled, and completed work.
-16. Wait for the user.
+17. Wait for the user.
 
-Before step 16, run the completion checklist from
+Before step 17, run the completion checklist from
 [report-template.md](report-template.md). Do not declare the train closed when
 token accounting, task inventory, exact-head CI/Copilot status, routing
 conformance, manual validation, attention points, or any requested ticket

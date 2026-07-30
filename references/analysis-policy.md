@@ -58,6 +58,20 @@ Require every analysis to separate:
 - intrinsic criticality and complexity evidence;
 - risks that do not depend on another selected ticket.
 
+### Verification contract
+
+Return the complete contract from
+[verification-policy.md](verification-policy.md), mapping every acceptance
+criterion and material invariant to an actor, initial state, action, observable
+result, negative/boundary cases, automation layer, environment tier, baseline
+red expectation, and green oracle.
+
+Include state-transition, role/permission, error/recovery, concurrency,
+migration/existing-data, and environment matrices when applicable. Identify
+Supabase, Auth, RLS, SSR-cookie, redirect, storage, and hosted-project
+configuration surfaces explicitly. Do not leave an objectively automatable
+ordinary behavior to the user.
+
 ### Classification evidence
 
 Return the complete evidence standard from
@@ -136,6 +150,8 @@ After every selected analysis returns:
 8. Publish one consolidated digest per requested ticket and the implementation schedule in the main thread.
 9. Build the initial ticket and cumulative train size-budget assessment under
    [efficiency-policy.md](efficiency-policy.md).
+10. Verify that each ticket has a complete versioned verification contract,
+    declared independent test paths, and resolved environment requirements.
 
 Before requesting any human analysis approval, assert and report:
 
@@ -213,11 +229,13 @@ For `REFRESHED_MATERIAL`, update the original analysis, reclassify both dimensio
 For `INVALID`, return the ticket to its original analysis thread for a scoped reanalysis against the current train. Reuse stable findings, reclassify, and apply the human analysis matrix to the revised result. Do not require user authorization merely to perform this required revision; any applicable human approval applies to the resulting plan.
 
 After a valid reconciliation, materialize the compact implementation contract
-from [efficiency-policy.md](efficiency-policy.md). Do not hand the worker the
-complete analysis-thread history. For `HIGH` or `MAXIMUM` complexity, run the
-single bounded plan-contract validation before implementation. A failed
-contract check returns only the missing or contradictory fields to the
-original analyzer; it never starts a second complete analysis.
+from [efficiency-policy.md](efficiency-policy.md) and the verification contract
+from [verification-policy.md](verification-policy.md). Do not hand either
+worker the complete analysis-thread history. For `HIGH` or `MAXIMUM`
+complexity, run the single bounded plan-contract validation before launching
+the execution pair. A failed contract check returns only the missing or
+contradictory fields to the original analyzer; it never starts a second
+complete analysis.
 
 ## Analysis revision
 

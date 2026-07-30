@@ -51,6 +51,8 @@ dependency, and residual risk is represented in the compact digest.
 - Liveness reporting: transitions only | user override
 - Proportionality profile revision:
 - Cost-control policy: strict-quality-preserving
+- Verification policy: parallel-independent-red-green
+- Required environment tiers:
 - Complete review limit per stable scope: 1
 - Remediation cycle limit: 2
 - Train size checkpoints: 60 material files / 2 schema or data transformations / 4 structural domains
@@ -62,6 +64,7 @@ dependency, and residual risk is represented in the compact digest.
 - Token usage reporting: exact-if-available
 - Maximum active analyses: 5
 - Maximum active implementations: 2
+- Maximum active implementation/test pairs: 2
 - Maximum integrated tickets: 5
 - Automated tests: mandatory
 - Independent automated review: mandatory
@@ -111,6 +114,7 @@ ticket reports.
 - User action required: none | <exact decision>
 - Durable state updated at:
 - Cost anomaly: none | <reason and checkpoint>
+- Functional verification gates: <ticket and status>
 ```
 
 Report `User action required: none` explicitly when the train should continue
@@ -160,6 +164,8 @@ Do not include an implementation plan in the triage report.
 - Independent implementations ready:
 - Cumulative train size: <files, transformations, structural domains>
 - Size checkpoint: clear | ticket checkpoint | train checkpoint | epic decomposition required
+- Verification contracts complete:
+- Supabase/Auth environment requirements:
 ```
 
 ## Token usage block
@@ -190,6 +196,7 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Source:
 - Analysis base commit:
 - Analysis revision:
+- Verification contract revision:
 - Proportionality profile revision:
 - Applicability: confirmed | partial | obsolete | blocked
 - Intrinsic criticality:
@@ -228,6 +235,13 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Likely files and symbols:
 - Data or migration impact:
 - Required tests:
+- Acceptance-criterion coverage map:
+- State, role, negative, and recovery scenarios:
+- Baseline-red expectations:
+- Integrated-green oracles:
+- Required environment tiers:
+- Supabase/Auth/RLS verification scope:
+- Manual-only scenarios and automation justifications:
 - Declared dependencies:
 - Discovered dependencies:
 - Collision domain:
@@ -320,6 +334,7 @@ Use this compact template:
 - Security / access / privacy: **<impact label>** — <explicit summary>
 - Operations / configuration / deployment: **<impact label>** — <explicit summary>
 - Dependencies and scheduling: <predecessors, collisions, parallel/sequential decision>
+- Verification: <independent test scope, red/green oracle, environment tiers, Supabase/Auth applicability>
 - Decisions submitted for approval:
   - <decision and recommended option>
 - Minimum required correction:
@@ -370,6 +385,8 @@ above.
 ## <ticket-id> — Implementation
 
 - Pull request:
+- Independent acceptance-test branch and commit:
+- Test pull request or durable integration reference:
 - Final effective intrinsic criticality:
 - Final effective complexity:
 - Pre-implementation reconciliation:
@@ -377,6 +394,14 @@ above.
 - Plan-contract validation: not required | passed | failed
 - Internal implementation slices:
 - Worker self-review: passed | findings fixed | blocked
+- Verification contract revision:
+- Independent test authorship: complete | blocked
+- Acceptance coverage: complete | incomplete
+- Baseline red: demonstrated | invalid | not applicable
+- Integrated green exact head:
+- Environment parity: passed | not applicable | blocked
+- Supabase/Auth/RLS gate: passed | not applicable | blocked
+- Automatable scenarios left to user: 0 | <blocking list>
 - Conditional variant selected:
 - Analysis changes before implementation:
 - Renewed human analysis gate:
@@ -397,7 +422,13 @@ above.
 
 - Automated tests:
 - Project checks:
+- Red evidence and base commit:
+- Green evidence and exact head:
+- Environment fingerprint:
+- Supabase/Auth test roles and boundary:
+- Regression tests added:
 - Human tests, if required:
+- Why each human test could not be automated:
 
 ### Review
 
@@ -436,6 +467,11 @@ above.
 | Analysis reconciliation | | | | | | |
 | Plan-contract validation | | | | | | |
 | Implementation | | | | | | |
+| Acceptance-test authoring | | | | | | |
+| Baseline-red validation | | | | | | |
+| Integrated-green validation | | | | | | |
+| Environment-parity validation | | | | | | |
+| Test remediation | | | | | | |
 | Initial review | | | | | | |
 | Codex remediation | | | | | | |
 | Copilot remediation | | | | | | |
@@ -464,6 +500,13 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Routing conformance: conformant | documented-fallback | nonconformant
 - Reasoning authorization or fallback:
 - Status: clean | changes requested | blocked
+- Functional-readiness gate: passed | invalid
+- Acceptance coverage verified:
+- Baseline-red evidence verified:
+- Exact-head green evidence verified:
+- Environment and Supabase/Auth evidence verified:
+- Privileged boundary bypass absent:
+- Manual-only justifications valid:
 - Blocking findings:
 - Non-blocking findings:
 - Copilot and CI comments processed:
@@ -525,6 +568,10 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Max/ultra authorizations and fallbacks:
 - Token measurement coverage: complete | partial | unavailable
 - Full verification results:
+- Independent acceptance coverage:
+- Integrated red/green evidence:
+- Environment-parity results:
+- Supabase/Auth/RLS results:
 - Base-to-train review result:
 - Architecture changes:
 - Data and migration changes:
@@ -542,6 +589,7 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Exact-head CI collected | complete \| pending \| unavailable | | |
 | Copilot/comments dispositioned | complete \| pending \| unavailable \| not configured | | |
 | Token accounting reported | complete \| partial \| unavailable | | |
+| Functional verification summarized | complete \| incomplete | | |
 | Manual validation summarized | complete \| incomplete | | |
 | Code/application attention points summarized | complete \| incomplete | | |
 
@@ -555,6 +603,10 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Priority | Status | Area or journey | Preconditions, role, and data | Concise action | Expected result | Related tickets |
 |---|---|---|---|---|---|---|
 | required before base merge \| recommended \| optional | outstanding \| passed \| failed \| not applicable | | | | | |
+
+- For every outstanding manual test, state why automation was technically
+  infeasible and what automated evidence already exists. An ordinary
+  automatable scenario means functional verification is incomplete.
 
 ### Code attention points
 
@@ -570,7 +622,7 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 
 ### Token usage by ticket
 
-| Ticket | Initial analysis | Consolidation | Reconciliation | Contract validation | Implementation | Initial review | Remediation | Follow-up review | Ticket total | Coverage |
+| Ticket | Analysis | Contract validation | Implementation | Test authoring | Red/green/environment | Initial review | Remediation | Follow-up review | Ticket total | Coverage |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | <ticket-id> | | | | | | | | | | |
 
