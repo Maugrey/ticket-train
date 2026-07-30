@@ -1,0 +1,430 @@
+# Model and Reasoning Routing
+
+## Contents
+
+- Routing stages
+- Orchestrator startup preflight
+- Fast triage
+- Strict routing enforcement
+- Analysis routing
+- Implementation routing
+- Initial automated review routing
+- Final train review routing
+- Follow-up review routing
+- Max and ultra authorization
+- Unavailable settings
+
+## Routing stages
+
+Use intrinsic criticality and complexity directly. Do not derive a combined control level.
+
+- Route the full analysis from provisional triage values.
+- Route implementation from the values confirmed by the full analysis.
+- Route initial automated review from the higher per-dimension values between
+  the analysis and the actual implementation diff.
+- Route focused follow-up review from current effective intrinsic criticality
+  and remediation-verification complexity.
+
+Use explicit per-thread model and reasoning overrides for every routed phase.
+Never use the parent thread's model or reasoning effort as an implicit routed
+setting. Record the matrix inputs, selected cell, requested model and effort,
+actual model and effort, and any documented fallback.
+
+Apply the train's proportionality profile to the classification inputs. The
+profile changes evidence and scope, not the matrix cells. Never use a more
+expensive setting than the selected cell merely because the parent thread or
+an old remediation thread already uses it.
+
+Legend:
+
+- `Terra/M`: `gpt-5.6-terra` with `medium`
+- `Terra/H`: `gpt-5.6-terra` with `high`
+- `Sol/H`: `gpt-5.6-sol` with `high`
+- `Sol/XH`: `gpt-5.6-sol` with `xhigh`
+- `Sol/Max`: `gpt-5.6-sol` with `max`
+- `Sol/Ultra`: `gpt-5.6-sol` with `ultra`
+
+For follow-up-review ceiling comparisons only, use this strict capability
+order:
+
+```text
+Terra/M < Terra/H < Sol/H < Sol/XH < Sol/Max < Sol/Ultra
+```
+
+## Orchestrator startup preflight
+
+Recommend the main-conversation setting from orchestration complexity, not
+from the highest ticket criticality or the number of child phases routed to
+`XH`.
+
+Default to `Terra/H` when the train:
+
+- targets one repository, one base branch, and one train branch;
+- stays within the normal five-ticket checkpoint;
+- has a resolved, coherent source and selection;
+- can delegate technical analysis, implementation, and review to routed
+  threads;
+- can maintain compact durable state and use normal thread-management tools;
+- has no source-visible evidence of a dense or contradictory dependency graph.
+
+Recommend `Sol/H` when at least one material orchestration condition applies:
+
+- the run resumes from missing, stale, or inconsistent state and must reconcile
+  several branches, pull requests, thread results, or gate decisions;
+- the authorized scope spans several repositories, base branches, train
+  branches, trackers, deployment targets, or other systems whose states must be
+  reconciled;
+- declared dependencies or shared central contracts make the source-visible
+  ticket graph dense, contradictory, or likely to require repeated scheduling
+  arbitration;
+- the user authorized an extended train beyond the normal five-ticket
+  checkpoint and the orchestrator must coordinate several batches;
+- compact durable state or normal thread controls are unavailable, forcing the
+  main conversation to retain and reconcile materially more context;
+- technical arbitration cannot be delegated and must exceptionally occur in
+  the main conversation.
+
+Do not recommend `Sol/H` solely because tickets are `HIGH` or `CRITICAL`,
+because human gates are expected, or because child analyses and reviews use
+`Sol/XH`. Those concerns belong to the routed child phases.
+
+Do not recommend `XH` for routine orchestration. When one isolated dependency
+or architecture conflict needs deeper reasoning, keep the orchestrator at
+`High` and dispatch a scoped `Sol/XH` arbitration thread.
+
+After resolving the source, selection, run mode, and repository configuration,
+but before triage or any child dispatch:
+
+1. Determine the recommended orchestrator setting from the criteria above.
+2. Read the current conversation's actual model and reasoning effort when
+   observable. Never infer it from the user's usual default.
+3. Classify the current setting:
+   - `recommended`: exact match;
+   - `acceptable-overprovisioned`: at least as capable but more expensive than
+     recommended;
+   - `underprovisioned`: below the recommended model or reasoning requirement;
+   - `unknown`: actual values are not observable.
+4. Publish the startup preflight from
+   [report-template.md](report-template.md).
+5. Ask the user whether to continue with the current conversation setting.
+
+This confirmation is mandatory and is not bypassed by `auto-analysis`,
+`auto-merge`, or `full-auto`. An initial read-only orchestrator usage baseline
+may be captured so the preflight cost remains measurable. Do not launch
+triage, create ticket threads, or mutate repository state before confirmation.
+
+If the user declines, stop cleanly and state the recommended setting for a new
+conversation. The skill cannot change the model or reasoning effort of the
+already-running main conversation.
+
+If the current setting is `unknown`, ask the user to verify the composer
+setting or explicitly confirm continuation with an unknown setting. If the run
+configuration later changes enough to alter the recommendation, publish a new
+preflight and request confirmation again.
+
+Classify common current settings deterministically:
+
+- exact recommended combination: `recommended`;
+- `Sol/H` or a higher Sol effort when `Terra/H` is recommended:
+  `acceptable-overprovisioned`;
+- a higher Sol effort when `Sol/H` is recommended:
+  `acceptable-overprovisioned`;
+- any effort below `High`, or `Terra/H` when `Sol/H` is recommended:
+  `underprovisioned`;
+- any combination whose relative capability cannot be established:
+  `unknown`.
+
+## Fast triage
+
+Perform one short batch routing pass in a dedicated read-only thread at
+`Terra/H` before launching the full analysis threads. Triage is not a technical
+analysis. Pass explicit `gpt-5.6-terra` and `high` overrides when creating the
+thread, even when the parent conversation uses another model or effort.
+
+Use only:
+
+- ticket title, description, acceptance criteria, labels, and metadata;
+- explicitly named domains, modules, files, contracts, or migrations;
+- project context already held by the orchestrator;
+- at most a few targeted repository searches needed to identify the named surface.
+
+Do not:
+
+- trace full call graphs or dependency chains;
+- read modules exhaustively;
+- design a solution or propose an implementation plan;
+- enumerate detailed files, symbols, or tests;
+- verify feasibility;
+- run tests.
+
+Return only:
+
+```text
+provisional_intrinsic_criticality
+provisional_complexity
+confidence
+one_or_two_reasons_per_dimension
+declared_or_suspected_dependencies
+suspected_collision_domains
+analysis_model
+analysis_reasoning_effort
+```
+
+Choose the higher plausible value when evidence is incomplete. This conservative routing prevents a second full analysis. The full analyzer confirms or corrects the values as part of its one analysis.
+
+`Terra/H` is appropriate only because this pass is bounded to ticket-visible
+classification and routing. If a ticket contains an ambiguous or plausible
+signal involving authorization, privacy, payments, irreversible data,
+concurrency, migrations, shared contracts, deployment safety, or a fundamental
+invariant, classify to the higher plausible criticality or complexity rather
+than investigating deeply during triage.
+
+If triage confidence is low and the uncertainty could cross a routing boundary,
+choose the more demanding plausible matrix cell. Do not spend additional
+triage tokens trying to replace the full analysis.
+
+## Strict routing enforcement
+
+Before dispatching any analysis, implementation, initial review, or follow-up
+review:
+
+1. Record the classification checkpoint used by that phase.
+2. Resolve the exact matrix row and column without judgment or interpolation.
+3. Record the exact selected model and reasoning effort.
+4. Verify that the thread tool supports both requested values.
+5. Pass both values explicitly when creating the thread.
+6. For a reused thread, verify that its current model and effort exactly match
+   the selected cell before sending the next phase.
+
+Require every routed thread to report its actual model and reasoning effort.
+Record one routing status:
+
+- `conformant`: actual values exactly match the selected cell;
+- `documented-fallback`: the exact setting was unavailable and the fallback
+  follows this reference;
+- `nonconformant`: any other mismatch.
+
+A stronger or more expensive model or effort is not automatically conformant.
+For example, `Sol/XH` is nonconformant when the selected cell is `Sol/H`.
+
+Do not continue to the next phase after an unexplained `nonconformant` result.
+Report the mismatch and obtain an explicit user decision instead of silently
+rerunning an expensive phase or accepting the deviation.
+
+Do not reuse a thread merely to preserve conversational continuity when its
+setting differs from the routed setting. Create a new phase thread and provide
+a compact handoff containing the ticket, approved analysis revision, exact
+diff or commit range, unresolved findings, tests, and durable references.
+
+## Analysis routing
+
+Always use Sol for the full technical analysis.
+
+| Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
+|---|---:|---:|---:|---:|
+| `LOW` | Sol/H | Sol/H | Sol/XH | Sol/XH |
+| `NORMAL` | Sol/H | Sol/H | Sol/XH | Sol/XH |
+| `HIGH` | Sol/H | Sol/H | Sol/XH | Sol/XH |
+| `CRITICAL` | Sol/XH | Sol/XH | Sol/XH | Sol/Max |
+
+Let complexity drive the normal reasoning depth: use `H` for bounded low or
+medium complexity and `XH` for high or maximum complexity. Intrinsic
+criticality `CRITICAL` imposes an `XH` floor. Reserve `Max` for the combined
+`CRITICAL` and `MAXIMUM` case. Do not promote `HIGH` criticality alone when
+the failure remains contained, detectable, recoverable, and the analysis is
+technically bounded.
+
+Create only one full analysis thread per ticket. Do not launch a second analyzer merely because the confirmed classification differs from triage.
+
+If the confirmed values would have selected a higher analysis effort:
+
+- do not restart or duplicate the analysis;
+- finish the single analysis at its original routed setting;
+- report the routing mismatch and use the confirmed values for every downstream gate and routing decision;
+- apply any human analysis validation required by the confirmed values.
+
+Route dependency consolidation amendments and pre-implementation reconciliation back to the original analysis thread at its existing setting. Do not create a second analyzer for a targeted revision.
+
+When reconciliation marks an analysis `INVALID`, perform the scoped revision under [analysis-policy.md](analysis-policy.md). If the confirmed classification now requires a higher effort than the original thread can use, apply the routing matrix and the separate `max` or `ultra` authorization rule. Create a replacement thread only when the original thread cannot perform the required revision, then report the substitution and preserve all stable findings.
+
+## Implementation routing
+
+| Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
+|---|---:|---:|---:|---:|
+| `LOW` | Terra/M | Terra/H | Sol/H | Sol/XH |
+| `NORMAL` | Terra/H | Sol/H | Sol/H | Sol/XH |
+| `HIGH` | Sol/H | Sol/H | Sol/H | Sol/XH |
+| `CRITICAL` | Sol/H | Sol/H | Sol/XH | Sol/XH |
+
+Treat the reconciled analysis as the implementation contract. Use `H` when
+that contract makes the work bounded, including `HIGH/HIGH` and
+`CRITICAL/LOW` or `CRITICAL/MEDIUM`; independent review provides the next
+risk-sensitive pass. Keep `XH` for maximum complexity and for work that is
+both `CRITICAL` and at least `HIGH` complexity.
+
+An implementation worker must not improvise through a material gap in the
+approved analysis. If it discovers a new architecture decision, invariant,
+scope expansion, weak test oracle, or implementation uncertainty that could
+change either classification, stop before making the material change. Route
+the evidence to analysis reconciliation, reclassify, apply any renewed human
+gate, and dispatch the resulting implementation setting explicitly.
+
+For the bounded `HIGH`/`MAXIMUM` plan-contract validation required by
+[efficiency-policy.md](efficiency-policy.md), use a fresh compact thread no
+higher than the selected implementation setting and cap it at `Sol/H`. It is a
+completeness check, not a second technical analysis. Return broader uncertainty
+to the analyzer instead of raising this phase's effort.
+
+## Initial automated review routing
+
+| Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
+|---|---:|---:|---:|---:|
+| `LOW` | Terra/H | Sol/H | Sol/H | Sol/XH |
+| `NORMAL` | Sol/H | Sol/H | Sol/H | Sol/XH |
+| `HIGH` | Sol/H | Sol/XH | Sol/XH | Sol/XH |
+| `CRITICAL` | Sol/XH | Sol/XH | Sol/XH | Sol/Max |
+
+Use the higher per-dimension values between the approved analysis and the
+actual implementation diff. Initial review must independently verify the
+complete ticket diff, acceptance criteria, project rules, test evidence, and
+material risk surfaces.
+
+Use `H` for bounded review surfaces whose expected behavior and test oracle
+are clear. Use `XH` when criticality or complexity requires broader
+cross-checking, including every `CRITICAL` ticket and every `MAXIMUM`
+complexity review. Reserve `Max` for the combined `CRITICAL` and `MAXIMUM`
+case. Do not use `Ultra` in the standard initial-review matrix.
+
+## Final train review routing
+
+Route the complete final pull-request review through the initial automated
+review matrix after the final pull request exists.
+
+`Complete` here means complete coverage of integration risk, cumulative scope,
+and previously unreviewed code at the exact final head. Reuse trustworthy
+exact-commit ticket reviews; do not spend another full pass re-reviewing every
+unchanged ticket file.
+
+Before dispatch:
+
+1. Derive a train-level intrinsic criticality and complexity from consolidated
+   ticket evidence and evidenced cross-ticket interactions.
+2. Resolve that classification through the initial-review matrix.
+3. List the selected initial-review setting for every integrated ticket.
+4. Use the highest of those ticket settings as a strict floor under the
+   capability order in this reference.
+5. Select the higher of the train matrix result and that floor.
+6. Record the classification, matrix cell, floor, requested model and effort,
+   and authorization or fallback before creating the reviewer.
+7. Verify the reviewer's actual model and effort after dispatch.
+
+Do not combine a criticality row from one ticket with a complexity column from
+another merely to manufacture a higher matrix cell. Do not route below the
+recorded floor. Treat any unexplained mismatch, including a cheaper or more
+expensive setting, as `nonconformant` and block final readiness until the
+required review is completed or the user explicitly resolves an allowed
+fallback.
+
+## Follow-up review routing
+
+Route a focused follow-up review from:
+
+- the current effective intrinsic criticality after considering the
+  remediation diff and unresolved-finding risk; and
+- the complexity of verifying the remediation, not the original ticket's
+  implementation complexity.
+
+| Effective intrinsic criticality ↓ / Follow-up verification complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
+|---|---:|---:|---:|---:|
+| `LOW` | Terra/H | Sol/H | Sol/H | Sol/XH |
+| `NORMAL` | Sol/H | Sol/H | Sol/H | Sol/XH |
+| `HIGH` | Sol/H | Sol/H | Sol/XH | Sol/XH |
+| `CRITICAL` | Sol/H | Sol/XH | Sol/XH | Sol/Max |
+
+Classify follow-up verification complexity as:
+
+- `LOW`: one or a few precisely identified findings, a narrow remediation
+  diff, a direct regression test, and no new invariant or decision;
+- `MEDIUM`: several related findings or several files or layers, with a clear
+  expected result and verification method, and no material redesign;
+- `HIGH`: a cross-module fix, concurrency, migration, access-control or
+  data-integrity interaction, a broad regression surface, or an incomplete or
+  indirect test oracle;
+- `MAXIMUM`: a multi-system change, weak verification oracle, broad redesign,
+  recovery-sensitive behavior, or verification that requires reconstructing
+  the complete technical reasoning.
+
+Use this matrix only for a scoped remediation whose approved analysis remains
+valid. Reassess both intrinsic criticality and follow-up verification
+complexity from the actual remediation diff and unresolved findings before
+dispatch.
+
+Apply a non-bypassable focused-review ceiling after resolving the matrix cell:
+
+1. Find the latest complete ticket-diff review with a `conformant` or
+   `documented-fallback` routing status.
+2. Use its actual model and effort as the ceiling. Never let an unexplained
+   overprovisioned or otherwise `nonconformant` execution raise the ceiling.
+3. Compare the follow-up matrix result with the ceiling using the strict order
+   above.
+4. If the result is equal or lower, dispatch the focused follow-up review at
+   the exact matrix-selected setting.
+5. If the result is higher, do not cap it and do not dispatch a focused
+   follow-up review. Reconcile the analysis as needed, reassess intrinsic
+   criticality and implementation complexity from the current complete diff,
+   and route a complete review through the initial automated-review matrix.
+
+If no trustworthy complete-review baseline exists, do not run a focused
+follow-up review. Run a complete initial review instead. A newly completed
+`conformant` or `documented-fallback` full review becomes the baseline for
+later remediation cycles.
+
+Do not use a focused follow-up review when remediation materially changes
+architecture or ownership, a critical schema/data/recovery strategy,
+functional scope or acceptance behavior, a public/shared contract with new
+consumers, security/access/privacy boundaries, or introduces an unrelated
+material risk surface. Reconcile
+the analysis, reassess the ticket's intrinsic criticality and implementation
+complexity, and run a complete initial review through the initial automated
+review matrix instead.
+
+A train-base refresh alone is not a reason for a complete review. Use the
+follow-up matrix for a targeted integration-impact review of changed contracts,
+collision domains, and affected tests unless one of the material triggers
+above applies.
+
+Treat `MAXIMUM` follow-up verification complexity as exceptional. Confirm
+that the work still qualifies as a focused follow-up before routing it;
+otherwise return to complete initial review. Do not use `Ultra` in the
+standard follow-up-review matrix.
+
+## Max and ultra authorization
+
+Set the default reasoning cap to `xhigh`.
+
+Before using `max` or `ultra`, obtain explicit user authorization. Approval modes such as `full-auto` do not grant this authorization.
+
+After triage, group predictable requests per ticket when possible:
+
+```text
+Ticket <id> routes to Sol/Max for <analysis, initial review, or follow-up
+review> because its applicable classification is CRITICAL/MAXIMUM. Authorize
+reasoning above xhigh for this ticket stage?
+```
+
+Record the authorized scope: stage, ticket, selected ticket set, or whole run. Never infer a broader scope.
+
+If authorization is denied, use `Sol/XH`, continue under the selected human-validation mode, and report the capped execution. Do not block solely because higher reasoning was declined.
+
+## Unavailable settings
+
+Do not silently substitute a model or effort.
+
+- If Terra is unavailable, use an available Sol model at the same effort and report the substitution.
+- If Sol is unavailable, use the strongest available coding model within the authorized cap and report the substitution.
+- If `max` or `ultra` is authorized but unavailable, use `Sol/XH` and report the fallback.
+- If a tool cannot set per-thread model or effort, do not launch the routed
+  phase in an inherited parent setting. Pause that phase and ask the user
+  whether to use a documented available fallback.
+
+For a human-gated ticket, include any routing fallback in the material presented for approval.

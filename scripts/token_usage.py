@@ -1,0 +1,734 @@
+#!/usr/bin/env python3
+"""Capture and aggregate token usage for known Codex thread IDs."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA_VERSION = 1
+USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{5,127}$")
+PHASE_ATTEMPT_PATTERN = re.compile(r"^(?P<family>.+):(?P<attempt>[0-9]+)$")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def empty_usage() -> dict[str, int]:
+    return {field: 0 for field in USAGE_FIELDS}
+
+
+def normalize_usage(raw: Any) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    usage: dict[str, int] = {}
+    for field in USAGE_FIELDS:
+        value = raw.get(field, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        usage[field] = value
+    return usage
+
+
+def parse_thread_spec(spec: str) -> tuple[str, str]:
+    thread_id, separator, label = spec.partition("=")
+    if not THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise ValueError(f"Invalid thread ID: {thread_id!r}")
+    return thread_id, label if separator and label else thread_id
+
+
+def resolve_codex_home(explicit: Path | None) -> Path:
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".codex").resolve()
+
+
+def candidate_session_files(codex_home: Path, thread_id: str) -> list[Path]:
+    candidates: list[Path] = []
+    for dirname in ("sessions", "archived_sessions"):
+        root = codex_home / dirname
+        if root.is_dir():
+            candidates.extend(root.rglob(f"*{thread_id}*.jsonl"))
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def read_session_usage_bounds(
+    path: Path, expected_thread_id: str
+) -> tuple[dict[str, int], dict[str, int]] | None:
+    session_id: str | None = None
+    first_usage: dict[str, int] | None = None
+    latest_usage: dict[str, int] | None = None
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    # A concurrently written final line may be incomplete.
+                    continue
+
+                if event.get("type") == "session_meta":
+                    payload = event.get("payload")
+                    if isinstance(payload, dict):
+                        session_id = payload.get("id") or payload.get("session_id")
+
+                payload = event.get("payload")
+                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+                if not isinstance(info, dict):
+                    continue
+                normalized = normalize_usage(info.get("total_token_usage"))
+                if normalized is not None:
+                    if first_usage is None:
+                        first_usage = normalized
+                    latest_usage = normalized
+    except OSError:
+        return None
+
+    if session_id != expected_thread_id or first_usage is None or latest_usage is None:
+        return None
+    return first_usage, latest_usage
+
+
+def read_session_usage(path: Path, expected_thread_id: str) -> dict[str, int] | None:
+    bounds = read_session_usage_bounds(path, expected_thread_id)
+    return bounds[1] if bounds is not None else None
+
+
+def read_session_diagnostics(path: Path) -> dict[str, int]:
+    diagnostics = {
+        "token_counter_events": 0,
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "context_compactions": 0,
+    }
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_type = str(event.get("type") or "")
+                payload = event.get("payload")
+                payload_type = str(payload.get("type") or "") if isinstance(payload, dict) else ""
+                combined_type = f"{event_type}/{payload_type}".lower()
+                if event_type == "event_msg" and payload_type == "token_count":
+                    diagnostics["token_counter_events"] += 1
+                if event_type == "event_msg" and payload_type == "agent_message":
+                    diagnostics["assistant_messages"] += 1
+                if event_type == "response_item" and payload_type in {
+                    "custom_tool_call",
+                    "function_call",
+                }:
+                    diagnostics["tool_calls"] += 1
+                if "compact" in combined_type:
+                    diagnostics["context_compactions"] += 1
+    except OSError:
+        return diagnostics
+    return diagnostics
+
+
+def capture_thread(codex_home: Path, thread_id: str, label: str) -> dict[str, Any]:
+    candidates = candidate_session_files(codex_home, thread_id)
+    if not candidates:
+        return {
+            "thread_id": thread_id,
+            "label": label,
+            "status": "unavailable",
+            "reason": "session-not-found",
+        }
+
+    for path in candidates:
+        usage = read_session_usage(path, thread_id)
+        if usage is not None:
+            return {
+                "thread_id": thread_id,
+                "label": label,
+                "status": "available",
+                "usage": usage,
+            }
+
+    return {
+        "thread_id": thread_id,
+        "label": label,
+        "status": "unavailable",
+        "reason": "token-count-not-found",
+    }
+
+
+def write_document(document: dict[str, Any], output: Path | None) -> None:
+    rendered = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if output is None:
+        sys.stdout.write(rendered)
+        return
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(rendered, encoding="utf-8")
+
+
+def load_document(path: Path) -> dict[str, Any]:
+    with path.expanduser().resolve().open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict) or document.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"Unsupported usage document: {path}")
+    return document
+
+
+def sum_usage(items: list[dict[str, int]]) -> dict[str, int]:
+    result = empty_usage()
+    for usage in items:
+        for field in USAGE_FIELDS:
+            result[field] += usage[field]
+    return result
+
+
+def subtract_usage(final: dict[str, int], baseline: dict[str, int]) -> dict[str, int] | None:
+    delta = {field: final[field] - baseline[field] for field in USAGE_FIELDS}
+    return None if any(value < 0 for value in delta.values()) else delta
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    with path.expanduser().resolve().open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict):
+        raise ValueError("Manifest must be a JSON object")
+    return document
+
+
+def collect_manifest_session_records(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect session references without inspecting prompts or transcripts."""
+
+    records: list[dict[str, Any]] = []
+    seen_objects: set[tuple[str, str, str]] = set()
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            thread_id = value.get("thread_id") or value.get("threadId")
+            if isinstance(thread_id, str) and THREAD_ID_PATTERN.fullmatch(thread_id):
+                phase_key = str(value.get("phase_key") or value.get("phaseKey") or "")
+                label = str(
+                    value.get("label")
+                    or value.get("phase")
+                    or value.get("display_title")
+                    or phase_key
+                    or thread_id
+                )
+                key = (thread_id, phase_key, label)
+                if key not in seen_objects:
+                    seen_objects.add(key)
+                    records.append(
+                        {
+                            "thread_id": thread_id,
+                            "phase_key": phase_key or None,
+                            "label": label,
+                            "ticket_id": value.get("ticket_id") or value.get("ticketId"),
+                            "attempt": value.get("attempt") or value.get("launch_attempts"),
+                            "launch_state": value.get("launch_state"),
+                            "authoritative": value.get("authoritative"),
+                            "duplicate_of": value.get("duplicate_of"),
+                            "manifest_path": path,
+                        }
+                    )
+            for child_key, child in value.items():
+                visit(child, f"{path}.{child_key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(manifest, "manifest")
+    return records
+
+
+def ledger_session(
+    codex_home: Path, thread_id: str, metadata: list[dict[str, Any]]
+) -> dict[str, Any]:
+    candidates = candidate_session_files(codex_home, thread_id)
+    phase_keys = sorted(
+        {str(item["phase_key"]) for item in metadata if item.get("phase_key")}
+    )
+    labels = sorted({str(item["label"]) for item in metadata if item.get("label")})
+    duplicate_marked = any(item.get("duplicate_of") for item in metadata)
+
+    for path in candidates:
+        bounds = read_session_usage_bounds(path, thread_id)
+        if bounds is None:
+            continue
+        first_counter, final_counter = bounds
+        baseline = empty_usage()
+        delta = subtract_usage(final_counter, baseline)
+        return {
+            "thread_id": thread_id,
+            "labels": labels,
+            "phase_keys": phase_keys,
+            "status": "available",
+            "authoritative": not duplicate_marked,
+            "duplicate": duplicate_marked,
+            "baseline_mode": "zero-session-baseline",
+            "baseline_usage": baseline,
+            "first_observed_counter": first_counter,
+            "final_usage": final_counter,
+            "delta_usage": delta,
+            "diagnostics": read_session_diagnostics(path),
+            "session_file": str(path),
+        }
+
+    return {
+        "thread_id": thread_id,
+        "labels": labels,
+        "phase_keys": phase_keys,
+        "status": "unavailable",
+        "authoritative": not duplicate_marked,
+        "duplicate": duplicate_marked,
+        "reason": "session-or-token-count-not-found",
+    }
+
+
+def aggregate_status(available: int, unavailable: int) -> str:
+    if available == 0:
+        return "unavailable"
+    if unavailable:
+        return "partial"
+    return "complete"
+
+
+def capture_command(args: argparse.Namespace) -> None:
+    specs = list(args.thread or [])
+    if args.current:
+        current_id = os.environ.get("CODEX_THREAD_ID")
+        if not current_id:
+            raise ValueError("CODEX_THREAD_ID is unavailable")
+        specs.append(f"{current_id}=orchestrator")
+    if not specs:
+        raise ValueError("Provide at least one --thread or --current")
+
+    parsed: dict[str, str] = {}
+    for spec in specs:
+        thread_id, label = parse_thread_spec(spec)
+        if thread_id in parsed:
+            raise ValueError(f"Duplicate thread ID: {thread_id}")
+        parsed[thread_id] = label
+
+    codex_home = resolve_codex_home(args.codex_home)
+    threads = {
+        thread_id: capture_thread(codex_home, thread_id, label)
+        for thread_id, label in parsed.items()
+    }
+    write_document(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "capture",
+            "captured_at": now_iso(),
+            "threads": threads,
+        },
+        args.output,
+    )
+
+
+def diff_command(args: argparse.Namespace) -> None:
+    before = load_document(args.before)
+    after = load_document(args.after)
+    if before.get("kind") != "capture" or after.get("kind") != "capture":
+        raise ValueError("diff inputs must be capture documents")
+
+    before_threads = before.get("threads")
+    after_threads = after.get("threads")
+    if not isinstance(before_threads, dict) or not isinstance(after_threads, dict):
+        raise ValueError("Capture document is missing threads")
+
+    new_threads = set(args.new_thread or [])
+    for thread_id in new_threads:
+        if not THREAD_ID_PATTERN.fullmatch(thread_id):
+            raise ValueError(f"Invalid new thread ID: {thread_id!r}")
+
+    results: dict[str, Any] = {}
+    available_usage: list[dict[str, int]] = []
+    for thread_id in sorted(set(before_threads) | set(after_threads)):
+        before_record = before_threads.get(thread_id)
+        after_record = after_threads.get(thread_id)
+        label = thread_id
+        if isinstance(after_record, dict):
+            label = str(after_record.get("label") or label)
+        elif isinstance(before_record, dict):
+            label = str(before_record.get("label") or label)
+
+        if not isinstance(after_record, dict) or after_record.get("status") != "available":
+            results[thread_id] = {
+                "thread_id": thread_id,
+                "label": label,
+                "status": "unavailable",
+                "reason": "ending-counter-unavailable",
+            }
+            continue
+
+        after_usage = normalize_usage(after_record.get("usage"))
+        if after_usage is None:
+            results[thread_id] = {
+                "thread_id": thread_id,
+                "label": label,
+                "status": "unavailable",
+                "reason": "invalid-ending-counter",
+            }
+            continue
+
+        baseline_mode = "captured"
+        before_usage: dict[str, int] | None = None
+        if isinstance(before_record, dict) and before_record.get("status") == "available":
+            before_usage = normalize_usage(before_record.get("usage"))
+        elif thread_id in new_threads:
+            before_usage = empty_usage()
+            baseline_mode = "zero-new-thread"
+
+        if before_usage is None:
+            results[thread_id] = {
+                "thread_id": thread_id,
+                "label": label,
+                "status": "unavailable",
+                "reason": "baseline-unavailable",
+            }
+            continue
+
+        delta = {
+            field: after_usage[field] - before_usage[field]
+            for field in USAGE_FIELDS
+        }
+        if any(value < 0 for value in delta.values()):
+            results[thread_id] = {
+                "thread_id": thread_id,
+                "label": label,
+                "status": "unavailable",
+                "reason": "counter-decreased",
+            }
+            continue
+
+        results[thread_id] = {
+            "thread_id": thread_id,
+            "label": label,
+            "status": "available",
+            "baseline_mode": baseline_mode,
+            "usage": delta,
+        }
+        available_usage.append(delta)
+
+    unavailable_count = len(results) - len(available_usage)
+    write_document(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "delta",
+            "captured_at": now_iso(),
+            "threads": results,
+            "aggregate": {
+                "status": aggregate_status(len(available_usage), unavailable_count),
+                "usage": sum_usage(available_usage),
+                "available_threads": len(available_usage),
+                "unavailable_threads": unavailable_count,
+            },
+        },
+        args.output,
+    )
+
+
+def sum_command(args: argparse.Namespace) -> None:
+    measurements: list[dict[str, Any]] = []
+    available_usage: list[dict[str, int]] = []
+    unavailable = 0
+
+    for input_path in args.input:
+        document = load_document(input_path)
+        if document.get("kind") != "delta":
+            raise ValueError(f"sum input must be a delta document: {input_path}")
+        threads = document.get("threads")
+        if not isinstance(threads, dict):
+            raise ValueError(f"Delta document is missing threads: {input_path}")
+        for record in threads.values():
+            if not isinstance(record, dict):
+                continue
+            measurement = {
+                "source": input_path.name,
+                "thread_id": record.get("thread_id"),
+                "label": record.get("label"),
+                "status": record.get("status"),
+            }
+            usage = normalize_usage(record.get("usage"))
+            if record.get("status") == "available" and usage is not None:
+                measurement["usage"] = usage
+                available_usage.append(usage)
+            else:
+                measurement["reason"] = record.get("reason", "usage-unavailable")
+                unavailable += 1
+            measurements.append(measurement)
+
+    write_document(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "aggregate",
+            "captured_at": now_iso(),
+            "measurements": measurements,
+            "aggregate": {
+                "status": aggregate_status(len(available_usage), unavailable),
+                "usage": sum_usage(available_usage),
+                "available_measurements": len(available_usage),
+                "unavailable_measurements": unavailable,
+            },
+            "warning": "Only sum non-overlapping phase deltas.",
+        },
+        args.output,
+    )
+
+
+def ledger_command(args: argparse.Namespace) -> None:
+    manifest = load_manifest(args.manifest)
+    records = collect_manifest_session_records(manifest)
+
+    for spec in args.thread or []:
+        thread_id, label = parse_thread_spec(spec)
+        records.append(
+            {
+                "thread_id": thread_id,
+                "phase_key": None,
+                "label": label,
+                "ticket_id": None,
+                "attempt": None,
+                "launch_state": None,
+                "authoritative": None,
+                "duplicate_of": None,
+                "manifest_path": "command-line",
+            }
+        )
+
+    by_thread: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_thread.setdefault(str(record["thread_id"]), []).append(record)
+
+    phase_to_threads: dict[str, set[str]] = {}
+    for thread_id, metadata in by_thread.items():
+        for item in metadata:
+            phase_key = item.get("phase_key")
+            if phase_key:
+                phase_to_threads.setdefault(str(phase_key), set()).add(thread_id)
+
+    duplicate_phase_keys = {
+        phase_key: sorted(thread_ids)
+        for phase_key, thread_ids in phase_to_threads.items()
+        if len(thread_ids) > 1
+    }
+    phase_family_to_threads: dict[str, set[str]] = {}
+    phase_family_attempts: dict[str, list[tuple[int, str]]] = {}
+    for phase_key, thread_ids in phase_to_threads.items():
+        match = PHASE_ATTEMPT_PATTERN.fullmatch(phase_key)
+        family = match.group("family") if match else phase_key
+        attempt = int(match.group("attempt")) if match else 1
+        phase_family_to_threads.setdefault(family, set()).update(thread_ids)
+        for thread_id in thread_ids:
+            phase_family_attempts.setdefault(family, []).append((attempt, thread_id))
+    duplicate_phase_families = {
+        family: sorted(thread_ids)
+        for family, thread_ids in phase_family_to_threads.items()
+        if len(thread_ids) > 1
+    }
+    authoritative_by_family = {
+        family: max(attempts)[1]
+        for family, attempts in phase_family_attempts.items()
+        if family in duplicate_phase_families
+    }
+
+    codex_home = resolve_codex_home(args.codex_home)
+    sessions: dict[str, dict[str, Any]] = {}
+    available_usage: list[dict[str, int]] = []
+    for thread_id, metadata in sorted(by_thread.items()):
+        session = ledger_session(codex_home, thread_id, metadata)
+        if any(
+            phase_key in duplicate_phase_keys
+            for phase_key in session.get("phase_keys", [])
+        ):
+            session["duplicate"] = True
+            explicitly_authoritative = any(
+                item.get("authoritative") is True for item in metadata
+            )
+            session["authoritative"] = explicitly_authoritative
+        duplicate_families_for_session: list[str] = []
+        authoritative_families_for_session: list[str] = []
+        for phase_key in session.get("phase_keys", []):
+            match = PHASE_ATTEMPT_PATTERN.fullmatch(phase_key)
+            family = match.group("family") if match else phase_key
+            if family in duplicate_phase_families:
+                duplicate_families_for_session.append(family)
+                if authoritative_by_family.get(family) == thread_id:
+                    authoritative_families_for_session.append(family)
+        if duplicate_families_for_session:
+            session["duplicate"] = True
+            session["duplicate_phase_families"] = sorted(set(duplicate_families_for_session))
+            session["authoritative_for_duplicate_families"] = sorted(
+                set(authoritative_families_for_session)
+            )
+        sessions[thread_id] = session
+        usage = normalize_usage(session.get("delta_usage"))
+        if session.get("status") == "available" and usage is not None:
+            available_usage.append(usage)
+
+    control = manifest.get("control") if isinstance(manifest.get("control"), dict) else {}
+    phases = control.get("phases") if isinstance(control, dict) else []
+    unmeasured_phases: list[dict[str, Any]] = []
+    if isinstance(phases, list):
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            phase_key = phase.get("phase_key")
+            thread_id = phase.get("thread_id")
+            if not thread_id:
+                unmeasured_phases.append(
+                    {"phase_key": phase_key, "reason": "thread-id-missing"}
+                )
+                continue
+            session = sessions.get(str(thread_id))
+            if not session or session.get("status") != "available":
+                unmeasured_phases.append(
+                    {
+                        "phase_key": phase_key,
+                        "thread_id": thread_id,
+                        "reason": "session-usage-unavailable",
+                    }
+                )
+            elif phase.get("usage_captured") is not True:
+                unmeasured_phases.append(
+                    {
+                        "phase_key": phase_key,
+                        "thread_id": thread_id,
+                        "reason": "phase-window-not-captured",
+                    }
+                )
+
+    unavailable_sessions = sum(
+        1 for session in sessions.values() if session.get("status") != "available"
+    )
+    write_document(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "ledger",
+            "captured_at": now_iso(),
+            "manifest": str(args.manifest.expanduser().resolve()),
+            "sessions": sessions,
+            "duplicate_phase_keys": duplicate_phase_keys,
+            "duplicate_phase_families": duplicate_phase_families,
+            "unmeasured_phases": unmeasured_phases,
+            "aggregate": {
+                "status": aggregate_status(len(available_usage), unavailable_sessions + len(unmeasured_phases)),
+                "usage": sum_usage(available_usage),
+                "available_sessions": len(available_usage),
+                "unavailable_sessions": unavailable_sessions,
+                "unmeasured_phases": len(unmeasured_phases),
+                "duplicate_sessions": sum(
+                    1 for session in sessions.values() if session.get("duplicate")
+                ),
+                "diagnostics": {
+                    field: sum(
+                        int(session.get("diagnostics", {}).get(field, 0))
+                        for session in sessions.values()
+                    )
+                    for field in (
+                        "token_counter_events",
+                        "assistant_messages",
+                        "tool_calls",
+                        "context_compactions",
+                    )
+                },
+            },
+            "warning": (
+                "Session deltas use a zero session baseline. Reused-thread phase "
+                "windows still require explicit capture/diff measurements. Token "
+                "counts are not subscription-credit counters."
+            ),
+        },
+        args.output,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Capture and aggregate token usage for known Codex threads."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    capture = subparsers.add_parser("capture", help="Capture cumulative counters.")
+    capture.add_argument(
+        "--thread",
+        action="append",
+        help="Known thread ID, optionally THREAD_ID=LABEL. Repeat as needed.",
+    )
+    capture.add_argument(
+        "--current",
+        action="store_true",
+        help="Capture the thread named by CODEX_THREAD_ID.",
+    )
+    capture.add_argument("--codex-home", type=Path)
+    capture.add_argument("--output", type=Path)
+    capture.set_defaults(handler=capture_command)
+
+    diff = subparsers.add_parser("diff", help="Calculate usage between captures.")
+    diff.add_argument("--before", type=Path, required=True)
+    diff.add_argument("--after", type=Path, required=True)
+    diff.add_argument(
+        "--new-thread",
+        action="append",
+        help="Treat this known-new thread as having a zero baseline. Repeat as needed.",
+    )
+    diff.add_argument("--output", type=Path)
+    diff.set_defaults(handler=diff_command)
+
+    aggregate = subparsers.add_parser(
+        "sum", help="Sum non-overlapping delta documents."
+    )
+    aggregate.add_argument("--input", type=Path, action="append", required=True)
+    aggregate.add_argument("--output", type=Path)
+    aggregate.set_defaults(handler=sum_command)
+
+    ledger = subparsers.add_parser(
+        "ledger", help="Reconcile manifest sessions, duplicates, and phase coverage."
+    )
+    ledger.add_argument("--manifest", type=Path, required=True)
+    ledger.add_argument(
+        "--thread",
+        action="append",
+        help="Additional known session THREAD_ID=LABEL, including duplicate attempts.",
+    )
+    ledger.add_argument("--codex-home", type=Path)
+    ledger.add_argument("--output", type=Path)
+    ledger.set_defaults(handler=ledger_command)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        args.handler(args)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        parser.error(str(error))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

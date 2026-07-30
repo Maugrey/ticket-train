@@ -1,0 +1,7 @@
+interface:
+  display_name: "Ticket Train"
+  short_description: "Run bounded, cost-controlled ticket trains"
+  default_prompt: "Use $ticket-train with an explicit source and selection to run a proportional, visible, event-driven train with strict routing, bounded review cycles, durable recovery, and per-session token accounting."
+
+policy:
+  allow_implicit_invocation: false
