@@ -3,6 +3,7 @@
 ## Contents
 
 - Control-plane invariants
+- Canonical run and ownership
 - Phase identity and launch state
 - User-visible thread launch protocol
 - Child completion envelope
@@ -33,6 +34,18 @@ approval bypass mode does not grant this permission.
 Do not ask the user to advance an automatic transition. User input is required
 only for a configured human gate, a material decision, a permission boundary,
 or a reported blocker.
+
+## Canonical run and ownership
+
+Apply [run-continuity.md](run-continuity.md) before startup preflight and after
+every interruption. Use only
+`$CODEX_HOME/ticket-train/runs/<run-id>/manifest.json`. Discover the run by its
+repository/train/source/ticket fingerprint and claim its single orchestrator
+lease. A matching active run must be adopted, never duplicated.
+
+Do not dispatch while another unexpired owner exists. Resume in that
+conversation or obtain explicit user authorization for takeover. Persist the
+handoff so a superseded orchestrator cannot continue later.
 
 ## Phase identity and launch state
 
@@ -95,7 +108,8 @@ Apply this sequence for every phase:
 3. Persist every returned `clientThreadId` or `threadId` immediately.
 4. When a client ID is returned without a thread ID, mark `QUEUED`, reconcile
    until the real thread ID appears, then register its host ID and initial
-   cursor.
+   cursor. Verify the materialized task through a user-visible list/read
+   operation and persist `visibility_verified = true` with its timestamp.
 5. When a call returns an error, times out, loses its response handler, or has
    an otherwise ambiguous outcome, mark `LAUNCH_UNKNOWN`. Do not assume that
    no side effect occurred.
@@ -116,6 +130,10 @@ Treat duplicate phase keys or multiple live threads for one phase as an
 orchestration incident. Stop dispatching that phase, select one authoritative
 thread without discarding completed evidence, cancel or ignore the duplicate
 only when safe, and disclose the disposition.
+
+Never classify a task as blocked, failed, or inactive from silence, missing
+incremental commentary, or an unchanged cursor. Reconcile authoritative task
+state and the completion envelope first.
 
 ## Child completion envelope
 
@@ -144,6 +162,11 @@ through a targeted follow-up in the same visible thread instead of reconstructin
 the technical result from raw logs.
 
 ## Active supervision loop
+
+Resolve supervision before dispatch. Use foreground transition waits or create
+and verify a run-scoped background watcher. Persist the mode, watcher ID,
+`last_check_at`, and `next_check_at`. If neither is reliable, block before
+launching children. The user is never responsible for creating this watcher.
 
 After dispatch, keep the orchestrator turn active while any phase is queued,
 running, launch-unknown, or ready for an automatic successor.
@@ -178,6 +201,13 @@ product-supported wake-up mechanism while continuing to reconcile the same
 visible thread IDs. Do not create replacement workers. If reliable monitoring
 cannot be restored, persist the state and report a blocker.
 
+When the host requires the main turn to yield during long work, use
+`SUPERVISED_ACTIVE` only after the deterministic guard verifies the watcher.
+The watcher checks no less often than every five minutes and produces a
+manifest-derived liveness update at least every 15 minutes while active work
+remains. It wakes the model immediately for transitions, blockers, successor
+dispatch, or human decisions.
+
 ## Progress reporting
 
 Report immediately when a phase:
@@ -196,6 +226,11 @@ material transition or at an explicit user-requested interval. If the platform
 requires a heartbeat, keep it to one line derived from the durable snapshot.
 Do not dump raw logs or repeat unchanged detailed reports.
 
+While work is active, the default maximum user-visible silence is 15 minutes.
+This liveness message is a one-line deterministic status and must not reread
+child context. A pending human action is never unchanged noise: its reminder
+begins with `ACTION REQUIRED` and cannot be replaced by `DONT_NOTIFY`.
+
 Use the status template in [report-template.md](report-template.md).
 
 ## Durable state updates
@@ -209,6 +244,10 @@ Record globally:
 ```text
 manifest_updated_at
 run_status
+run_identity
+orchestrator_lease
+handoff_history
+supervision
 last_state_transition
 next_automatic_action
 active_phase_keys
@@ -224,6 +263,8 @@ session_usage_ledger
 duplicate_session_inventory
 unmeasured_phase_inventory
 cost_anomaly_status
+pending_human_action
+analysis_artifacts
 ```
 
 Do not leave the manifest at a stale high-level state while child work
@@ -238,6 +279,10 @@ python scripts/train_supervisor.py thread-event --state <manifest> --event-json 
 python scripts/train_supervisor.py github-snapshot --state <manifest> --repo <owner/name> --pr <number>
 python scripts/train_supervisor.py test-result --state <manifest> --phase-key <key> --command <command> --exit-code <code> --head <sha> --duration-seconds <seconds> --log <log-file>
 python scripts/train_supervisor.py verification-event --state <manifest> --ticket <ticket-id> --event-json <changed-verification-evidence-json>
+python scripts/train_supervisor.py supervision-event --state <manifest> --event-json <supervision-json>
+python scripts/train_supervisor.py human-gate --state <manifest> --event-json <complete-announced-gate-json>
+python scripts/train_supervisor.py clear-human-gate --state <manifest> --gate-id <id> --decision <decision> --next-action <action>
+python scripts/train_supervisor.py analysis-artifact --state <manifest> --event-json <analysis-evidence-json>
 python scripts/train_supervisor.py status --state <manifest>
 ```
 
@@ -254,6 +299,26 @@ Maintain a `control` object in the run manifest for the read-only guard script:
 
 ```json
 {
+  "run_identity": {
+    "fingerprint": "<sha256>",
+    "repository": "<canonical repository>",
+    "train_branch": "<branch>",
+    "source": "<source locator>",
+    "tickets": ["TICKET-1"]
+  },
+  "orchestrator_lease": {
+    "owner_thread_id": "<main thread>",
+    "heartbeat_at": "<ISO timestamp>",
+    "expires_at": "<ISO timestamp>"
+  },
+  "supervision": {
+    "mode": "FOREGROUND_WAIT | BACKGROUND_WATCHER",
+    "status": "ACTIVE",
+    "watcher_id": "<required in background mode>",
+    "last_check_at": "<ISO timestamp>",
+    "next_check_at": "<ISO timestamp>"
+  },
+  "pending_human_action": null,
   "execution_mode": "live",
   "integrated_ticket_count": 0,
   "control": {
@@ -287,6 +352,7 @@ Maintain a `control` object in the run manifest for the read-only guard script:
         "hidden_authorized": false,
         "client_thread_id": "<queued client ID or null>",
         "thread_id": "<materialized thread ID or null>",
+        "visibility_verified": true,
         "final_report_captured": false,
         "usage_captured": false
       }
@@ -345,13 +411,14 @@ quality; it triggers the root-cause checkpoint in
 Before ending an orchestrator turn, evaluate one terminal reason:
 
 ```text
+SUPERVISED_ACTIVE
 AWAITING_REQUIRED_USER_INPUT
 BLOCKED
 COMPLETED
 CHECKPOINT
 ```
 
-Do not send a final response when:
+Do not send an unsupervised final response when:
 
 - any phase is `LAUNCH_REQUESTED`, `LAUNCH_UNKNOWN`, `QUEUED`, or `RUNNING`;
 - an automatic successor is ready to dispatch;
@@ -360,8 +427,14 @@ Do not send a final response when:
 - the durable manifest is stale;
 - finalization requirements remain executable.
 
+`SUPERVISED_ACTIVE` is the narrow exception for queued/running phases. It
+requires verified supervision and no hidden human gate. It is not a completion
+state and must include the next check time in the user-visible status.
+
 For `AWAITING_REQUIRED_USER_INPUT`, identify the exact ticket, revision, gate,
-and decision needed. Continue unrelated safe work before yielding.
+and decision needed. Continue unrelated safe work before yielding. Publish the
+complete `ACTION REQUIRED` decision packet in the main conversation and
+persist it with `notification_status = ANNOUNCED` before running the guard.
 
 For `BLOCKED`, state the blocking condition, completed reconciliation attempts,
 preserved uncertain outcome, and precise resume action. A transient or
@@ -376,9 +449,10 @@ status message in place of the required report.
 
 ## Restart recovery
 
-On restart, context compaction, or user resumption:
+On restart, context compaction, new main conversation, or user resumption:
 
-1. Load the durable manifest before dispatching work.
+1. Discover the canonical manifest by fingerprint and claim or explicitly
+   take over its orchestrator lease before dispatching work.
 2. If it predates the `control` schema, migrate it by reconciling live threads,
    branches, pull requests, gates, and usage; never infer terminal values merely
    to make the guard pass.
@@ -397,6 +471,11 @@ On restart, context compaction, or user resumption:
 5. Recompute `next_automatic_action` from authoritative live state.
 6. Report a compact recovered status and continue automatically unless a human
    gate or blocker is active.
+
+Classify completed analysis artifacts as `REUSABLE`, `RECONCILE`, or `INVALID`
+before launching analysis. Reuse stable evidence and perform only targeted
+reconciliation when inputs changed. Record an unavoidable repeat as a cost
+anomaly before dispatch.
 
 Never replay a completed technical phase merely because the orchestrator lost
 its conversational summary.

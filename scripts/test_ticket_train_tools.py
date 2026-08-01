@@ -15,12 +15,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import control_guard
+import run_registry
 import token_usage
 import train_supervisor
 
 
 def valid_state() -> dict:
     return {
+        "run_id": "test-run",
+        "run_status": "COMPLETED",
+        "run_identity": {
+            "fingerprint": "abc123",
+            "repository": "owner/repo",
+            "train_branch": "codex/train-test",
+            "source": "issues",
+            "tickets": ["T-1"],
+        },
+        "orchestrator_lease": {
+            "owner_thread_id": "thread-main",
+            "heartbeat_at": "2026-07-30T12:00:00+00:00",
+            "expires_at": "2099-07-30T12:30:00+00:00",
+        },
+        "supervision": {
+            "mode": "FOREGROUND_WAIT",
+            "status": "INACTIVE",
+            "watcher_id": None,
+            "last_check_at": None,
+            "next_check_at": None,
+        },
+        "pending_human_action": None,
         "execution_mode": "dry-run",
         "integrated_ticket_count": 0,
         "control": {
@@ -86,6 +109,7 @@ class ControlGuardTests(unittest.TestCase):
                 "phase": "implementation",
                 "launch_state": "COMPLETED",
                 "thread_id": "thread-123456",
+                "visibility_verified": True,
                 "final_report_captured": True,
                 "usage_captured": True,
             },
@@ -95,12 +119,168 @@ class ControlGuardTests(unittest.TestCase):
                 "phase": "remediation",
                 "launch_state": "COMPLETED",
                 "thread_id": "thread-123456",
+                "visibility_verified": True,
                 "final_report_captured": True,
                 "usage_captured": True,
             },
         ]
         issues = control_guard.validate_yield(state)
         self.assertTrue(any("fresh context" in issue for issue in issues))
+
+    def test_supervised_active_requires_verified_supervisor(self) -> None:
+        state = valid_state()
+        state["run_status"] = "ACTIVE"
+        state["control"]["terminal_reason"] = "SUPERVISED_ACTIVE"
+        state["control"]["next_automatic_action"] = "supervisor_wait"
+        state["control"]["requested_ticket_states"] = {"T-1": "IMPLEMENTING"}
+        state["control"]["finalization"] = {}
+        state["control"]["phases"] = [
+            {
+                "phase_key": "run:T-1:implementation:1",
+                "launch_state": "RUNNING",
+                "thread_id": "thread-worker",
+                "visibility_verified": True,
+            }
+        ]
+        issues = control_guard.validate_yield(state)
+        self.assertTrue(any("supervision.status" in issue for issue in issues))
+        state["supervision"] = {
+            "mode": "BACKGROUND_WATCHER",
+            "status": "ACTIVE",
+            "watcher_id": "watcher-1",
+            "last_check_at": "2026-07-30T12:00:00+00:00",
+            "next_check_at": "2026-07-30T12:05:00+00:00",
+        }
+        self.assertEqual(control_guard.validate_yield(state), [])
+
+    def test_human_gate_must_be_announced(self) -> None:
+        state = valid_state()
+        state["control"]["terminal_reason"] = "AWAITING_REQUIRED_USER_INPUT"
+        state["control"]["pending_human_gates"] = ["gate-1"]
+        issues = control_guard.validate_yield(state)
+        self.assertTrue(any("pending_human_action" in issue for issue in issues))
+
+    def test_announced_human_gate_may_yield(self) -> None:
+        state = valid_state()
+        state["run_status"] = "AWAITING_USER"
+        state["control"]["terminal_reason"] = "AWAITING_REQUIRED_USER_INPUT"
+        state["control"]["next_automatic_action"] = "await_user"
+        state["control"]["pending_human_gates"] = ["gate-1"]
+        state["pending_human_action"] = {
+            "gate_id": "gate-1",
+            "gate_type": "analysis-approval",
+            "ticket_id": "T-1",
+            "revision": "analysis-2",
+            "reason": "matrix requires human approval",
+            "decision_summary": "Approve the minimum implementation plan",
+            "evidence_summary": "Complete structural-impact digest published",
+            "blocked_scope": "T-1 implementation",
+            "continuing_scope": "none",
+            "accepted_replies": ["approve T-1 analysis-2", "reject with feedback"],
+            "notification_status": "ANNOUNCED",
+            "announced_at": "2026-07-30T12:00:00+00:00",
+        }
+        self.assertEqual(control_guard.validate_yield(state), [])
+
+    def test_running_task_requires_verified_visibility(self) -> None:
+        state = valid_state()
+        state["run_status"] = "ACTIVE"
+        state["control"]["terminal_reason"] = "SUPERVISED_ACTIVE"
+        state["control"]["next_automatic_action"] = "supervisor_wait"
+        state["control"]["phases"] = [
+            {
+                "phase_key": "run:T-1:analysis:1",
+                "launch_state": "RUNNING",
+                "thread_id": "thread-analysis",
+            }
+        ]
+        state["supervision"] = {
+            "mode": "BACKGROUND_WATCHER",
+            "status": "ACTIVE",
+            "watcher_id": "watcher-1",
+            "last_check_at": "2026-07-30T12:00:00+00:00",
+            "next_check_at": "2026-07-30T12:05:00+00:00",
+        }
+        issues = control_guard.validate_yield(state)
+        self.assertTrue(any("visibility was not verified" in issue for issue in issues))
+
+
+class RunRegistryTests(unittest.TestCase):
+    def init_args(self, root: Path, owner: str = "thread-a") -> argparse.Namespace:
+        return argparse.Namespace(
+            root=root,
+            legacy_root=root / "legacy",
+            repository="owner/repo",
+            train_branch="codex/train-test",
+            source="issues:1,2",
+            tickets="T-1,T-2",
+            orchestrator_thread=owner,
+            execution_mode="live",
+            run_id="test-run",
+            adopt_legacy=False,
+            lease_minutes=30,
+        )
+
+    def test_duplicate_init_returns_existing_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_registry.init_run(self.init_args(root)), 0)
+                self.assertEqual(run_registry.init_run(self.init_args(root, "thread-b")), 3)
+            manifests = list(root.glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+
+    def test_unexpired_owner_requires_explicit_takeover(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_registry.init_run(self.init_args(root))
+            path = root / "test-run" / "manifest.json"
+            args = argparse.Namespace(
+                state=path,
+                orchestrator_thread="thread-b",
+                lease_minutes=30,
+                takeover=False,
+                user_authorized_takeover=False,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_registry.claim(args), 5)
+            args.takeover = True
+            args.user_authorized_takeover = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_registry.claim(args), 0)
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(state["orchestrator_lease"]["owner_thread_id"], "thread-b")
+            self.assertEqual(len(state["handoff_history"]), 1)
+
+    def test_legacy_run_blocks_duplicate_until_adopted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "canonical"
+            legacy_root = Path(directory) / "legacy"
+            legacy_path = legacy_root / "old-run" / "run-manifest.json"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "old-run",
+                        "base_branch": "codex/train-test",
+                        "source": "issues:1,2",
+                        "tickets": ["T-1", "T-2"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = self.init_args(root)
+            args.legacy_root = legacy_root
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_registry.init_run(args), 6)
+            self.assertEqual(list(root.glob("*/manifest.json")), [])
+            args.adopt_legacy = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_registry.init_run(args), 0)
+            state = json.loads((root / "test-run" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["control"]["cost_anomaly_status"], "checkpoint-open")
+            self.assertEqual(state["legacy_manifest_inventory"], [str(legacy_path.resolve())])
 
 
 class TokenUsageTests(unittest.TestCase):
@@ -188,6 +368,33 @@ class VerificationGateTests(unittest.TestCase):
             gate = updated["control"]["verification_gates"]["T-1"]
             self.assertEqual(gate["verification_contract_revision"], "verification-1")
             self.assertEqual(gate["baseline_red_status"], "demonstrated")
+
+    def test_supervisor_records_complete_human_gate(self) -> None:
+        state = valid_state()
+        event = {
+            "gate_id": "gate-1",
+            "gate_type": "pre-merge",
+            "ticket_id": "T-1",
+            "revision": "head-sha",
+            "reason": "human matrix gate",
+            "decision_summary": "Approve integration into the train",
+            "evidence_summary": "Review clean and exact-head checks passed",
+            "blocked_scope": "T-1 train merge",
+            "continuing_scope": "none",
+            "accepted_replies": ["approve", "reject with feedback"],
+            "notification_status": "ANNOUNCED",
+            "announced_at": "2026-07-30T12:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            args = argparse.Namespace(state=path, event_json=json.dumps(event))
+            with contextlib.redirect_stdout(io.StringIO()):
+                train_supervisor.human_gate_event(args)
+            updated = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["run_status"], "AWAITING_USER")
+            self.assertEqual(updated["pending_human_action"]["gate_id"], "gate-1")
+            self.assertEqual(updated["control"]["terminal_reason"], "AWAITING_REQUIRED_USER_INPUT")
 
 
 if __name__ == "__main__":

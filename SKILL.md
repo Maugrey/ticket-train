@@ -13,6 +13,9 @@ Read these references before starting:
 
 - [workflow.md](references/workflow.md) for lifecycle, concurrency, branches, gates, and stopping rules.
 - [orchestration-control.md](references/orchestration-control.md) for visible-thread launch, ambiguous outcomes, active supervision, durable recovery, and yield gates.
+- [run-continuity.md](references/run-continuity.md) for canonical run identity,
+  single-orchestrator ownership, restart adoption, analysis reuse, mandatory
+  supervision, and visible human-action requests.
 - [ticket-sources.md](references/ticket-sources.md) for source resolution and ticket normalization.
 - [criticality.md](references/criticality.md) for intrinsic criticality, complexity, and human validation matrices.
 - [analysis-policy.md](references/analysis-policy.md) for parallel conditional analysis, dependency consolidation, and reconciliation.
@@ -68,6 +71,17 @@ Before triage, resolve and echo:
 17. Cost-control policy, fixed to `strict-quality-preserving`.
 18. Verification policy, fixed to `parallel-independent-red-green`.
 19. Environment tiers required by the selected tickets.
+
+Before publishing the startup preflight, use
+[run_registry.py](scripts/run_registry.py) to discover or create the canonical
+run under `$CODEX_HOME/ticket-train/runs`. The repository, train branch,
+source, and ticket set define the run fingerprint; the conversation ID does
+not. If a matching active run exists, adopt it under
+[run-continuity.md](references/run-continuity.md) instead of starting another
+run. Never repeat triage or analysis merely because orchestration moved to a
+new conversation. If the registry reports a deprecated-layout manifest, adopt
+it into the canonical reconciliation shell and inventory all prior artifacts
+before dispatching anything.
 
 Require the user to provide or confirm the ticket source and selection. Never invent a source by scanning TODOs, comments, or arbitrary repository files.
 
@@ -143,6 +157,12 @@ state transitions, compact reports, and durable references in the main
 conversation. Do not copy raw logs, full child reports, or unchanged progress
 snapshots into the orchestrator context.
 
+Maintain exactly one orchestrator lease and one canonical manifest. Resolve
+and verify foreground waiting or a run-scoped background watcher before the
+first child dispatch. A background watcher is part of the workflow, not a
+recovery action the user must request. While work is active, confirm liveness
+to the user at least every 15 minutes even without a material transition.
+
 Follow [orchestration-control.md](references/orchestration-control.md) for
 every phase dispatch. Record a unique phase key and launch intent before
 creation, reconcile asynchronous or ambiguous outcomes before retrying, and
@@ -160,6 +180,10 @@ size budgets, compact implementation contract, plan-contract validation,
 internal slices, worker self-review, complete-review count, remediation-cycle
 count, log artifacts, all authoritative and duplicate sessions, unmeasured
 phases, and cost-anomaly checkpoints.
+
+Also track the run fingerprint, orchestrator lease and handoffs, supervision
+mode and watcher ID, verified visible thread IDs, durable analysis artifacts,
+reuse/reconciliation decisions, and the single pending human action.
 
 Track the verification-contract revision, execution-pair base, independent
 test thread/branch/worktree/commit/pull request, acceptance-coverage map,
@@ -196,82 +220,86 @@ At a high level:
 
 1. Normalize the selected tickets.
 2. Capture the initial orchestrator usage baseline when available.
-3. Recommend `Terra/H` or `Sol/H` for the orchestrator, report the current
+3. Discover or create the canonical run, claim its orchestrator lease, and
+   reconcile prior state before any technical phase.
+4. Recommend `Terra/H` or `Sol/H` for the orchestrator, report the current
    setting, and obtain explicit confirmation to continue.
-4. Create and version the mandatory proportionality profile and transmit it
+5. Create and version the mandatory proportionality profile and transmit it
    to every technical phase.
-5. Perform a short routing triage in a dedicated read-only thread with an
+6. Resolve and verify foreground or background supervision. Stop before child
+   dispatch if neither is reliable.
+7. Perform a short routing triage in a dedicated read-only thread with an
    explicit `Terra/H` override, without producing a technical plan.
-6. Record one common analysis base commit and queue every selected ticket for analysis immediately.
-7. Resolve every routed matrix cell mechanically, dispatch every phase with
+8. Record one common analysis base commit and queue every selected ticket for analysis immediately.
+9. Resolve every routed matrix cell mechanically, dispatch every phase with
    explicit model and reasoning settings, and record requested, actual, and
    conformance values.
    Apply the visible launch and active supervision protocol to every dispatch;
    never interpret an ambiguous creation response as proof that no task was
    created.
-8. Route and run one full analysis per ticket with at most five active threads, without dependency or human-gate waits.
-9. Consolidate returned dependency contracts and route targeted amendments to original analysis threads.
-10. Require every recommendation to separate the minimum required correction,
+10. Route and run one full analysis per ticket with at most five active threads, without dependency or human-gate waits. Reuse a valid durable analysis on resume.
+11. Consolidate returned dependency contracts and route targeted amendments to original analysis threads.
+12. Require every recommendation to separate the minimum required correction,
     optional hardening, and explicitly deferred post-MVP work.
-11. Return every consolidated analysis to the main thread through the compact,
+13. Return every consolidated analysis to the main thread through the compact,
    self-sufficient structural-impact digest required by the report template,
    together with its measured token usage.
-12. Confirm intrinsic criticality and complexity.
-13. Apply the matrix-based human analysis gate independently to each ticket.
-14. Build dependency and collision maps and apply the cumulative train-size
+14. Confirm intrinsic criticality and complexity.
+15. Apply the matrix-based human analysis gate independently to each ticket.
+16. Build dependency and collision maps and apply the cumulative train-size
     checkpoint.
-15. Before each implementation, reconcile its conditional analysis against the current train and merged predecessors.
-16. Materialize compact implementation and verification contracts. For `HIGH`
+17. Before each implementation, reconcile its conditional analysis against the current train and merged predecessors.
+18. Materialize compact implementation and verification contracts. For `HIGH`
     or `MAXIMUM` complexity, run the bounded plan-contract validation.
-17. Schedule only proven-independent ticket execution pairs in parallel.
-18. Route the implementation and independent acceptance-test workers from the
+19. Schedule only proven-independent ticket execution pairs in parallel.
+20. Route the implementation and independent acceptance-test workers from the
     confirmed classification and verification complexity.
-19. Create implementation and acceptance-test branches/worktrees from the same
+21. Create implementation and acceptance-test branches/worktrees from the same
     exact train commit. Keep test authorship independent until its first commit
     and baseline-red evidence are durable.
-20. Use internal implementation slices for large coherent tickets and require
+22. Use internal implementation slices for large coherent tickets and require
     the worker's same-phase self-review.
-21. Push both branches, open the ticket pull request as draft, and integrate
+23. Push both branches, open the ticket pull request as draft, and integrate
     the independent test commit through a test pull request into the ticket
     branch or an equivalent durable merge.
-22. Run baseline-red, exact-head integrated-green, environment-parity, and
+24. Run baseline-red, exact-head integrated-green, environment-parity, and
     applicable Supabase/Auth/RLS checks. Adjudicate failures before review.
-23. Run `control_guard.py check-verification` and mark the ticket pull request
+25. Run `control_guard.py check-verification` and mark the ticket pull request
     ready for automated code review only when functional readiness passes.
-24. Reassess both dimensions from the final production and test diff.
-25. Route one exhaustive independent automated review through the
+26. Reassess both dimensions from the final production and test diff.
+27. Route one exhaustive independent automated review through the
     initial-review matrix and require its complete finding inventory.
-26. Consolidate Codex, Copilot, CI, and human findings into one deduplicated
+28. Consolidate Codex, Copilot, CI, and human findings into one deduplicated
     disposition ledger, then send one grouped remediation packet to a fresh
     compact remediation thread on the same branch and worktree.
-27. Require a reproducing regression test for every confirmed behavioral
+29. Require a reproducing regression test for every confirmed behavioral
     defect, then run a targeted re-review by default. Permit another full review only for
     the material scope changes listed in the efficiency policy, never merely
     because the train base advanced.
-28. Stop automatic remediation after two cycles and perform a root-cause and
+30. Stop automatic remediation after two cycles and perform a root-cause and
     cost-anomaly checkpoint instead of looping.
-29. Measure non-overlapping triage, analysis, consolidation, reconciliation,
+31. Measure non-overlapping triage, analysis, consolidation, reconciliation,
     plan-contract validation, implementation, acceptance-test authoring,
     red/green/environment validation, initial review, remediation, follow-up review, final train
     validation, and orchestration usage.
-30. Apply the matrix-based human pre-merge gate selected by the run mode.
-31. Serialize merges into the train.
-32. Report each integrated ticket and its ticket total in the main thread.
-33. When the requested live queue finishes or a ticket-count or size
+32. Apply the matrix-based human pre-merge gate selected by the run mode.
+33. Serialize merges into the train.
+34. Report each integrated ticket and its ticket total in the main thread.
+35. When the requested live queue finishes or a ticket-count or size
     checkpoint is reached, freeze finalization, push the train, and create or update one
     final train pull request against the base branch.
-34. Run integrated cross-ticket acceptance and applicable clean-reset
+36. Run integrated cross-ticket acceptance and applicable clean-reset
     Supabase/Auth/RLS checks on the exact train head.
-35. Review cross-ticket interactions and unreviewed integration surfaces in
+37. Review cross-ticket interactions and unreviewed integration surfaces in
     the current final pull request, reuse trustworthy unchanged ticket-review
     evidence, consolidate all feedback, and apply the same grouped-remediation
     and targeted-re-review limits.
-36. Report the final pull request, its exact reviewed head, readiness, a
+38. Report the final pull request, its exact reviewed head, readiness, a
     deduplicated manual validation plan, and separate code and application
     attention points.
-37. Report the measured run total with baseline/final/delta for every known
+39. Report the measured run total with baseline/final/delta for every known
     session, including duplicate attempts and explicitly unmeasured phases.
-38. Keep the train frozen after five integrated tickets or a cumulative-size
+40. Keep the train frozen after five integrated tickets or a cumulative-size
     checkpoint until the user merges it or explicitly authorizes more tickets.
 
 For sequential or dependent tickets, complete the predecessor's implementation, automated validation, required human validation, and train merge before starting the dependent implementation. Do not delay the dependent analysis.
@@ -313,6 +341,13 @@ Pause and report a blocker when:
   continuation is established.
 
 When a human analysis or pre-merge gate is required, pause only the affected ticket and implementations that depend on it. Continue every selected analysis and any independent implementation whose gates are satisfied.
+
+Publish every required decision in the main conversation using the `ACTION
+REQUIRED` report from [report-template.md](references/report-template.md), then
+persist the complete `pending_human_action`. Never rely on a child thread,
+automation transcript, or silent status field to tell the user that approval
+is waiting. Keep verified supervision active and remind the user at the
+configured cadence until the exact gate revision is resolved.
 
 After five integrated tickets, do not start a sixth ticket. Create or update
 the final train pull request, complete its validation and feedback loop, and
@@ -397,6 +432,12 @@ Run [control_guard.py](scripts/control_guard.py) against the reconciled durable
 manifest before yielding, completion, or checkpoint. A failing guard means the
 orchestrator must continue, capture missing evidence, or report a real blocker;
 never ignore the failure to produce a shorter final response.
+
+Use terminal reason `SUPERVISED_ACTIVE` only when active work is protected by
+a verified foreground wait or background watcher. It is not permission to
+stop following the run. If the guard reports missing ownership, visibility,
+supervision, or human-action notification, correct that control defect before
+yielding.
 
 At completion, early stop, and every ticket-count or size checkpoint, provide
 one consolidated report for every requested ticket and state exactly what

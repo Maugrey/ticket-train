@@ -32,6 +32,10 @@ Ticket Train can:
 - report architecture, functional, data, contract, security, operational, test,
   review, manual-validation, and token-usage outcomes;
 - persist enough durable state to reconcile interrupted or restarted runs.
+- identify one canonical run across main conversations, prevent duplicate
+  analysis, and transfer orchestration through an explicit single-owner lease;
+- install verified supervision before child work starts and surface every
+  human approval as an explicit main-conversation action.
 
 Ticket Train does not infer a ticket source, silently use hidden workers, weaken
 tests to obtain a green result, close source tickets without authorization, or
@@ -94,6 +98,11 @@ reporting policy before work begins.
 It also recommends an orchestrator model and reasoning effort and requires an
 explicit startup confirmation. Reasoning above `xhigh` always requires separate
 user authorization.
+
+Reusing the same repository, train branch, source, and ticket set discovers
+the existing run even from another main conversation. The new conversation
+adopts or explicitly takes over that run; it does not rerun completed triage
+or analysis merely to reconstruct context.
 
 ## Dry-run and live execution
 
@@ -289,10 +298,34 @@ in visible phase threads. A durable manifest records phase identities, launch
 attempts, branches, pull requests, test evidence, reviews, token snapshots, and
 gate states outside the target repository.
 
+Every run has one fingerprint, one canonical manifest under
+`$CODEX_HOME/ticket-train/runs`, and one orchestrator lease. Before creating a
+run, the registry searches for an existing match. A new main conversation must
+adopt the existing state or receive explicit takeover authorization. Completed
+analysis artifacts are reused or targeted for reconciliation instead of being
+silently repeated.
+
+The registry also detects manifests from the deprecated
+`$CODEX_HOME/ticket-trains` layout. It blocks a fresh run until those manifests
+are adopted into a canonical reconciliation shell, inventoried, and resolved.
+
+Supervision is resolved before any child starts. Long work uses a verified
+run-scoped watcher when the orchestrator cannot remain in foreground wait. It
+checks deterministic state at most every five minutes, reports transitions
+immediately, and provides a compact liveness confirmation at least every 15
+minutes. The user does not need to create a scheduled task.
+
+Human gates are first-class durable state. Every approval request is headed
+`ACTION REQUIRED` in the main conversation, contains a self-sufficient decision
+packet and exact accepted replies, and remains visible in liveness updates
+until resolved.
+
 The bundled deterministic tools support this control plane:
 
 - [`train_supervisor.py`](scripts/train_supervisor.py) reconciles thread,
   GitHub, test, and verification events into the run manifest;
+- [`run_registry.py`](scripts/run_registry.py) creates, discovers, and claims
+  canonical runs without duplicate ownership;
 - [`control_guard.py`](scripts/control_guard.py) prevents unsafe yield,
   completion, or functional-readiness transitions;
 - [`token_usage.py`](scripts/token_usage.py) captures and reconciles available
@@ -336,12 +369,14 @@ ticket-train/
 │   ├── orchestration-control.md
 │   ├── report-template.md
 │   ├── review-policy.md
+│   ├── run-continuity.md
 │   ├── ticket-sources.md
 │   ├── usage-reporting.md
 │   ├── verification-policy.md
 │   └── workflow.md
 └── scripts/
     ├── control_guard.py
+    ├── run_registry.py
     ├── test_ticket_train_tools.py
     ├── token_usage.py
     └── train_supervisor.py

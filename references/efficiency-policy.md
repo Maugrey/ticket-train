@@ -297,6 +297,12 @@ history.
 Supervision is event-driven. Use thread wait cursors, GitHub status queries,
 test result artifacts, and the durable manifest as the source of truth.
 
+Resolve supervision before launching any child. Prefer foreground
+transition-aware waits. When a long phase may outlive the main turn, create
+and verify one run-scoped background watcher up front and store its ID in the
+canonical manifest. Installing supervision only after the user notices a
+stall is a control failure.
+
 The model is active only to:
 
 - dispatch a newly ready phase;
@@ -316,9 +322,11 @@ Parse test commands into durable result artifacts with command, exit status,
 head commit, duration, and concise failure summary. Update the manifest from
 those artifacts; do not ask a model to rediscover status from raw logs.
 
-Remove periodic five-minute liveness messages. Report on transitions and at a
-user-requested cadence only. If a platform requires a heartbeat, keep it to
-one line and do not reread child context to produce it.
+Use an internal deterministic check interval of at most five minutes and a
+user-visible liveness interval of at most 15 minutes while work remains
+active. The liveness message is one line from the manifest and does not reread
+child context. Report transitions immediately. A pending human action is
+always visible and reminded; never suppress it as an unchanged heartbeat.
 
 ## Logs and context packets
 
@@ -361,6 +369,9 @@ these occurs:
 - unchanged polling or repeated full-thread reads were detected;
 - actual routing is more expensive than the matrix-selected setting;
 - cumulative train size crossed a configured checkpoint.
+- another manifest or run ID exists for the same canonical run fingerprint;
+- a completed analysis would be repeated because orchestration moved to a new
+  conversation.
 
 At the checkpoint, preserve completed work, report consumed and missing usage
 by phase, identify the cause, and propose the least expensive quality-neutral

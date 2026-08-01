@@ -45,7 +45,9 @@ supervision_policy = event-driven-deterministic
 child_thread_visibility = user-visible
 launch_reconciliation = required
 supervision_mode = active-until-terminal
-liveness_reporting = transitions-only | explicit user override
+liveness_reporting = transitions-plus-15-minute-liveness | explicit user override
+run_registry = canonical-required
+orchestrator_lease = single-owner
 proportionality_profile_revision = required
 cost_control_policy = strict-quality-preserving
 verification_policy = parallel-independent-red-green
@@ -86,6 +88,11 @@ underprovisioned, or unknown. Then ask:
 ```text
 Continue this train with the current orchestrator setting? yes/no
 ```
+
+Before publishing the preflight, discover the canonical run with
+[run-continuity.md](run-continuity.md). If one exists, reconcile and adopt it;
+do not create a second run or repeat completed phases. Claim the single
+orchestrator lease before continuing.
 
 Capture the initial orchestrator usage baseline before publishing the
 preflight when counters are available. Do not start triage, child threads,
@@ -252,6 +259,13 @@ duplicate_session_inventory
 unmeasured_phase_inventory
 log_artifacts
 cost_anomaly_status
+run_fingerprint
+orchestrator_lease
+handoff_history
+supervision_mode
+supervision_watcher_id
+pending_human_action
+analysis_artifacts_and_reuse_status
 ```
 
 Use this lifecycle:
@@ -414,8 +428,11 @@ keep its work bounded to coordination. Never use that inherited setting for a
 routed child phase; the dedicated triage and ticket phases receive explicit
 overrides.
 
-Create one run directory outside the repository under the available Codex data
-directory. Persist:
+Create or adopt exactly one run directory under
+`$CODEX_HOME/ticket-train/runs/<run-id>`. Use
+[run_registry.py](../scripts/run_registry.py) and the fingerprint protocol in
+[run-continuity.md](run-continuity.md). Never use a second manifest location
+for the same train. Persist:
 
 ```text
 run configuration
@@ -426,6 +443,7 @@ dependency and collision graph
 gate decisions and analysis revisions
 branch, pull-request, and commit references
 non-overlapping usage snapshots and deltas
+run ownership, supervision, pending action, and analysis reuse evidence
 ```
 
 Write the manifest immediately after every launch intent, tool response,
@@ -496,11 +514,21 @@ clean phase context. Never use hidden collaboration subagents unless the user
 explicitly authorizes that fallback for the affected phase after a visible
 launch failure is reported.
 
+Before the first child launch, verify either foreground transition waits or a
+run-scoped background watcher and persist its ID. If neither is reliable,
+stop before dispatch. The user must not need to add a scheduled task to make
+the train progress.
+
 Persist a unique phase key and launch intent before creation. Treat a timeout,
 missing response handler, or thread-creation error as `LAUNCH_UNKNOWN` until
 the bounded reconciliation protocol proves whether the task materialized. Do
 not immediately retry or launch a hidden replacement; a failed response may
 still have produced a visible task.
+
+A returned client or launch ID proves only that creation was requested. Do
+not mark the task `RUNNING` until the actual thread ID has been resolved and a
+read/list operation verifies that it is user-visible. Persist that verification.
+Do not infer `BLOCKED` from silence or lack of incremental output.
 
 Keep the orchestrator turn active while any phase is queued, running,
 launch-unknown, or ready for an automatic successor. Use bounded compact waits
@@ -509,9 +537,15 @@ transition, dispatch the next automatic phase, and wait again. Do not require
 the user to notice a child completion or send a message that wakes the
 orchestrator.
 
-End the orchestrator turn only for `AWAITING_REQUIRED_USER_INPUT`, `BLOCKED`,
-`COMPLETED`, or `CHECKPOINT`, after the yield gate confirms that no executable
-automatic transition or uncaptured child evidence remains.
+End the orchestrator turn only for `SUPERVISED_ACTIVE`,
+`AWAITING_REQUIRED_USER_INPUT`, `BLOCKED`, `COMPLETED`, or `CHECKPOINT`.
+`SUPERVISED_ACTIVE` requires a verified watcher or foreground wait, a current
+next-check timestamp, and no hidden approval. Publish liveness at least every
+15 minutes while work remains active, plus immediate transition reports.
+
+Every human gate uses the main-thread `ACTION REQUIRED` report and durable
+pending-action object from [run-continuity.md](run-continuity.md). Never hide a
+gate only inside heartbeat output or suppress every reminder.
 
 Use [efficiency-policy.md](efficiency-policy.md) as the pass and cost budget.
 A model turn must correspond to a transition, failure, blocker, dispatch, or
@@ -832,10 +866,17 @@ Only the user may initiate the third option. Record the exception and any new ti
 
 ## Failure and recovery
 
-On restart or context compaction, recover the run from the durable state
-manifest and verify live branch, pull-request, thread, and gate state before
+On restart, new main conversation, or context compaction, discover the run by
+canonical fingerprint before creating any state. Recover it from the durable
+manifest, resolve the orchestrator lease, and verify live branch,
+pull-request, thread, gate, supervision, and analysis-artifact state before
 continuing. Do not replay completed technical phases merely to reconstruct
 context.
+
+Classify each prior analysis as `REUSABLE`, `RECONCILE`, or `INVALID` under
+[run-continuity.md](run-continuity.md). A conversation change never makes an
+analysis invalid. Use targeted reconciliation for changed source or train
+evidence and count every unavoidable duplicate in the usage ledger.
 
 Reconcile every `LAUNCH_UNKNOWN`, queued, or running visible phase before
 dispatching anything new. Capture child results that completed while the
