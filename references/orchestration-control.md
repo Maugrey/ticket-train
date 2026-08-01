@@ -3,6 +3,7 @@
 ## Contents
 
 - Control-plane invariants
+- Procedural controller
 - Canonical run and ownership
 - Phase identity and launch state
 - User-visible thread launch protocol
@@ -34,6 +35,22 @@ approval bypass mode does not grant this permission.
 Do not ask the user to advance an automatic transition. User input is required
 only for a configured human gate, a material decision, a permission boundary,
 or a reported blocker.
+
+## Procedural controller
+
+Use [controller-protocol.md](controller-protocol.md) and
+`scripts/train_controller.py` as the transition authority. The main
+conversation is a tool adapter: read the controller's next action, execute it,
+and submit the observation as a revision-checked idempotent event.
+
+Narrative state in the main conversation, a child report, a heartbeat, or a
+GitHub status is evidence, not permission to advance. Feed that evidence to
+the controller. Do not dispatch, retry, review, merge, yield, or complete when
+the corresponding event is rejected.
+
+`train_supervisor.py` collects deterministic thread, GitHub, test, and
+verification observations. It does not own lifecycle transitions. Convert its
+changed observations into controller events authorized by `next_actions`.
 
 ## Canonical run and ownership
 
@@ -154,6 +171,7 @@ findings_or_decisions
 residual_risks
 requested_or_recommended_next_action
 files_modified = none | explicit list
+usage = measurement plus exact counters or explicit unavailable status
 ```
 
 The envelope is a result contract, not a notification mechanism. The
@@ -293,6 +311,10 @@ extracts bounded test errors, hashes full external logs, and updates the
 manifest and verification gate atomically. Use the model only after the controller reports a
 transition, failure, blocker, or decision.
 
+After each changed observation, apply the corresponding controller event with
+the expected revision. Do not update `next_automatic_action` by hand. Derive it
+from `train_controller.py status`.
+
 ## Deterministic yield guard
 
 Maintain a `control` object in the run manifest for the read-only guard script:
@@ -387,6 +409,13 @@ At completion or checkpoint, give every requested ticket one terminal state:
 why any live ticket did not reach the train.
 
 Before yielding or publishing a completion/checkpoint report, run:
+
+```powershell
+python scripts/train_controller.py check --state <run-manifest.json> --mode yield
+python scripts/train_controller.py check --state <run-manifest.json> --mode completion
+```
+
+Then run the migration-period independent guards:
 
 ```powershell
 python scripts/control_guard.py check-yield --state <run-manifest.json>

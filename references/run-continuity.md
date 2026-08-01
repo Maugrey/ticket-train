@@ -51,6 +51,11 @@ Select authoritative artifacts and reconcile them before dispatch. The
 adoption opens a cost-anomaly checkpoint and does not authorize repeating
 triage or analysis.
 
+After discovery or adoption, bootstrap or load the procedural controller under
+[controller-protocol.md](controller-protocol.md). Its event log and revision,
+not the current conversation summary, determine which phases are complete and
+which next actions are legal.
+
 ## Single orchestrator lease
 
 Exactly one main conversation owns the run at a time. Persist an

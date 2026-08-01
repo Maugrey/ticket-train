@@ -4,7 +4,9 @@ Ticket Train is an explicitly invoked Codex skill for orchestrating bounded,
 reviewable implementation batches from a user-provided ticket source. It keeps
 analysis, implementation, acceptance testing, remediation, and review in
 separate visible contexts while the main conversation acts as a compact control
-plane.
+plane. A deterministic state machine owns phase order, concurrency, gates,
+routing checks, pull-request targets, and completion; prompts remain responsible
+for technical judgment.
 
 The skill is designed for multi-ticket work where sequencing, dependency
 management, verification quality, human approval, context growth, and token
@@ -31,7 +33,9 @@ Ticket Train can:
   train pull request against the repository base branch;
 - report architecture, functional, data, contract, security, operational, test,
   review, manual-validation, and token-usage outcomes;
-- persist enough durable state to reconcile interrupted or restarted runs.
+- persist enough durable state to reconcile interrupted or restarted runs;
+- reject invalid or skipped lifecycle transitions through a revision-checked,
+  idempotent procedural controller;
 - identify one canonical run across main conversations, prevent duplicate
   analysis, and transfer orchestration through an explicit single-owner lease;
 - install verified supervision before child work starts and surface every
@@ -298,6 +302,14 @@ in visible phase threads. A durable manifest records phase identities, launch
 attempts, branches, pull requests, test evidence, reviews, token snapshots, and
 gate states outside the target repository.
 
+The main thread is a thin adapter. It reads the controller's allowed next
+actions, performs one through Codex/Git/GitHub tools, and records the result as
+an immutable event. It does not reconstruct the schedule from chat history.
+Unsupported transitions fail closed, including implementation without a
+parallel independent-test task, review before functional readiness, focused
+re-review without a full baseline, ticket PRs targeting the base branch, and
+completion without the final PR/review/token/report evidence.
+
 Every run has one fingerprint, one canonical manifest under
 `$CODEX_HOME/ticket-train/runs`, and one orchestrator lease. Before creating a
 run, the registry searches for an existing match. A new main conversation must
@@ -322,6 +334,8 @@ until resolved.
 
 The bundled deterministic tools support this control plane:
 
+- [`train_controller.py`](scripts/train_controller.py) is the authoritative
+  state machine and next-action planner;
 - [`train_supervisor.py`](scripts/train_supervisor.py) reconciles thread,
   GitHub, test, and verification events into the run manifest;
 - [`run_registry.py`](scripts/run_registry.py) creates, discovers, and claims
@@ -363,6 +377,7 @@ ticket-train/
 │   └── openai.yaml
 ├── references/
 │   ├── analysis-policy.md
+│   ├── controller-protocol.md
 │   ├── criticality.md
 │   ├── efficiency-policy.md
 │   ├── model-routing.md
@@ -378,7 +393,9 @@ ticket-train/
     ├── control_guard.py
     ├── run_registry.py
     ├── test_ticket_train_tools.py
+    ├── test_train_controller.py
     ├── token_usage.py
+    ├── train_controller.py
     └── train_supervisor.py
 ```
 
@@ -397,6 +414,9 @@ accounting checks.
   valid baseline; unavailable measurements are reported rather than estimated.
 - Repository rules and applicable `AGENTS.md` instructions always take
   precedence over this generic workflow.
+- The local controller cannot directly call the Codex desktop task API. The
+  active main conversation still performs tool calls, but it no longer decides
+  their order or whether lifecycle gates passed.
 
 ## License
 

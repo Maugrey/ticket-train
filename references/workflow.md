@@ -3,6 +3,7 @@
 ## Contents
 
 - Run configuration
+- Procedural execution rule
 - Orchestrator startup preflight
 - Roles and state
 - Routing triage
@@ -73,6 +74,24 @@ Use these approval modes:
 
 Automated analysis, tests, independent review, remediation, and reporting remain mandatory in every mode.
 Reasoning above `xhigh` always requires separate explicit user authorization.
+
+## Procedural execution rule
+
+This document defines policy and technical responsibilities. Enforce its
+ordering through [controller-protocol.md](controller-protocol.md) and
+`scripts/train_controller.py`; do not execute the lifecycle as a free-form
+prompt checklist.
+
+After canonical run discovery, bootstrap the controller. Before every task,
+GitHub, branch, gate, merge, or completion transition, read `next_actions`,
+execute only an allowed action, and record the result as an idempotent event at
+the expected manifest revision. If policy text and controller state appear to
+disagree, stop the transition and repair or explicitly version the controller;
+never bypass it conversationally.
+
+The model remains responsible for technical analysis, implementation, tests,
+review, and decisions. The controller is responsible for when those judgments
+may be requested or accepted.
 
 ## Orchestrator startup preflight
 
@@ -308,6 +327,9 @@ DISCOVERED
 -> REPORTED
 ```
 
+The lifecycle diagram is descriptive. The executable transition set in
+`train_controller.py` is authoritative. Unsupported transitions fail closed.
+
 `ANALYSIS_INVALID` returns the ticket to `ANALYZING` in its original analysis thread, then through classification, reporting, the applicable human gate, and reconciliation again.
 
 Track the train-level lifecycle separately:
@@ -505,7 +527,8 @@ output, and fresh phase threads.
 
 ## Visible thread launch and active supervision
 
-Follow [orchestration-control.md](orchestration-control.md) for every triage,
+Follow [controller-protocol.md](controller-protocol.md) and
+[orchestration-control.md](orchestration-control.md) for every triage,
 analysis, implementation, review, follow-up review, and final-train phase.
 
 Create only user-visible phase threads. Never use `fork_thread` for a train
@@ -518,6 +541,12 @@ Before the first child launch, verify either foreground transition waits or a
 run-scoped background watcher and persist its ID. If neither is reliable,
 stop before dispatch. The user must not need to add a scheduled task to make
 the train progress.
+
+For every implementation, record one atomic execution-pair event before
+calling the task tool for either worker. Never launch implementation first and
+defer creation of its independent acceptance-test task. If one of the two
+tool calls is ambiguous, keep the entire pair under reconciliation and do not
+continue as a single-worker implementation.
 
 Persist a unique phase key and launch intent before creation. Treat a timeout,
 missing response handler, or thread-creation error as `LAUNCH_UNKNOWN` until
@@ -843,6 +872,11 @@ token accounting, task inventory, exact-head CI/Copilot status, routing
 conformance, manual validation, attention points, or any requested ticket
 report is missing. Mark unavailable evidence explicitly rather than omitting
 it.
+
+Also apply `FINAL_PR_RECORDED`, `FINAL_VERIFICATION_RECORDED`,
+`FINAL_REVIEW_RECORDED`, and `FINAL_EVIDENCE_RECORDED` to the procedural
+controller, then request `RUN_COMPLETED`. A rejected completion event is a
+hard stop even when a prose summary appears complete.
 
 Tie every test, Codex review, Copilot collection, and readiness statement to an
 exact final pull-request head. If Codex is explicitly asked to merge the final

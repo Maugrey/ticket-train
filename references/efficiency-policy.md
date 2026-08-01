@@ -297,6 +297,12 @@ history.
 Supervision is event-driven. Use thread wait cursors, GitHub status queries,
 test result artifacts, and the durable manifest as the source of truth.
 
+Use [controller-protocol.md](controller-protocol.md) for lifecycle transitions.
+The controller's unchanged `WAIT_FOR_PHASE_TRANSITION` result must be handled
+without an LLM turn. Model-written heartbeat loops are prohibited: a
+non-LLM watcher or foreground task wait observes state, and the model wakes
+only when an event changes controller revision or a liveness message is due.
+
 Resolve supervision before launching any child. Prefer foreground
 transition-aware waits. When a long phase may outlive the main turn, create
 and verify one run-scoped background watcher up front and store its ID in the

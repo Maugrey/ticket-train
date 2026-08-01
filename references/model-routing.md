@@ -189,6 +189,11 @@ triage tokens trying to replace the full analysis.
 
 ## Strict routing enforcement
 
+Apply every matrix lookup through `scripts/train_controller.py`. The matrices
+in this reference and the controller constants are a versioned pair; change and
+test them together. A manually selected model/effort is not valid merely
+because it is stronger. The controller rejects any unexplained mismatch.
+
 Before dispatching any analysis, implementation, initial review, or follow-up
 review:
 
