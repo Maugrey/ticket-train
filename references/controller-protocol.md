@@ -25,6 +25,8 @@ The deterministic controller owns:
 - review and remediation limits;
 - pull-request base and exact-head relationships;
 - final pull request, verification, review, feedback, usage, and report gates;
+- explicit information requests, their main-thread announcement, and
+  same-thread phase resumption after a user answer;
 - the list of allowed next actions.
 
 Models retain judgment for:
@@ -116,6 +118,14 @@ Every technical phase ends with the machine-readable envelope defined in
 [orchestration-control.md](orchestration-control.md). Record it through
 `PHASE_COMPLETED`, or through the specialized review event where applicable.
 
+Record `needs_input`, `blocked`, `failed`, or `cancelled` through
+`PHASE_TERMINATED`; these outcomes must never be inferred from silence. A
+`needs_input` envelope includes a complete `input_request`. The controller
+creates an unannounced human-action gate, freezes only the affected ticket,
+and keeps independent work eligible. After `INPUT_PROVIDED`, the next action
+is `RESUME_VISIBLE_PHASE_WITH_INPUT`; record `PHASE_RESUMED` only after the
+same visible thread has received the answer and is running again.
+
 The controller rejects a completion when:
 
 - the task never reached verified `RUNNING`;
@@ -157,10 +167,16 @@ The following gates are enforced as code:
 17. Finalization freezes active work.
 18. The final train pull request exists before final review.
 19. Final verification and final review cover the same exact PR head.
-20. Blocking final-review findings enter at most two routed final-remediation
+20. After the final review, a bounded GitHub feedback collection covers
+    Codex, CI, Copilot, and human sources on that same exact head. Every
+    collected finding receives exactly one technical disposition. `timed_out`
+    is accepted only after the recorded deadline; `not_configured` and
+    `unavailable` require evidence.
+21. Blocking final-review findings enter at most two routed final-remediation
     cycles; every updated PR head invalidates prior verification and review,
-    then receives targeted follow-up review unless material scope changed.
-21. CI, Copilot disposition, finding ledger, token ledger, manual validation,
+    GitHub feedback snapshot, and ledger, then receives targeted follow-up
+    review unless material scope changed.
+22. CI, Copilot disposition, finding ledger, token ledger, manual validation,
     attention points, task inventory, and the completion report are recorded
     before `RUN_COMPLETED`.
 
@@ -178,6 +194,14 @@ conversation, then applies `GATE_ANNOUNCED`. Only a matching
 
 This prevents an approval from being hidden in heartbeat output, inferred from
 an unrelated user reply, or applied to a newer analysis or code head.
+
+Material product, legal, architecture, credential, or environment information
+uses the same announcement lifecycle through `HUMAN_INPUT_REQUESTED`. It is
+not a validation bypass and it is not represented by a narrative "waiting for
+information" status. The gate stores the exact question, reason, blocked
+scope, independently continuing scope, accepted reply formats, and revision.
+Only one human action is announced at a time, and it is mirrored as
+`pending_human_action` in the canonical manifest.
 
 ## Next-action loop
 
@@ -201,6 +225,19 @@ detailed thread read, or model-written status. A non-LLM host should perform
 task polling where the product exposes a stable API. Wake the model only for a
 transition, technical decision, failure, blocker, or report.
 
+For a background wake-up, use the deterministic heartbeat projection:
+
+```powershell
+python scripts/train_controller.py heartbeat --state <run-manifest.json>
+```
+
+The watcher may pause or delete itself only when
+`may_pause_or_delete_watcher` is true. `NOTIFY_ACTION_REQUIRED` must be
+published as an ordinary main-conversation message. `CONTINUE_AUTOMATICALLY`
+means the listed transition must execute before yielding. This prevents a
+watcher from deciding conversationally that a train is finished while the
+controller still requires verification, review, integration, or finalization.
+
 ## Final checks
 
 Before yielding or completing, run:
@@ -211,10 +248,12 @@ python scripts/train_controller.py check --state <run-manifest.json> --mode comp
 ```
 
 Continue to run the existing `control_guard.py` checks during the migration
-period. The procedural controller prevents invalid transitions; the legacy
-guard independently audits the reconciled manifest and external evidence.
+period only when diagnosing a legacy manifest. Its duplicated `control`
+projection is not a second authority and must not override the versioned
+`procedure` state. New runs use the controller check as the sole lifecycle
+gate; do not maintain two independently advancing state machines.
 
-Do not declare success when either layer rejects completion.
+Do not declare success when the procedural controller rejects completion.
 
 In dry-run mode, dependency consolidation and every applicable human analysis
 gate still apply, but the controller never offers an execution-pair action.

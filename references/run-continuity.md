@@ -164,6 +164,13 @@ The deterministic watcher:
 - writes `last_check_at` and `next_check_at` after every check;
 - never launches a replacement merely because a task is silent.
 
+At every wake, it first executes `train_controller.py heartbeat` and obeys the
+returned decision. It may pause or delete itself only when
+`may_pause_or_delete_watcher` is true. It cannot convert "no currently running
+child" into completion while verification, integration, final pull-request,
+final review, GitHub feedback collection, reporting, or another automatic
+controller action remains.
+
 Defaults:
 
 ```text
@@ -191,6 +198,12 @@ using it.
 Human approval is requested only in the main orchestrator conversation. Child
 threads may report evidence or questions, but the orchestrator owns the
 decision surface and durable gate state.
+
+The same rule applies to missing information. Product choices, legal data,
+architecture decisions, credentials, and environment inputs must be recorded
+through `HUMAN_INPUT_REQUESTED`; a free-form note or child `needs_input`
+conclusion is not enough. The controller pauses only the affected ticket and
+keeps unrelated eligible work moving.
 
 Before yielding for a human decision:
 
@@ -239,6 +252,13 @@ While it remains pending, every liveness report begins with `ACTION REQUIRED`
 and repeats the exact decision in compact form. Never suppress every reminder
 for a pending gate. When the user responds, resolve the exact gate revision,
 record the decision, clear pending state, and continue automatically.
+
+For an information request, also repeat the exact question and accepted answer
+formats. Record the answer through `INPUT_PROVIDED`. If the request came from
+a phase, send the answer to that same visible thread and record
+`PHASE_RESUMED`; if it was orchestrator-originated, restore the ticket's prior
+eligible status. Never require the user to discover which child asked or to
+answer in that child conversation.
 
 ## Resume report
 

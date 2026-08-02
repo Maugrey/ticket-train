@@ -174,12 +174,16 @@ phase from conversational memory. Use `train_controller.py status`, execute
 the returned action through the available task/Git/GitHub tool, and feed the
 result back through `train_controller.py apply`. Keep technical judgment in
 the routed visible phase threads and procedural judgment in the controller.
+Include the controller revision and update time in material status reports;
+reconcile immediately if tasks, Git, or GitHub advanced beyond that state.
 
 Maintain exactly one orchestrator lease and one canonical manifest. Resolve
 and verify foreground waiting or a run-scoped background watcher before the
 first child dispatch. A background watcher is part of the workflow, not a
 recovery action the user must request. While work is active, confirm liveness
 to the user at least every 15 minutes even without a material transition.
+At every watcher wake, run `train_controller.py heartbeat`. Never pause or
+delete the watcher unless it returns `may_pause_or_delete_watcher = true`.
 
 Follow [orchestration-control.md](references/orchestration-control.md) for
 every phase dispatch. Record a unique phase key and launch intent before
@@ -315,17 +319,21 @@ At a high level:
 35. Report each integrated ticket and its ticket total in the main thread.
 36. When the requested live queue finishes or a ticket-count or size
     checkpoint is reached, freeze finalization, push the train, and create or update one
-    final train pull request against the base branch.
+    final train pull request against the already resolved base branch. This is
+    an automatic successor; do not wait for the user to request the PR or ask
+    them to reconfirm `main` versus `master`.
 37. Run integrated cross-ticket acceptance and applicable clean-reset
     Supabase/Auth/RLS checks on the exact train head.
 38. Review cross-ticket interactions and unreviewed integration surfaces in
     the current final pull request, reuse trustworthy unchanged ticket-review
     evidence, consolidate all feedback, and apply the same grouped-remediation
     and targeted-re-review limits.
-39. Record final PR, exact-head validation, independent full review, CI,
-    Copilot disposition, token ledger, reports, and attention summaries as
-    separate controller events. `RUN_COMPLETED` must be rejected until all are
-    present at the same final head.
+39. After that review, start a bounded exact-head GitHub feedback collection,
+    snapshot Codex, CI, Copilot, and human findings, and give every collected
+    finding one technical disposition. Record final PR, validation, review,
+    feedback snapshot, ledger, token ledger, reports, and attention summaries
+    as separate controller events. `RUN_COMPLETED` must be rejected until all
+    are present at the same final head.
 40. Report the final pull request, its exact reviewed head, readiness, a
     deduplicated manual validation plan, and separate code and application
     attention points.
@@ -371,6 +379,13 @@ Pause and report a blocker when:
 - the automatic review/remediation pass budget is exhausted;
 - a token-cost anomaly requires an expensive repeat and no quality-neutral
   continuation is established.
+
+When information rather than approval is missing, apply
+`HUMAN_INPUT_REQUESTED` or a child `PHASE_TERMINATED` with `needs_input`.
+Publish the controller-generated `ACTION REQUIRED` packet with the exact
+question, accepted reply formats, blocked scope, and work continuing
+independently. Never expose only a generic "waiting for information" status.
+After `INPUT_PROVIDED`, resume the same visible child thread when applicable.
 
 When a human analysis or pre-merge gate is required, pause only the affected ticket and implementations that depend on it. Continue every selected analysis and any independent implementation whose gates are satisfied.
 
@@ -460,15 +475,12 @@ unknown, an automatic successor is ready, or completed evidence remains to be
 captured. At live completion, create or update the final pull request before
 the final Codex review and feedback collection.
 
-Run [control_guard.py](scripts/control_guard.py) against the reconciled durable
-manifest before yielding, completion, or checkpoint. A failing guard means the
-orchestrator must continue, capture missing evidence, or report a real blocker;
-never ignore the failure to produce a shorter final response.
-
-First run `train_controller.py check --mode yield` or `--mode completion` as
-applicable. Then run the legacy `control_guard.py` audit. Both must pass. The
-controller prevents an invalid transition; the guard checks reconciled
-cross-cutting evidence during the migration period.
+Run `train_controller.py check --mode yield` or `--mode completion` against
+the reconciled canonical manifest before every yield, completion, or
+checkpoint. A nonzero result means the orchestrator must continue, capture
+missing evidence, or report a real blocker. `control_guard.py` remains a
+legacy-manifest diagnostic only; its duplicated `control` projection must not
+override or replace the versioned procedural state.
 
 Use terminal reason `SUPERVISED_ACTIVE` only when active work is protected by
 a verified foreground wait or background watcher. It is not permission to

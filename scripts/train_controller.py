@@ -21,6 +21,7 @@ import run_registry
 CRITICALITIES = ("LOW", "NORMAL", "HIGH", "CRITICAL")
 COMPLEXITIES = ("LOW", "MEDIUM", "HIGH", "MAXIMUM")
 ACTIVE_PHASE_STATES = {"INTENT_RECORDED", "QUEUED", "RUNNING", "LAUNCH_UNKNOWN"}
+INPUT_PHASE_STATES = {"NEEDS_INPUT", "INPUT_READY"}
 TERMINAL_TICKET_STATES = {"ANALYSIS_REPORTED", "MERGED_INTO_TRAIN", "BLOCKED", "FAILED", "CANCELLED"}
 SETTING_ORDER = {
     ("gpt-5.6-terra", "medium"): 1,
@@ -71,6 +72,15 @@ class ControllerError(ValueError):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as error:
+        raise ControllerError(f"invalid {label}: {value}") from error
+    require(parsed.tzinfo is not None, f"{label} must include a timezone")
+    return parsed
 
 
 def require(condition: bool, message: str) -> None:
@@ -182,8 +192,9 @@ def add_phase(
 
 
 def create_gate(
-    proc: dict[str, Any], *, gate_id: str, kind: str, ticket_id: str, revision: str
-) -> None:
+    proc: dict[str, Any], *, gate_id: str, kind: str, ticket_id: str, revision: str,
+    phase_key: str | None = None, prior_ticket_status: str | None = None,
+) -> dict[str, Any]:
     gates = proc.setdefault("human_gates", {})
     require(isinstance(gates, dict), "procedure.human_gates must be an object")
     require(gate_id not in gates, f"gate already exists: {gate_id}")
@@ -192,8 +203,11 @@ def create_gate(
         "kind": kind,
         "ticket_id": ticket_id,
         "revision": revision,
+        "phase_key": phase_key,
+        "prior_ticket_status": prior_ticket_status,
         "status": "PENDING_UNANNOUNCED",
     }
+    return gates[gate_id]
 
 
 def active_execution_pairs(proc: dict[str, Any]) -> int:
@@ -239,6 +253,63 @@ def complete_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, Any
     item["completion_envelope"] = envelope
     item["usage_captured"] = True
     item["completed_at"] = now_iso()
+    return item
+
+
+def terminate_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, Any]:
+    item = phase(proc, str(event.get("phase_key") or ""))
+    require(item.get("launch_state") == "RUNNING", "only a verified running phase may terminate")
+    envelope = event.get("envelope")
+    require(isinstance(envelope, dict), "PHASE_TERMINATED requires envelope")
+    require_fields(
+        envelope,
+        (
+            "phase_key", "phase_status", "actual_model", "actual_reasoning_effort",
+            "result_summary", "artifacts", "tests_and_checks", "residual_risks",
+            "requested_or_recommended_next_action", "files_modified", "usage",
+        ),
+        "termination envelope",
+    )
+    require(envelope["phase_key"] == item["phase_key"], "termination envelope phase_key mismatch")
+    outcome = envelope["phase_status"]
+    require(outcome in {"needs_input", "blocked", "failed", "cancelled"}, "invalid terminated phase status")
+    require(envelope["actual_model"] == item["requested_model"], "actual model differs from routed model")
+    require(
+        envelope["actual_reasoning_effort"] == item["requested_reasoning_effort"],
+        "actual reasoning effort differs from routed effort",
+    )
+    usage = envelope.get("usage")
+    require(isinstance(usage, dict), "termination envelope usage must be an object")
+    require(usage.get("measurement") in {"complete", "partial", "unavailable"}, "invalid phase usage measurement")
+    item["completion_envelope"] = envelope
+    item["usage_captured"] = True
+    item["completed_at"] = now_iso()
+    ticket_id = item.get("ticket_id")
+    if outcome == "needs_input":
+        require(ticket_id, "a run-level phase cannot request ticket input")
+        request = envelope.get("input_request")
+        require(isinstance(request, dict), "needs_input requires input_request")
+        require_fields(
+            request,
+            ("gate_id", "revision", "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"),
+            "input request",
+        )
+        ticket_item = ticket(proc, str(ticket_id))
+        prior_status = ticket_item.get("status")
+        gate = create_gate(
+            proc, gate_id=request["gate_id"], kind="input", ticket_id=str(ticket_id),
+            revision=request["revision"], phase_key=item["phase_key"],
+            prior_ticket_status=prior_status,
+        )
+        gate.update({key: request[key] for key in (
+            "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
+        )})
+        item["launch_state"] = "NEEDS_INPUT"
+        ticket_item["status"] = "AWAITING_REQUIRED_INPUT"
+    else:
+        item["launch_state"] = outcome.upper()
+        if ticket_id:
+            ticket(proc, str(ticket_id))["status"] = outcome.upper()
     return item
 
 
@@ -369,6 +440,28 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         proc["dependency_revision"] = event.get("dependency_revision") or f"dependencies-r{proc['revision'] + 1}"
         return
 
+    if event_type == "HUMAN_INPUT_REQUESTED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(item.get("status") not in TERMINAL_TICKET_STATES, "terminal ticket cannot request input")
+        require_fields(
+            event,
+            (
+                "gate_id", "revision", "question", "reason", "blocked_scope",
+                "continuing_scope", "accepted_replies",
+            ),
+            "human input request",
+        )
+        gate = create_gate(
+            proc, gate_id=event["gate_id"], kind="input", ticket_id=event["ticket_id"],
+            revision=event["revision"], phase_key=event.get("phase_key"),
+            prior_ticket_status=item.get("status"),
+        )
+        gate.update({key: event[key] for key in (
+            "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
+        )})
+        item["status"] = "AWAITING_REQUIRED_INPUT"
+        return
+
     if event_type == "GATE_ANNOUNCED":
         gates = proc.get("human_gates", {})
         gate = gates.get(event.get("gate_id")) if isinstance(gates, dict) else None
@@ -385,6 +478,22 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         )})
         gate["status"] = "PENDING_ANNOUNCED"
         gate["announced_at"] = event.get("announced_at") or now_iso()
+        require(state.get("pending_human_action") in (None, {}), "another human action is already announced")
+        state["pending_human_action"] = {
+            "gate_id": gate["gate_id"],
+            "gate_type": gate["kind"],
+            "ticket_id": gate["ticket_id"],
+            "revision": gate["revision"],
+            "reason": gate.get("reason") or event["decision_summary"],
+            "question": gate.get("question") or event["decision_summary"],
+            "decision_summary": event["decision_summary"],
+            "evidence_summary": event["evidence_summary"],
+            "blocked_scope": event["blocked_scope"],
+            "continuing_scope": event["continuing_scope"],
+            "accepted_replies": event["accepted_replies"],
+            "notification_status": "ANNOUNCED",
+            "announced_at": gate["announced_at"],
+        }
         return
 
     if event_type == "GATE_RESOLVED":
@@ -393,10 +502,14 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(isinstance(gate, dict), "unknown gate")
         require(gate.get("status") == "PENDING_ANNOUNCED", "gate must be announced before resolution")
         require(event.get("revision") == gate.get("revision"), "gate revision mismatch")
+        require(gate.get("kind") != "input" or event.get("decision") == "rejected", "use INPUT_PROVIDED for supplied information")
         decision = event.get("decision")
         require(decision in {"approved", "rejected"}, "gate decision must be approved or rejected")
         gate["status"] = decision.upper()
         gate["resolved_at"] = now_iso()
+        pending_action = state.get("pending_human_action")
+        if isinstance(pending_action, dict) and pending_action.get("gate_id") == gate["gate_id"]:
+            state["pending_human_action"] = None
         item = ticket(proc, gate["ticket_id"])
         if decision == "rejected":
             item["status"] = "BLOCKED"
@@ -404,6 +517,48 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             item["status"] = "READY_FOR_IMPLEMENTATION" if proc.get("dependencies_consolidated") else "ANALYZED"
         elif gate["kind"] == "pre_merge":
             item["status"] = "READY_TO_MERGE"
+        return
+
+    if event_type == "INPUT_PROVIDED":
+        gates = proc.get("human_gates", {})
+        gate = gates.get(event.get("gate_id")) if isinstance(gates, dict) else None
+        require(isinstance(gate, dict) and gate.get("kind") == "input", "unknown input gate")
+        require(gate.get("status") == "PENDING_ANNOUNCED", "input request must be announced first")
+        require(event.get("revision") == gate.get("revision"), "input revision mismatch")
+        require_fields(event, ("response_summary", "response_artifact"), "provided input")
+        gate["status"] = "PROVIDED"
+        gate["response_summary"] = event["response_summary"]
+        gate["response_artifact"] = event["response_artifact"]
+        gate["resolved_at"] = now_iso()
+        pending_action = state.get("pending_human_action")
+        if isinstance(pending_action, dict) and pending_action.get("gate_id") == gate["gate_id"]:
+            state["pending_human_action"] = None
+        item = ticket(proc, gate["ticket_id"])
+        if gate.get("phase_key"):
+            interrupted = phase(proc, gate["phase_key"])
+            require(interrupted.get("launch_state") == "NEEDS_INPUT", "input phase is not waiting")
+            interrupted["launch_state"] = "INPUT_READY"
+            interrupted["provided_input"] = {
+                "summary": event["response_summary"],
+                "artifact": event["response_artifact"],
+            }
+        else:
+            item["status"] = gate.get("prior_ticket_status") or "READY_FOR_IMPLEMENTATION"
+        return
+
+    if event_type == "PHASE_RESUMED":
+        value = phase(proc, str(event.get("phase_key") or ""))
+        require(value.get("launch_state") == "INPUT_READY", "phase has no provided input to resume")
+        require(event.get("thread_id") == value.get("thread_id"), "resume must continue the same visible phase thread")
+        require(event.get("visibility_verified") is True, "resumed phase visibility must be verified")
+        value["launch_state"] = "RUNNING"
+        value["last_observed_at"] = now_iso()
+        gate = next(
+            (gate for gate in proc.get("human_gates", {}).values() if gate.get("phase_key") == value["phase_key"]),
+            None,
+        )
+        require(isinstance(gate, dict) and gate.get("status") == "PROVIDED", "phase input gate is not resolved")
+        ticket(proc, gate["ticket_id"])["status"] = gate.get("prior_ticket_status") or "EXECUTION_PAIR_RUNNING"
         return
 
     if event_type == "EXECUTION_PAIR_DISPATCHED":
@@ -485,6 +640,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             ticket(proc, completed["ticket_id"])["status"] = "AWAITING_REMEDIATION_VERIFICATION"
         elif completed["kind"] == "final_remediation":
             proc["finalization"]["status"] = "AWAITING_FINAL_PR_UPDATE"
+        return
+
+    if event_type == "PHASE_TERMINATED":
+        terminate_phase(event, proc)
         return
 
     if event_type == "VERIFICATION_RECORDED":
@@ -680,6 +839,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             final.pop("verification", None)
             final.pop("review", None)
             final.pop("review_phase_key", None)
+            final.pop("feedback_collection", None)
+            final.pop("feedback_snapshot", None)
+            final.pop("finding_ledger", None)
             final.pop("evidence", None)
         final["pull_request"] = dict(event)
         final["status"] = "FINAL_PR_OPEN"
@@ -767,18 +929,121 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "actual_model": completed["requested_model"],
             "actual_reasoning_effort": completed["requested_reasoning_effort"],
         })
+        final["status"] = "AWAITING_FINAL_FEEDBACK_COLLECTION"
+        return
+
+    if event_type == "FINAL_FEEDBACK_COLLECTION_STARTED":
+        final = proc["finalization"]
+        require(final.get("status") == "AWAITING_FINAL_FEEDBACK_COLLECTION", "final review must complete before feedback collection")
+        require_fields(
+            event,
+            ("collection_id", "head_commit", "started_at", "deadline_at", "expected_sources"),
+            "final feedback collection",
+        )
+        require(event["head_commit"] == final.get("pull_request", {}).get("head_commit"), "feedback collection head mismatch")
+        require(isinstance(event["expected_sources"], list), "expected_sources must be a list")
+        require(set(event["expected_sources"]) == {"codex", "ci", "copilot", "human"}, "all final feedback sources must be monitored")
+        require(parse_iso(event["deadline_at"], "feedback deadline") > parse_iso(event["started_at"], "feedback start"), "feedback deadline must follow start")
+        final["feedback_collection"] = dict(event)
+        final["status"] = "FINAL_FEEDBACK_COLLECTION"
+        return
+
+    if event_type == "FINAL_FEEDBACK_SNAPSHOT_RECORDED":
+        final = proc["finalization"]
+        require(final.get("status") == "FINAL_FEEDBACK_COLLECTION", "final feedback collection has not started")
+        collection = final.get("feedback_collection") or {}
+        require_fields(
+            event,
+            (
+                "snapshot_id", "collection_id", "head_commit", "collected_at", "ci_status",
+                "copilot_status", "source_counts", "evidence_reference",
+            ),
+            "final feedback snapshot",
+        )
+        require("source_findings" in event, "final feedback snapshot is missing: source_findings")
+        require("unresolved_thread_ids" in event, "final feedback snapshot is missing: unresolved_thread_ids")
+        require(event["collection_id"] == collection.get("collection_id"), "feedback collection ID mismatch")
+        require(event["head_commit"] == final.get("pull_request", {}).get("head_commit"), "feedback snapshot head mismatch")
+        require(event["ci_status"] in {"passed", "not_configured", "unavailable_with_local_fallback"}, "unacceptable final CI status")
+        require(event["copilot_status"] in {"received", "not_configured", "unavailable", "timed_out"}, "Copilot collection is not terminal")
+        if event["copilot_status"] == "timed_out":
+            require(
+                parse_iso(event["collected_at"], "feedback collection time") >= parse_iso(collection["deadline_at"], "feedback deadline"),
+                "Copilot cannot time out before the bounded deadline",
+            )
+        if event["copilot_status"] in {"not_configured", "unavailable"}:
+            require(bool(event.get("copilot_status_evidence")), "Copilot unavailable state requires evidence")
+        counts = event["source_counts"]
+        findings = event["source_findings"]
+        require(isinstance(counts, dict), "source_counts must be an object")
+        require(isinstance(findings, list), "source_findings must be a list")
+        require(isinstance(event["unresolved_thread_ids"], list), "unresolved_thread_ids must be a list")
+        expected_sources = set(collection["expected_sources"])
+        require(set(counts) == expected_sources, "source_counts must cover every monitored source")
+        seen_ids: set[str] = set()
+        calculated = {source: 0 for source in expected_sources}
+        for finding in findings:
+            require(isinstance(finding, dict), "source finding must be an object")
+            require_fields(finding, ("finding_id", "source"), "source finding")
+            require(finding["source"] in expected_sources, "unexpected final finding source")
+            require(finding["finding_id"] not in seen_ids, "duplicate final source finding ID")
+            seen_ids.add(finding["finding_id"])
+            calculated[finding["source"]] += 1
+        require(all(counts[source] == calculated[source] for source in expected_sources), "source finding counts do not match inventory")
+        final["feedback_snapshot"] = dict(event)
         final["status"] = "AWAITING_FINAL_FINDING_RECONCILIATION"
         return
 
     if event_type == "FINAL_FINDINGS_RECONCILED":
         final = proc["finalization"]
         require(final.get("status") == "AWAITING_FINAL_FINDING_RECONCILIATION", "final train is not awaiting finding reconciliation")
-        require_fields(event, ("head_commit", "ledger_status", "sources_dispositioned"), "final finding ledger")
+        snapshot = final.get("feedback_snapshot") or {}
+        require_fields(
+            event,
+            (
+                "head_commit", "feedback_snapshot_id", "ledger_status", "sources_dispositioned",
+            ),
+            "final finding ledger",
+        )
+        require("finding_dispositions" in event, "final finding ledger is missing: finding_dispositions")
+        require("remaining_unresolved_thread_ids" in event, "final finding ledger is missing: remaining_unresolved_thread_ids")
         require(event["head_commit"] == final.get("pull_request", {}).get("head_commit"), "final finding ledger head mismatch")
+        require(event["feedback_snapshot_id"] == snapshot.get("snapshot_id"), "finding ledger does not use the latest feedback snapshot")
         require(event["ledger_status"] == "complete", "final finding ledger is incomplete")
         require(isinstance(event["sources_dispositioned"], list), "sources_dispositioned must be a list")
-        require("codex" in event["sources_dispositioned"], "final Codex findings were not dispositioned")
+        require(set(event["sources_dispositioned"]) == {"codex", "ci", "copilot", "human"}, "every final feedback source must be dispositioned")
+        dispositions = event["finding_dispositions"]
+        require(isinstance(dispositions, list), "finding_dispositions must be a list")
+        source_ids = {finding["finding_id"] for finding in snapshot.get("source_findings", [])}
+        disposition_ids: set[str] = set()
+        for disposition in dispositions:
+            require(isinstance(disposition, dict), "finding disposition must be an object")
+            require_fields(
+                disposition,
+                ("finding_id", "disposition", "blocking", "remediation_status", "verification"),
+                "finding disposition",
+            )
+            require(
+                disposition["disposition"] in {
+                    "accepted-fixed", "accepted-deferred", "rejected-incorrect",
+                    "rejected-out-of-scope", "escalated-human-decision",
+                },
+                "invalid finding disposition",
+            )
+            require(disposition["finding_id"] not in disposition_ids, "duplicate finding disposition")
+            disposition_ids.add(disposition["finding_id"])
+        require(disposition_ids == source_ids, "every collected final finding requires exactly one disposition")
         require(isinstance(event.get("blocking_findings"), list), "blocking_findings must be a list")
+        require(isinstance(event["remaining_unresolved_thread_ids"], list), "remaining_unresolved_thread_ids must be a list")
+        require(set(event["blocking_findings"]).issubset(source_ids), "blocking findings must come from the collected snapshot")
+        collected_thread_ids = {
+            finding.get("thread_id") for finding in snapshot.get("source_findings", [])
+            if finding.get("thread_id")
+        }
+        require(
+            set(event["remaining_unresolved_thread_ids"]).issubset(collected_thread_ids),
+            "remaining review threads must be present in the collected snapshot",
+        )
         final["finding_ledger"] = dict(event)
         final["status"] = "NEEDS_FINAL_REMEDIATION" if event["blocking_findings"] else "FINAL_PR_REVIEW_CLEAN"
         return
@@ -810,12 +1075,16 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require_fields(
             event,
             (
-                "ci_status", "copilot_status", "finding_ledger_status", "token_reporting_status",
+                "feedback_snapshot_id", "ci_status", "copilot_status", "finding_ledger_status", "token_reporting_status",
                 "session_usage_ledger_ready", "verification_summary_ready", "manual_validation_summary_ready",
                 "attention_points_summary_ready", "task_inventory_ready", "completion_report_ready",
             ),
             "final evidence",
         )
+        snapshot = final.get("feedback_snapshot") or {}
+        require(event["feedback_snapshot_id"] == snapshot.get("snapshot_id"), "final evidence does not use the latest feedback snapshot")
+        require(event["ci_status"] == snapshot.get("ci_status"), "final CI status differs from the collected snapshot")
+        require(event["copilot_status"] == snapshot.get("copilot_status"), "final Copilot status differs from the collected snapshot")
         require(event["ci_status"] in {"passed", "not_configured", "unavailable_with_local_fallback"}, "unacceptable final CI status")
         require(event["copilot_status"] in {"received", "not_configured", "unavailable", "timed_out"}, "invalid Copilot status")
         require(event["finding_ledger_status"] == "complete", "final finding ledger is incomplete")
@@ -862,12 +1131,18 @@ def completion_issues(state: dict[str, Any]) -> list[str]:
     pr = final.get("pull_request") or {}
     verification = final.get("verification") or {}
     review = final.get("review") or {}
+    snapshot = final.get("feedback_snapshot") or {}
+    ledger = final.get("finding_ledger") or {}
     if not pr.get("url"):
         issues.append("final train PR is missing")
     if pr.get("head_commit") != verification.get("head_commit"):
         issues.append("final verification does not cover the PR head")
     if pr.get("head_commit") != review.get("reviewed_head"):
         issues.append("final review does not cover the PR head")
+    if pr.get("head_commit") != snapshot.get("head_commit"):
+        issues.append("final GitHub feedback snapshot does not cover the PR head")
+    if ledger.get("feedback_snapshot_id") != snapshot.get("snapshot_id"):
+        issues.append("final finding ledger does not use the latest GitHub feedback snapshot")
     return issues
 
 
@@ -879,8 +1154,8 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         return [{"action": "CONFIGURE_SUPERVISION_BEFORE_DISPATCH"}]
 
     unannounced = [gate for gate in proc["human_gates"].values() if gate["status"] == "PENDING_UNANNOUNCED"]
-    if unannounced:
-        return [{"action": "ANNOUNCE_HUMAN_GATE", "gate": gate} for gate in unannounced]
+    if unannounced and not state.get("pending_human_action"):
+        return [{"action": "ANNOUNCE_HUMAN_GATE", "gate": unannounced[0]}]
     waiting_gates = [gate for gate in proc["human_gates"].values() if gate["status"] == "PENDING_ANNOUNCED"]
     gate_actions = [{"action": "AWAIT_HUMAN_GATE", "gate": gate} for gate in waiting_gates]
 
@@ -898,6 +1173,17 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "branch": value.get("branch"),
             }
             for value in intents
+        ] + gate_actions
+    input_ready = [value for value in proc["phases"].values() if value.get("launch_state") == "INPUT_READY"]
+    if input_ready:
+        return [
+            {
+                "action": "RESUME_VISIBLE_PHASE_WITH_INPUT",
+                "phase_key": value["phase_key"],
+                "thread_id": value.get("thread_id"),
+                "provided_input": value.get("provided_input"),
+            }
+            for value in input_ready
         ] + gate_actions
     unknown = [value for value in proc["phases"].values() if value.get("launch_state") == "LAUNCH_UNKNOWN"]
     if unknown:
@@ -990,6 +1276,19 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
             return [{"action": "START_FINALIZATION"}]
         if final.get("status") == "NEEDS_FINAL_REMEDIATION":
             return [{"action": "RECORD_FINAL_REMEDIATION_DISPATCH_INTENT"}]
+        if final.get("status") == "AWAITING_FINAL_FEEDBACK_COLLECTION":
+            return [{
+                "action": "START_FINAL_GITHUB_FEEDBACK_COLLECTION",
+                "head_commit": final.get("pull_request", {}).get("head_commit"),
+                "sources": ["codex", "ci", "copilot", "human"],
+            }]
+        if final.get("status") == "FINAL_FEEDBACK_COLLECTION":
+            return [{
+                "action": "CAPTURE_FINAL_GITHUB_FEEDBACK_SNAPSHOT",
+                "head_commit": final.get("pull_request", {}).get("head_commit"),
+                "collection_id": final.get("feedback_collection", {}).get("collection_id"),
+                "deadline_at": final.get("feedback_collection", {}).get("deadline_at"),
+            }]
         if final.get("status") == "AWAITING_FINAL_FINDING_RECONCILIATION":
             return [{"action": "RECONCILE_FINAL_CODEX_CI_COPILOT_FINDINGS"}]
         if final.get("status") == "AWAITING_FINAL_PR_UPDATE":
@@ -1002,8 +1301,8 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
             if not final.get("review_phase_key"):
                 return [{"action": "RECORD_FINAL_REVIEW_DISPATCH_INTENT"}]
             return [{"action": "RECORD_FINAL_REVIEW_RESULT", "phase_key": final["review_phase_key"]}]
-        if not final.get("evidence"):
-            return [{"action": "COLLECT_FINAL_CI_COPILOT_TOKENS_AND_REPORTS"}]
+        if final.get("status") == "FINAL_PR_REVIEW_CLEAN" and not final.get("evidence"):
+            return [{"action": "COLLECT_FINAL_TOKENS_AND_REPORTS"}]
         if proc.get("run_status") != "COMPLETED":
             return [{"action": "COMPLETE_RUN"}]
     return [{"action": "BLOCKED_OR_INCONSISTENT_STATE", "status": compact_status(state)}]
@@ -1023,8 +1322,50 @@ def compact_status(state: dict[str, Any]) -> dict[str, Any]:
             gate["gate_id"] for gate in proc["human_gates"].values()
             if gate.get("status", "").startswith("PENDING")
         ],
+        "pending_human_action": state.get("pending_human_action"),
         "finalization": proc.get("finalization", {}).get("status"),
     }
+
+
+def migrate_procedure(state: dict[str, Any]) -> bool:
+    proc = procedure(state)
+    changed = False
+    if int(proc.get("schema_version", 1)) < 2:
+        proc["schema_version"] = 2
+        changed = True
+    if "pending_human_action" not in state:
+        state["pending_human_action"] = None
+        changed = True
+    return changed
+
+
+def heartbeat(args: argparse.Namespace) -> int:
+    state = run_registry.load_json(args.state)
+    status = compact_status(state)
+    actions = next_actions(state)
+    pending = state.get("pending_human_action")
+    if procedure(state).get("run_status") == "COMPLETED":
+        decision = "STOP_COMPLETED"
+    elif pending:
+        decision = "NOTIFY_ACTION_REQUIRED"
+    elif any(action["action"] == "BLOCKED_OR_INCONSISTENT_STATE" for action in actions):
+        decision = "ESCALATE_CONTROLLER_INCONSISTENCY"
+    elif any(action["action"] not in {"WAIT_FOR_PHASE_TRANSITION", "AWAIT_HUMAN_GATE"} for action in actions):
+        decision = "CONTINUE_AUTOMATICALLY"
+    elif status["active_phases"]:
+        decision = "WAIT_FOR_TRANSITION"
+    else:
+        decision = "WAIT_FOR_USER_GATE"
+    output = {
+        **status,
+        "heartbeat_decision": decision,
+        "may_pause_or_delete_watcher": decision == "STOP_COMPLETED",
+        "next_actions": actions,
+        "controller_revision": procedure(state).get("revision"),
+        "controller_updated_at": procedure(state).get("updated_at"),
+    }
+    sys.stdout.write(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
+    return 0
 
 
 def bootstrap(args: argparse.Namespace) -> int:
@@ -1032,6 +1373,10 @@ def bootstrap(args: argparse.Namespace) -> int:
     with run_registry.directory_lock(path.parent):
         state = run_registry.load_json(path)
         if isinstance(state.get("procedure"), dict):
+            if migrate_procedure(state):
+                procedure(state)["updated_at"] = now_iso()
+                state["manifest_updated_at"] = procedure(state)["updated_at"]
+                run_registry.save_json(path, state)
             output = {"status": "already-bootstrapped", "state": str(path), **compact_status(state)}
             sys.stdout.write(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
             return 0
@@ -1040,7 +1385,7 @@ def bootstrap(args: argparse.Namespace) -> int:
         timestamp = now_iso()
         state["schema_version"] = max(int(state.get("schema_version", 0)), 3)
         state["procedure"] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "revision": 0,
             "run_status": "ACTIVE",
             "base_branch": args.base_branch,
@@ -1146,6 +1491,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     status.add_argument("--state", type=Path, required=True)
     status.set_defaults(handler=show)
+
+    pulse = commands.add_parser("heartbeat")
+    pulse.add_argument("--state", type=Path, required=True)
+    pulse.set_defaults(handler=heartbeat)
 
     verify = commands.add_parser("check")
     verify.add_argument("--state", type=Path, required=True)

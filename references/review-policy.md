@@ -325,6 +325,25 @@ ledger. Apply the same dispositions and deduplication rules as ticket reviews.
 Batch compatible accepted findings instead of creating one remediation cycle
 per comment.
 
+The controller requires this exact final sequence on one stable head:
+
+1. `FINAL_REVIEW_RECORDED` with a complete inventory.
+2. `FINAL_FEEDBACK_COLLECTION_STARTED` with a collection ID, start, deadline,
+   head, and the four monitored sources: Codex, CI, Copilot, and human.
+3. Query PR reviews, inline review threads including resolved state, general
+   comments, and exact-head CI. Record one
+   `FINAL_FEEDBACK_SNAPSHOT_RECORDED` with source counts, stable finding IDs,
+   unresolved thread IDs, and a durable evidence reference.
+4. `FINAL_FINDINGS_RECONCILED` with exactly one disposition for every finding
+   ID in that snapshot and an explicit inventory of threads still unresolved
+   on GitHub despite their technical disposition.
+5. Only then record final report/token evidence or start grouped remediation.
+
+Do not treat a list of nominally dispositioned sources as proof that comments
+were actually collected. A later pull-request head invalidates the snapshot
+and all downstream dispositions. Collect a fresh snapshot after the new
+exact-head verification and follow-up review.
+
 For remediation:
 
 1. Ask an original ticket worker for a compact targeted handoff only when its
@@ -353,6 +372,13 @@ is unconfigured, unavailable, or does not respond within the bounded
 monitoring window, record that state and continue with mandatory Codex review
 and repository checks unless repository policy or the user explicitly made
 Copilot mandatory.
+
+`timed_out` is valid only after the recorded collection deadline.
+`not_configured` and `unavailable` require connector or repository evidence;
+they are not convenient defaults. When Copilot responds, inventory every
+comment and suppressed finding exposed by the review payload, assess each
+technically, and record an accepted, rejected, deferred, or escalated
+disposition before readiness.
 
 The final pull request is ready for user action only when:
 

@@ -162,8 +162,10 @@ leave it only in a heartbeat, child report, automation output, or status table.
 
 ## <ticket or train> — <analysis approval | pre-merge approval | decision>
 
+- Controller revision and updated at:
 - Revision or exact head:
 - Why your decision is required:
+- Exact question or information required:
 - What was analyzed or implemented:
 - Functional impact:
 - Architecture impact:
@@ -182,7 +184,8 @@ leave it only in a heartbeat, child report, automation output, or status table.
 Use explicit `No impact identified` statements. Persist the corresponding
 `pending_human_action` with `notification_status = ANNOUNCED` before yielding.
 While it remains unresolved, each liveness message repeats the heading, gate
-ID, revision, and accepted replies.
+ID, revision, exact question, accepted replies, blocked scope, and continuing
+scope. Never reduce it to "waiting for information".
 
 ## Routing triage report
 
@@ -608,6 +611,10 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Final train review routing conformance: conformant | documented-fallback | nonconformant
 - Final CI status:
 - Copilot review status: received | pending | unavailable | not configured | timed out
+- Final GitHub feedback collection ID and deadline:
+- Final GitHub feedback snapshot ID and exact head:
+- Collected source counts: Codex / CI / Copilot / human
+- Unresolved review threads:
 - Final finding-ledger status:
 - Run status: completed | stopped | five-ticket checkpoint
 - Terminal reason: AWAITING_REQUIRED_USER_INPUT | BLOCKED | COMPLETED | CHECKPOINT
@@ -654,6 +661,7 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Final Codex review routing conformant | yes \| no | | |
 | Exact-head CI collected | complete \| pending \| unavailable | | |
 | Copilot/comments dispositioned | complete \| pending \| unavailable \| not configured | | |
+| GitHub feedback snapshot covers final head | complete \| stale \| missing | | |
 | Token accounting reported | complete \| partial \| unavailable | | |
 | Functional verification summarized | complete \| incomplete | | |
 | Manual validation summarized | complete \| incomplete | | |

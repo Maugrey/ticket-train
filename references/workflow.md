@@ -576,6 +576,13 @@ Every human gate uses the main-thread `ACTION REQUIRED` report and durable
 pending-action object from [run-continuity.md](run-continuity.md). Never hide a
 gate only inside heartbeat output or suppress every reminder.
 
+Treat missing information the same way: record `HUMAN_INPUT_REQUESTED` or a
+child `PHASE_TERMINATED` with `needs_input`, announce the exact question in the
+main thread, continue independent work, and resume the same visible phase
+after `INPUT_PROVIDED`. A generic "waiting for information" status is invalid.
+At each background wake, run `train_controller.py heartbeat`; do not pause or
+delete supervision unless its deterministic output permits it.
+
 Use [efficiency-policy.md](efficiency-policy.md) as the pass and cost budget.
 A model turn must correspond to a transition, failure, blocker, dispatch, or
 technical decision. An unchanged wait snapshot produces no detailed read,
@@ -818,7 +825,9 @@ Finalize in this order:
    trustworthy exact-head ticket evidence and adding integration-level checks.
 4. Push the current train head.
 5. Create or update one final train pull request targeting the resolved base
-   branch and record its URL and exact head.
+   branch and record its URL and exact head. This is automatic when the queue
+   becomes terminal; do not wait for the user to request it or ask them to
+   reconfirm the already resolved base branch.
 6. Route one independent final-train review through
    the initial automated-review matrix. Derive one train-level classification
    from consolidated evidence and use the highest selected ticket
@@ -831,8 +840,11 @@ Finalize in this order:
    initial-review setting, the resulting floor, requested setting, actual
    setting, and routing conformance before accepting the review. A pre-PR
    branch review cannot substitute for this final pull-request review.
-7. Collect exact-head CI results and available Copilot, Codex, and human
-   comments into one deduplicated train finding ledger.
+7. Start a bounded exact-head feedback collection after the final review.
+   Snapshot CI results and available Copilot, Codex, and human comments,
+   including review-thread resolution state and stable finding IDs, then build
+   one deduplicated train finding ledger with exactly one disposition per
+   collected finding.
 8. Technically assess every Copilot suggestion. Never apply it automatically
    and never ask the user to triage ordinary findings.
 9. Batch compatible accepted findings once. When ticket-specific context is
@@ -856,7 +868,8 @@ Finalize in this order:
     head, mandatory exact-head checks pass, automated review has no blocking
     finding, and every available comment has a disposition.
 13. If Copilot is not configured, unavailable, or does not respond within the
-    bounded monitoring window, report that status. Do not block indefinitely
+    bounded monitoring window, record evidence for that state; accept a timeout
+    only after the recorded deadline. Do not block indefinitely
     unless repository policy or the user made Copilot review mandatory.
 14. Build the concise manual validation plan and code/application attention
     summaries required by [report-template.md](report-template.md).
@@ -874,9 +887,11 @@ report is missing. Mark unavailable evidence explicitly rather than omitting
 it.
 
 Also apply `FINAL_PR_RECORDED`, `FINAL_VERIFICATION_RECORDED`,
-`FINAL_REVIEW_RECORDED`, and `FINAL_EVIDENCE_RECORDED` to the procedural
-controller, then request `RUN_COMPLETED`. A rejected completion event is a
-hard stop even when a prose summary appears complete.
+`FINAL_REVIEW_RECORDED`, `FINAL_FEEDBACK_COLLECTION_STARTED`,
+`FINAL_FEEDBACK_SNAPSHOT_RECORDED`, `FINAL_FINDINGS_RECONCILED`, and
+`FINAL_EVIDENCE_RECORDED` to the procedural controller, then request
+`RUN_COMPLETED`. A rejected completion event is a hard stop even when a prose
+summary appears complete.
 
 Tie every test, Codex review, Copilot collection, and readiness statement to an
 exact final pull-request head. If Codex is explicitly asked to merge the final

@@ -159,7 +159,7 @@ envelope in its final response:
 
 ```text
 phase_key
-phase_status = completed | blocked | failed | cancelled
+phase_status = completed | needs_input | blocked | failed | cancelled
 actual_model
 actual_reasoning_effort
 result_summary
@@ -173,6 +173,24 @@ requested_or_recommended_next_action
 files_modified = none | explicit list
 usage = measurement plus exact counters or explicit unavailable status
 ```
+
+For `needs_input`, also require:
+
+```text
+input_request.gate_id
+input_request.revision
+input_request.question
+input_request.reason
+input_request.blocked_scope
+input_request.continuing_scope
+input_request.accepted_replies
+```
+
+Apply this envelope as `PHASE_TERMINATED`. The controller turns it into an
+unannounced main-thread action and freezes only the affected ticket. After
+`INPUT_PROVIDED`, send the compact answer to the same visible phase thread and
+apply `PHASE_RESUMED`; do not create a replacement thread or leave the answer
+only in the orchestrator conversation.
 
 The envelope is a result contract, not a notification mechanism. The
 orchestrator must still wait for and collect it. Reject an incomplete envelope
@@ -214,6 +232,13 @@ The orchestrator owns result collection, state advancement, and successor
 dispatch. Do not rely on the user to notice a completed child or send a message
 that wakes the main conversation.
 
+At every background wake, run `train_controller.py heartbeat` first. Follow
+its `heartbeat_decision` and `next_actions`; do not derive lifecycle state from
+the automation prompt. Never pause or delete the watcher unless the command
+returns `may_pause_or_delete_watcher = true`. An announced information request
+keeps reminders active, and merged tickets without a final pull request remain
+automatically runnable.
+
 If normal thread waits are temporarily unavailable, use a bounded monitor or
 product-supported wake-up mechanism while continuing to reconcile the same
 visible thread IDs. Do not create replacement workers. If reliable monitoring
@@ -248,6 +273,9 @@ While work is active, the default maximum user-visible silence is 15 minutes.
 This liveness message is a one-line deterministic status and must not reread
 child context. A pending human action is never unchanged noise: its reminder
 begins with `ACTION REQUIRED` and cannot be replaced by `DONT_NOTIFY`.
+Repeat the exact question, gate revision, accepted replies, blocked scope, and
+independently continuing scope. "Waiting for information" without these
+fields is a control defect.
 
 Use the status template in [report-template.md](report-template.md).
 
@@ -289,6 +317,11 @@ Do not leave the manifest at a stale high-level state while child work
 continues. Before every user-facing status or final report, reconcile the
 manifest with live threads, Git branches, pull requests, gates, and usage
 snapshots.
+
+Include the current controller revision and `updated_at` in every material
+status. If tasks, branches, or pull requests moved after that timestamp, stop
+reporting from conversational memory and reconcile the missing events before
+continuing technical work.
 
 Use `scripts/train_supervisor.py` for deterministic reconciliation:
 
@@ -415,7 +448,8 @@ python scripts/train_controller.py check --state <run-manifest.json> --mode yiel
 python scripts/train_controller.py check --state <run-manifest.json> --mode completion
 ```
 
-Then run the migration-period independent guards:
+For a legacy-manifest diagnosis only, the old read-only guards remain
+available:
 
 ```powershell
 python scripts/control_guard.py check-yield --state <run-manifest.json>
@@ -423,10 +457,10 @@ python scripts/control_guard.py check-completion --state <run-manifest.json>
 python scripts/control_guard.py check-verification --state <run-manifest.json> --ticket <ticket-id>
 ```
 
-Use the skill's absolute script path when outside the skill directory. Treat a
-nonzero exit as a guard failure: keep supervising or complete the missing
-evidence. The script is read-only and does not replace live-state
-reconciliation.
+Use the skill's absolute script path when outside the skill directory. The
+procedural controller check is authoritative. The legacy guard reads a
+duplicated `control` projection and must not become a second lifecycle state
+that advances independently or overrides `procedure`.
 
 The guard also enforces user-visible execution, proportionality and size state,
 one complete review per stable scope, at most two automatic remediation cycles,
@@ -455,6 +489,13 @@ Do not send an unsupervised final response when:
   result has not been captured;
 - the durable manifest is stale;
 - finalization requirements remain executable.
+
+Do not say implementation, integration, review, or the train is finished
+while controller status offers `START_FINALIZATION`,
+`CREATE_FINAL_TRAIN_PR`, `RUN_FINAL_EXACT_HEAD_VERIFICATION`,
+`RECORD_FINAL_REVIEW_DISPATCH_INTENT`,
+`START_FINAL_GITHUB_FEEDBACK_COLLECTION`, or a later finalization action.
+These are automatic successors, not work the user must request.
 
 `SUPERVISED_ACTIVE` is the narrow exception for queued/running phases. It
 requires verified supervision and no hidden human gate. It is not a completion

@@ -255,8 +255,12 @@ their merge.
 The train freezes after five integrated tickets or an earlier cumulative-size
 checkpoint. Finalization creates or updates one train-to-base pull request,
 runs cross-ticket acceptance and environment checks on its exact head, performs
-an independent final review, collects external comments, and reports remaining
-manual validation and attention points.
+an independent final review, then opens a bounded GitHub feedback window. One
+exact-head snapshot inventories Codex, CI, Copilot, and human findings; every
+finding receives one technical disposition before readiness. A new head
+invalidates that snapshot and triggers focused verification and collection
+again. Finalization starts automatically when the selected queue is terminal;
+the user does not need to request the PR or reconfirm the resolved base branch.
 
 Only the user may merge that final pull request, either directly or by an
 explicit request to Codex.
@@ -310,6 +314,13 @@ parallel independent-test task, review before functional readiness, focused
 re-review without a full baseline, ticket PRs targeting the base branch, and
 completion without the final PR/review/token/report evidence.
 
+Missing information is also procedural state. A worker can return
+`needs_input`, or the orchestrator can record a product/legal/environment
+question directly. The controller then exposes one explicit `ACTION REQUIRED`
+packet with the exact question, accepted answer formats, blocked scope, and
+work that continues independently. After the answer, the same visible worker
+is resumed when applicable.
+
 Every run has one fingerprint, one canonical manifest under
 `$CODEX_HOME/ticket-train/runs`, and one orchestrator lease. Before creating a
 run, the registry searches for an existing match. A new main conversation must
@@ -325,12 +336,19 @@ Supervision is resolved before any child starts. Long work uses a verified
 run-scoped watcher when the orchestrator cannot remain in foreground wait. It
 checks deterministic state at most every five minutes, reports transitions
 immediately, and provides a compact liveness confirmation at least every 15
-minutes. The user does not need to create a scheduled task.
+minutes. Its `heartbeat` decision forbids pausing or deletion while any
+automatic action, user reminder, verification, review, or finalization remains.
+The user does not need to create a scheduled task.
 
 Human gates are first-class durable state. Every approval request is headed
 `ACTION REQUIRED` in the main conversation, contains a self-sufficient decision
 packet and exact accepted replies, and remains visible in liveness updates
 until resolved.
+
+Final pull-request feedback is first-class state too: collection window,
+deadline, snapshot ID, exact head, source counts, unresolved review threads,
+per-finding dispositions, and remediation verification are all stored before
+the train can complete.
 
 The bundled deterministic tools support this control plane:
 
@@ -340,8 +358,8 @@ The bundled deterministic tools support this control plane:
   GitHub, test, and verification events into the run manifest;
 - [`run_registry.py`](scripts/run_registry.py) creates, discovers, and claims
   canonical runs without duplicate ownership;
-- [`control_guard.py`](scripts/control_guard.py) prevents unsafe yield,
-  completion, or functional-readiness transitions;
+- [`control_guard.py`](scripts/control_guard.py) diagnoses older manifests;
+  current lifecycle authority belongs only to the procedural controller;
 - [`token_usage.py`](scripts/token_usage.py) captures and reconciles available
   token counters.
 
