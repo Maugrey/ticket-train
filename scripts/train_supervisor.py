@@ -79,6 +79,7 @@ def finalize_update(state: dict[str, Any], transition: str) -> None:
     ctl["manifest_reconciled"] = True
     state["manifest_updated_at"] = timestamp
     state["last_state_transition"] = transition
+    ctl["last_state_transition"] = transition
 
 
 def thread_event(args: argparse.Namespace) -> None:
@@ -104,6 +105,8 @@ def thread_event(args: argparse.Namespace) -> None:
         "usage_captured",
         "actual_model",
         "actual_reasoning_effort",
+        "visibility_verified",
+        "visibility_verified_at",
     }
     changed: list[str] = []
     for key in allowed:
@@ -126,6 +129,140 @@ def thread_event(args: argparse.Namespace) -> None:
     finalize_update(state, f"thread:{phase_key}:{phase.get('launch_state')}")
     save_json(args.state, state)
     sys.stdout.write(json.dumps({"status": "updated", "changed_fields": changed}) + "\n")
+
+
+def supervision_event(args: argparse.Namespace) -> None:
+    state = load_json(args.state)
+    event = json.loads(args.event_json)
+    if not isinstance(event, dict):
+        raise ValueError("Supervision event JSON must be an object")
+    allowed = {
+        "mode",
+        "status",
+        "watcher_id",
+        "last_check_at",
+        "next_check_at",
+        "max_internal_poll_seconds",
+        "max_user_silence_seconds",
+        "last_user_update_at",
+    }
+    unknown = sorted(set(event) - allowed)
+    if unknown:
+        raise ValueError("Unsupported supervision fields: " + ", ".join(unknown))
+    supervision = state.setdefault("supervision", {})
+    if not isinstance(supervision, dict):
+        raise ValueError("supervision must be an object")
+    changed: list[str] = []
+    for key, value in event.items():
+        if supervision.get(key) != value:
+            supervision[key] = value
+            changed.append(key)
+    if not changed:
+        sys.stdout.write(json.dumps({"status": "unchanged", "changed_fields": []}) + "\n")
+        return
+    append_event(state, {"type": "supervision", "changed_fields": changed})
+    finalize_update(state, "supervision:updated")
+    save_json(args.state, state)
+    sys.stdout.write(json.dumps({"status": "updated", "changed_fields": changed}) + "\n")
+
+
+def human_gate_event(args: argparse.Namespace) -> None:
+    state = load_json(args.state)
+    event = json.loads(args.event_json)
+    if not isinstance(event, dict):
+        raise ValueError("Human-gate event JSON must be an object")
+    required = {
+        "gate_id",
+        "gate_type",
+        "ticket_id",
+        "revision",
+        "reason",
+        "decision_summary",
+        "evidence_summary",
+        "blocked_scope",
+        "continuing_scope",
+        "accepted_replies",
+        "notification_status",
+        "announced_at",
+    }
+    missing = sorted(field for field in required if event.get(field) in (None, "", []))
+    if missing:
+        raise ValueError("Human-gate event is missing: " + ", ".join(missing))
+    if event.get("notification_status") != "ANNOUNCED":
+        raise ValueError("Human gate must be announced before it is persisted as pending")
+    if not isinstance(event.get("accepted_replies"), list):
+        raise ValueError("accepted_replies must be a list")
+    state["pending_human_action"] = dict(event)
+    state["run_status"] = "AWAITING_USER"
+    ctl = control(state)
+    ctl["pending_human_gates"] = [event["gate_id"]]
+    ctl["terminal_reason"] = "AWAITING_REQUIRED_USER_INPUT"
+    ctl["next_automatic_action"] = "await_user"
+    append_event(
+        state,
+        {"type": "human-gate", "gate_id": event["gate_id"], "ticket_id": event["ticket_id"]},
+    )
+    finalize_update(state, f"human-gate:{event['gate_id']}:announced")
+    save_json(args.state, state)
+    sys.stdout.write(json.dumps({"status": "updated", "gate_id": event["gate_id"]}) + "\n")
+
+
+def clear_human_gate(args: argparse.Namespace) -> None:
+    state = load_json(args.state)
+    action = state.get("pending_human_action")
+    if not isinstance(action, dict) or action.get("gate_id") != args.gate_id:
+        raise ValueError(f"Pending gate not found: {args.gate_id}")
+    history = state.setdefault("human_gate_history", [])
+    if not isinstance(history, list):
+        raise ValueError("human_gate_history must be a list")
+    action = dict(action)
+    action.update({"resolved_at": now_iso(), "decision": args.decision})
+    history.append(action)
+    state["pending_human_action"] = None
+    state["run_status"] = "ACTIVE"
+    ctl = control(state)
+    ctl["pending_human_gates"] = []
+    ctl["terminal_reason"] = None
+    ctl["next_automatic_action"] = args.next_action
+    append_event(state, {"type": "human-gate-resolved", "gate_id": args.gate_id})
+    finalize_update(state, f"human-gate:{args.gate_id}:resolved")
+    save_json(args.state, state)
+    sys.stdout.write(json.dumps({"status": "updated", "gate_id": args.gate_id}) + "\n")
+
+
+def analysis_artifact(args: argparse.Namespace) -> None:
+    state = load_json(args.state)
+    event = json.loads(args.event_json)
+    if not isinstance(event, dict):
+        raise ValueError("Analysis artifact JSON must be an object")
+    required = {
+        "ticket_id",
+        "analysis_revision",
+        "analysis_base_commit",
+        "source_revision",
+        "profile_revision",
+        "report_thread_id",
+        "report_digest",
+        "valid_if",
+        "invalid_if",
+        "completion_status",
+    }
+    missing = sorted(field for field in required if event.get(field) in (None, "", []))
+    if missing:
+        raise ValueError("Analysis artifact is missing: " + ", ".join(missing))
+    artifacts = state.setdefault("analysis_artifacts", {})
+    if not isinstance(artifacts, dict):
+        raise ValueError("analysis_artifacts must be an object")
+    ticket_id = str(event["ticket_id"])
+    previous = artifacts.get(ticket_id)
+    if previous == event:
+        sys.stdout.write(json.dumps({"status": "unchanged", "ticket_id": ticket_id}) + "\n")
+        return
+    artifacts[ticket_id] = dict(event)
+    append_event(state, {"type": "analysis-artifact", "ticket_id": ticket_id})
+    finalize_update(state, f"analysis-artifact:{ticket_id}:captured")
+    save_json(args.state, state)
+    sys.stdout.write(json.dumps({"status": "updated", "ticket_id": ticket_id}) + "\n")
 
 
 def github_snapshot(args: argparse.Namespace) -> None:
@@ -291,6 +428,9 @@ def status(args: argparse.Namespace) -> None:
         "blocking_conditions": ctl.get("blocking_conditions", []),
         "cost_anomaly_status": ctl.get("cost_anomaly_status"),
         "train_size_budget": ctl.get("train_size_budget"),
+        "supervision": state.get("supervision"),
+        "pending_human_action": state.get("pending_human_action"),
+        "orchestrator_lease": state.get("orchestrator_lease"),
     }
     sys.stdout.write(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
 
@@ -327,6 +467,28 @@ def build_parser() -> argparse.ArgumentParser:
     verification.add_argument("--ticket", required=True)
     verification.add_argument("--event-json", required=True)
     verification.set_defaults(handler=verification_event)
+
+    supervision = subparsers.add_parser("supervision-event")
+    supervision.add_argument("--state", type=Path, required=True)
+    supervision.add_argument("--event-json", required=True)
+    supervision.set_defaults(handler=supervision_event)
+
+    gate = subparsers.add_parser("human-gate")
+    gate.add_argument("--state", type=Path, required=True)
+    gate.add_argument("--event-json", required=True)
+    gate.set_defaults(handler=human_gate_event)
+
+    clear_gate = subparsers.add_parser("clear-human-gate")
+    clear_gate.add_argument("--state", type=Path, required=True)
+    clear_gate.add_argument("--gate-id", required=True)
+    clear_gate.add_argument("--decision", required=True)
+    clear_gate.add_argument("--next-action", required=True)
+    clear_gate.set_defaults(handler=clear_human_gate)
+
+    analysis = subparsers.add_parser("analysis-artifact")
+    analysis.add_argument("--state", type=Path, required=True)
+    analysis.add_argument("--event-json", required=True)
+    analysis.set_defaults(handler=analysis_artifact)
 
     show = subparsers.add_parser("status")
     show.add_argument("--state", type=Path, required=True)

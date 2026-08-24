@@ -48,7 +48,7 @@ At train start:
 
 1. Create a durable run-state and usage directory outside the repository under
    the available Codex data directory.
-2. Capture the orchestrator baseline before triage.
+2. Capture the first orchestrator-segment baseline before triage.
 3. Record every created analysis, worker, and reviewer thread ID with ticket and phase labels.
 
 Persist each phase's launch key and usage baseline before dispatch. When a
@@ -76,8 +76,8 @@ thread:
 
 At run completion, early stop, or train checkpoint:
 
-1. Capture the orchestrator again.
-2. Calculate its run delta.
+1. Capture every orchestrator segment again, including controlled successors.
+2. Calculate each non-overlapping segment delta and their orchestration sum.
 3. Sum only non-overlapping phase deltas.
 4. Separate ticket work from orchestration.
 5. Mark the aggregate `partial` if any requested phase lacks exact counters.
@@ -87,6 +87,12 @@ At run completion, early stop, or train checkpoint:
    attempt, failed attempt with counters, or final-train phase is absent.
 8. Produce the session ledger with baseline, final counter, and delta for every
    authoritative or duplicate session recorded in the manifest.
+9. Read every orchestrator segment's `sub_agent_activity` start events and add
+   every discovered agent session. Mark the aggregate `partial` until each is
+   mapped to a procedural phase or explicitly reconciled.
+10. Require every owner named by the lease and handoff history in the final
+    ledger. A controlled handoff is a sequential orchestration segment, not a
+    duplicate.
 
 Keep snapshots in the external run-state directory and do not commit them.
 Retain them until the train completes or is explicitly abandoned, so a
@@ -121,7 +127,9 @@ run:final-train-remediation
 run:final-train-review-followup
 ```
 
-When main-thread phases cannot be isolated without overlapping windows, report one `orchestration` delta instead of allocating tokens arbitrarily among tickets.
+When main-thread phases cannot be isolated without overlapping windows, report
+one `orchestration` total formed from non-overlapping per-owner segments instead
+of allocating tokens arbitrarily among tickets.
 
 For each requested ticket, sum its non-overlapping initial analysis,
 analysis-consolidation, analysis-reconciliation, plan-contract validation,
@@ -148,6 +156,11 @@ failed, and cancelled attempts when counters exist; do not deduplicate their
 consumption away. For a reused session, require an explicit phase baseline in
 the manifest. Mark that phase unavailable when the baseline is missing rather
 than assuming zero.
+
+A family such as `review:1`, `review:2` represents sequential attempts or
+passes and is not by itself a duplicate. Mark duplication only when one exact
+phase key maps to several sessions or the manifest explicitly records a
+duplicate. Report attempt families separately for cost analysis.
 
 ## Commands
 
@@ -196,12 +209,18 @@ python scripts/token_usage.py ledger `
   --output <usage-ledger.json>
 ```
 
-The ledger includes authoritative and duplicate session attempts, explicit
+The ledger includes every orchestrator segment, sessions discovered from hidden-agent
+activity, authoritative and duplicate session attempts, explicit
 baseline/final/delta values when available, phase coverage, and an inventory
 of unmeasured phases. It also reports non-content diagnostics such as assistant
 messages, tool calls, token-counter events, and context-compaction events when
 available. Use it to detect an omitted or repeatedly awakened session before
 reporting a complete aggregate.
+
+It also emits per-phase and per-ticket usage aggregates, orchestration usage,
+authoritative/measured phase counts, unmapped hidden sessions, and whether the
+known orchestrator segments were included. The controller accepts `complete` only when
+those inventories reconcile exactly.
 
 Use the skill's absolute script path when the current working directory is not the skill directory.
 

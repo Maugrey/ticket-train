@@ -38,6 +38,10 @@ Use a reviewer thread that:
 - does not receive the worker's private reasoning or expected review outcome;
 - does not modify the branch.
 
+Build this handoff with `context_packet.py`. Reject inherited conversation
+history, raw logs, or a packet above 64 KiB. The reviewer receives durable
+references and bounded evidence, not the accumulated implementation chat.
+
 Create every reviewer as a user-visible phase thread under
 [orchestration-control.md](orchestration-control.md). Never fork the
 orchestrator conversation to create a review, and never replace a failed
@@ -166,6 +170,20 @@ If GitHub comment writes are unavailable, keep the complete report in threads an
 
 Collect GitHub Copilot, CI, human, and other review comments before declaring the pull request clean.
 
+Mark a ticket pull request ready before the collection begins. Record its
+exact head, collection start, deadline at least ten minutes later, source
+counts, CI state, Copilot state, and a durable GitHub evidence reference.
+Collection may close before the deadline only when exact-head CI is terminal
+and acceptable and Copilot has actually responded. `unavailable` and
+`timed_out` are valid only at or after the deadline; `not_configured` requires
+repository evidence. A list saying that sources were handled without this
+snapshot is not a finding ledger.
+
+Inventory every collected ticket finding with a stable ID and source, and
+record exactly one technical disposition for every ID. The controller rejects
+aggregate source counts that do not match the inventory, missing dispositions,
+duplicate IDs, and blocking IDs absent from the collected snapshot.
+
 Do not ask the user to triage ordinary Copilot findings. For a ticket pull
 request, the fresh ticket-remediation worker performs the first technical assessment. For the
 final train pull request, the final-train remediation worker performs it and
@@ -229,16 +247,18 @@ For actionable findings:
    remediation thread.
 4. Have the remediator update the same ticket branch and worktree.
 5. Run affected independent acceptance tests, regression tests, environment
-   checks, and required project checks.
+   checks, and required project checks with `verification_runner.py`; record
+   the exact head, log references, hashes, and zero model tokens.
 6. Push the update.
 7. Capture the remediation thread's non-overlapping usage.
 8. Have the independent reviewer inspect the remediation diff, unresolved
    findings, ledger dispositions, and affected risk surface.
 9. Capture the re-review interval.
-10. Repeat once if necessary. After two remediation/follow-up cycles, stop and
-   perform the root-cause and cost-anomaly checkpoint from
-   [efficiency-policy.md](efficiency-policy.md); never start a third automatic
-   cycle.
+10. Repeat once if necessary. After two automatic remediation/follow-up cycles,
+   stop and perform the root-cause and cost-anomaly checkpoint from
+   [efficiency-policy.md](efficiency-policy.md). Start one third cycle only
+   through a controller-recorded, run-scoped, ticket-scoped, single-use
+   exception backed by an explicit user decision after that checkpoint.
 
 Before every follow-up review, reassess:
 
@@ -247,6 +267,11 @@ Before every follow-up review, reassess:
 - follow-up verification complexity under
   [model-routing.md](model-routing.md), independently of the original
   implementation complexity.
+
+Record a structured remediation delta as `mechanical`,
+`bounded-behavioral`, `cross-cutting`, or `material-scope`. The controller
+routes the first three from their actual verification complexity and requires
+a full scope revision for `material-scope`.
 
 Use the focused follow-up-review matrix only when the remediation stays within
 the approved analysis and previously reviewed risk surface. Give the reviewer
@@ -325,6 +350,31 @@ ledger. Apply the same dispositions and deduplication rules as ticket reviews.
 Batch compatible accepted findings instead of creating one remediation cycle
 per comment.
 
+The controller requires this exact final sequence on one stable head:
+
+1. `FINAL_REVIEW_RECORDED` with a complete inventory.
+2. `FINAL_FEEDBACK_COLLECTION_STARTED` with a collection ID, start, deadline
+   at least ten minutes later,
+   head, and the four monitored sources: Codex, CI, Copilot, and human.
+3. Query PR reviews, inline review threads including resolved state, general
+   comments, and exact-head CI. Record one
+   `FINAL_FEEDBACK_SNAPSHOT_RECORDED` with source counts, stable finding IDs,
+   unresolved thread IDs, and a durable evidence reference.
+4. `FINAL_FINDINGS_RECONCILED` with exactly one disposition for every finding
+   ID in that snapshot and an explicit inventory of threads still unresolved
+   on GitHub despite their technical disposition.
+5. Only then record final report/token evidence or start grouped remediation.
+
+Do not treat a list of nominally dispositioned sources as proof that comments
+were actually collected. A later pull-request head invalidates the snapshot
+and all downstream dispositions. Collect a fresh snapshot after the new
+exact-head verification and follow-up review.
+
+Perform the GitHub/CI polling deterministically without waking a reviewer on
+unchanged snapshots. `unavailable` and `timed_out` cannot close Copilot
+collection before the deadline; `not_configured` requires direct repository
+evidence.
+
 For remediation:
 
 1. Ask an original ticket worker for a compact targeted handoff only when its
@@ -354,6 +404,13 @@ monitoring window, record that state and continue with mandatory Codex review
 and repository checks unless repository policy or the user explicitly made
 Copilot mandatory.
 
+`timed_out` is valid only after the recorded collection deadline.
+`not_configured` and `unavailable` require connector or repository evidence;
+they are not convenient defaults. When Copilot responds, inventory every
+comment and suppressed finding exposed by the review payload, assess each
+technically, and record an accepted, rejected, deferred, or escalated
+disposition before readiness.
+
 The final pull request is ready for user action only when:
 
 - the pull-request head equals the current train head;
@@ -368,6 +425,15 @@ checks, reviews, and newly available comments immediately before merging.
 Never interpret creation, review completion, or readiness as permission to
 merge into `main` or `master`.
 
+All agent-initiated merges use `scripts/merge_pull_request.py`. The script
+requires a controller permit, re-queries live GitHub state, rejects pending or
+failed checks and stale heads, performs the merge, and records the result back
+into the canonical manifest. Direct `gh pr merge`, API merge, or browser merge
+by an agent is a process violation. A final merge also requires a
+`FINAL_BASE_MERGE_AUTHORIZED` event tied to the exact reviewed head and the
+user's explicit decision; the `auto-merge` approval mode never substitutes for
+that authorization.
+
 ## Merge gates
 
 A ticket pull request may merge into the train only when:
@@ -381,6 +447,8 @@ A ticket pull request may merge into the train only when:
 - environment parity and applicable Supabase/Auth/RLS validation passed;
 - no objectively automatable ordinary scenario was delegated to the user;
 - independent automated review has no blocking findings;
+- the pull request is ready rather than draft;
+- exact-head GitHub checks are complete and successful at merge time;
 - Copilot, CI, and review comments have a recorded disposition;
 - every blocking ledger finding is verified fixed;
 - effective intrinsic criticality and complexity are known;

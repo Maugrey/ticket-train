@@ -5,6 +5,8 @@
 - Run configuration report
 - Orchestrator startup preflight
 - Live train status report
+- Train resumed report
+- Human action required report
 - Routing triage report
 - Dependency consolidation report
 - Token usage block
@@ -44,11 +46,17 @@ dependency, and residual risk is represented in the compact digest.
 - Triage routing: Terra/High
 - Routing enforcement: strict
 - Coordination policy: compact-control-plane
+- Control-plane runner: deterministic-decision-packets
+- Decision-packet limit: 16 KiB
+- Orchestrator rotation: automatic budgeted handoff at 25M tokens, 50 model wakes, 500 tool calls, or one context compaction
 - Supervision policy: event-driven-deterministic
 - Child-thread visibility: user-visible
 - Launch reconciliation: required
 - Supervision mode: active-until-terminal
-- Liveness reporting: transitions only | user override
+- Liveness reporting: transitions plus deterministic host notifications | user override
+- Canonical run ID and fingerprint:
+- Orchestrator lease owner:
+- Supervisor mode and watcher ID:
 - Proportionality profile revision:
 - Cost-control policy: strict-quality-preserving
 - Verification policy: parallel-independent-red-green
@@ -99,27 +107,95 @@ unknown, do not present it as inferred.
 ## Live train status report
 
 Publish this compact report on every material state transition. During long
-unchanged work, publish it at the liveness cadence from
-[orchestration-control.md](orchestration-control.md) without repeating detailed
-ticket reports.
+unchanged work, do not wake the model to republish it. Use a deterministic host
+notification from [orchestration-control.md](orchestration-control.md) only
+when the host or user requires liveness.
 
 ```markdown
 ## Train status
 
 - Last transition:
+- Canonical run and owner:
 - Active visible tasks: <title, ticket/phase, thread ID, state>
 - Launch anomalies: none | <phase key, state, reconciliation progress>
 - Current gates: none | <ticket, revision, gate>
 - Next automatic action:
 - User action required: none | <exact decision>
+- Supervision: <mode, last check, next check>
 - Durable state updated at:
 - Cost anomaly: none | <reason and checkpoint>
+- Control-plane wake: no-model-wake | deterministic | adapter | technical-decision | rotation
+- Decision packet: <reference, bytes, SHA-256>
+- Orchestrator segment budget: <tokens, wakes, tool calls, compactions, clear|warning|rotation-required>
+- Controlled handoff: none | prepared | accepted <old -> new>
+- Context packet: <reference, bytes, SHA-256> | not yet dispatched
 - Functional verification gates: <ticket and status>
 ```
 
 Report `User action required: none` explicitly when the train should continue
 automatically. A completed child phase must be relayed before its automatic
 successor is launched or awaited.
+
+## Train resumed report
+
+Publish after adopting a run in the same or a new main conversation:
+
+```markdown
+## Train resumed
+
+- Canonical run:
+- Previous orchestrator:
+- Current owner:
+- State reconciled at:
+- Reused completed phases:
+- Targeted reconciliation required:
+- Duplicate or ambiguous attempts:
+- Active visible tasks:
+- Pending human action: none | <gate, revision, accepted replies>
+- Next automatic action:
+- Supervision mode and next check:
+- Decision packet used for recovery:
+- Orchestrator segment and handoff status:
+- Token/cost impact of the interruption:
+```
+
+Do not describe a full repeated analysis as recovery when a durable artifact
+can be reused or reconciled.
+
+## Human action required report
+
+Every human gate is published as a normal main-conversation message. Do not
+leave it only in a heartbeat, child report, automation output, or status table.
+
+```markdown
+# ACTION REQUIRED
+
+## <ticket or train> — <analysis approval | pre-merge approval | decision>
+
+- Controller revision and updated at:
+- Revision or exact head:
+- Why your decision is required:
+- Exact question or information required:
+- What was analyzed or implemented:
+- Functional impact:
+- Architecture impact:
+- Database/data impact:
+- API/contracts/integrations impact:
+- Security/access/privacy impact:
+- Operations/configuration/deployment impact:
+- Automated evidence and review result:
+- Residual risk and proportionality decision:
+- Pull request or durable diff: not applicable | <link>
+- Blocked until your answer:
+- Work continuing independently:
+- Accepted replies: `<exact reply 1>` | `<exact reply 2>` | `<feedback format>`
+```
+
+Use explicit `No impact identified` statements. Persist the corresponding
+`pending_human_action` with `notification_status = ANNOUNCED` before yielding.
+While it remains unresolved, each liveness message repeats the heading, gate
+ID, revision, exact question, accepted replies, blocked scope, and continuing
+scope. Never reduce it to "waiting for information".
 
 ## Routing triage report
 
@@ -421,6 +497,8 @@ above.
 ### Verification
 
 - Automated tests:
+- Execution mode: deterministic / zero model tokens
+- Runner result and SHA-256:
 - Project checks:
 - Red evidence and base commit:
 - Green evidence and exact head:
@@ -448,6 +526,8 @@ above.
 - Remaining non-blocking findings:
 - Complete review passes for stable scope: <count>/1
 - Remediation cycles: <count>/2
+- Remediation delta: mechanical | bounded-behavioral | cross-cutting | material-scope | not applicable
+- Follow-up verification complexity:
 - Minimum required correction:
 - Optional hardening:
 - Explicitly deferred post-MVP:
@@ -545,12 +625,21 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Final train review routing conformance: conformant | documented-fallback | nonconformant
 - Final CI status:
 - Copilot review status: received | pending | unavailable | not configured | timed out
+- Final GitHub feedback collection ID and deadline:
+- Final GitHub feedback snapshot ID and exact head:
+- Collected source counts: Codex / CI / Copilot / human
+- Unresolved review threads:
 - Final finding-ledger status:
 - Run status: completed | stopped | five-ticket checkpoint
 - Terminal reason: AWAITING_REQUIRED_USER_INPUT | BLOCKED | COMPLETED | CHECKPOINT
 - Visible task inventory and final states:
 - Launch anomalies and duplicate-attempt dispositions:
 - Durable state reconciliation: complete | partial
+- Canonical run identity and orchestrator handoffs:
+- Control-plane runner and suppressed unchanged observations:
+- Orchestrator segments and budget-triggered rotations:
+- Supervision history and liveness compliance:
+- Human actions announced and resolved:
 - Requested tickets and final states:
 - Analysis dependency relationships:
 - Analysis reconciliation outcomes:
@@ -588,7 +677,11 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Final Codex review routing conformant | yes \| no | | |
 | Exact-head CI collected | complete \| pending \| unavailable | | |
 | Copilot/comments dispositioned | complete \| pending \| unavailable \| not configured | | |
+| GitHub feedback snapshot covers final head | complete \| stale \| missing | | |
 | Token accounting reported | complete \| partial \| unavailable | | |
+| Orchestrator segments included | <measured>/<known> | | |
+| Hidden sessions reconciled | yes \| no | | |
+| Authoritative phases measured | <measured>/<authoritative> | | |
 | Functional verification summarized | complete \| incomplete | | |
 | Manual validation summarized | complete \| incomplete | | |
 | Code/application attention points summarized | complete \| incomplete | | |
@@ -645,11 +738,15 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 
 ### Session token ledger
 
-| Session | Ticket/phase | Attempt | Authoritative or duplicate | Baseline | Final | Delta | Coverage |
+| Session | Ticket/phase | Attempt | Authoritative, duplicate, or orchestrator segment | Baseline | Final | Delta | Coverage |
 |---|---|---:|---|---:|---:|---:|---|
 | <thread-id> | | | | | | | complete \| unavailable |
 
 - Duplicate sessions included:
+- Hidden sessions discovered and mapped:
+- Unmapped hidden sessions:
+- Orchestrator segments included: <measured>/<known>
+- Authoritative phases measured: <measured>/<authoritative>
 - Failed or cancelled attempts included:
 - Unmeasured phases:
 - Session diagnostics: <assistant messages, tool calls, token counter events, context compactions>

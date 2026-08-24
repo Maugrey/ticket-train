@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +19,14 @@ ACTIVE_PHASE_STATES = {
     "RUNNING",
 }
 TERMINAL_REASONS = {
+    "SUPERVISED_ACTIVE",
     "AWAITING_REQUIRED_USER_INPUT",
     "BLOCKED",
     "COMPLETED",
     "CHECKPOINT",
 }
 NO_AUTOMATIC_ACTION = {None, "", "none", "await_user", "resume_after_blocker"}
+SUPERVISED_WAIT_ACTIONS = {"supervisor_wait", "await_active_phases"}
 ACCEPTABLE_USAGE_STATUS = {"complete", "partial", "unavailable"}
 ACCEPTABLE_CI_STATUS = {
     "passed",
@@ -74,11 +77,14 @@ def as_list(value: Any, field: str, issues: list[str]) -> list[Any]:
     return value
 
 
-def validate_phases(control: dict[str, Any], issues: list[str]) -> None:
+def validate_phases(
+    control: dict[str, Any], issues: list[str], *, allow_active: bool = False
+) -> list[str]:
     phases = as_list(control.get("phases"), "control.phases", issues)
     seen_keys: set[str] = set()
     implementation_threads: dict[str, str] = {}
     remediation_threads: list[tuple[str, str, str]] = []
+    active_phase_keys: list[str] = []
     for index, raw_phase in enumerate(phases):
         prefix = f"control.phases[{index}]"
         if not isinstance(raw_phase, dict):
@@ -95,7 +101,9 @@ def validate_phases(control: dict[str, Any], issues: list[str]) -> None:
 
         state = raw_phase.get("launch_state")
         if state in ACTIVE_PHASE_STATES:
-            issues.append(f"active phase remains: {phase_key} ({state})")
+            active_phase_keys.append(str(phase_key))
+            if not allow_active:
+                issues.append(f"active phase remains: {phase_key} ({state})")
 
         if state == "QUEUED" and not (
             raw_phase.get("client_thread_id") or raw_phase.get("thread_id")
@@ -105,6 +113,10 @@ def validate_phases(control: dict[str, Any], issues: list[str]) -> None:
             "thread_id"
         ):
             issues.append(f"materialized phase has no thread ID: {phase_key}")
+        if state in {"RUNNING", "COMPLETED", "FAILED", "CANCELLED"} and raw_phase.get(
+            "visibility_verified"
+        ) is not True:
+            issues.append(f"materialized phase visibility was not verified: {phase_key}")
 
         visibility = raw_phase.get("visibility", "user-visible")
         hidden_authorized = raw_phase.get("hidden_authorized") is True
@@ -130,6 +142,89 @@ def validate_phases(control: dict[str, Any], issues: list[str]) -> None:
             issues.append(
                 f"remediation reused implementation thread instead of a fresh context: {phase_key}"
             )
+    return active_phase_keys
+
+
+def validate_run_identity(state: dict[str, Any], issues: list[str]) -> None:
+    identity = state.get("run_identity")
+    if not isinstance(identity, dict):
+        issues.append("run_identity is required")
+        return
+    required = ("fingerprint", "repository", "train_branch", "source", "tickets")
+    for field in required:
+        value = identity.get(field)
+        if value in (None, "", []):
+            issues.append(f"run_identity.{field} is required")
+    if not isinstance(identity.get("tickets"), list):
+        issues.append("run_identity.tickets must be a list")
+
+    lease = state.get("orchestrator_lease")
+    if not isinstance(lease, dict):
+        issues.append("orchestrator_lease is required")
+    else:
+        for field in ("owner_thread_id", "heartbeat_at", "expires_at"):
+            if not lease.get(field):
+                issues.append(f"orchestrator_lease.{field} is required")
+
+
+def supervision_issues(state: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    supervision = state.get("supervision")
+    if not isinstance(supervision, dict):
+        return ["supervision object is required while work remains active"]
+    if supervision.get("status") != "ACTIVE":
+        issues.append("supervision.status must be ACTIVE while work remains active")
+    if supervision.get("mode") not in {"FOREGROUND_WAIT", "BACKGROUND_WATCHER"}:
+        issues.append("supervision.mode must be FOREGROUND_WAIT or BACKGROUND_WATCHER")
+    if supervision.get("mode") == "BACKGROUND_WATCHER" and not supervision.get("watcher_id"):
+        issues.append("background supervision requires watcher_id")
+    for field in ("last_check_at", "next_check_at"):
+        if not supervision.get(field):
+            issues.append(f"supervision.{field} is required")
+    return issues
+
+
+def active_lease_issues(state: dict[str, Any]) -> list[str]:
+    lease = state.get("orchestrator_lease")
+    if not isinstance(lease, dict):
+        return ["active supervision requires an orchestrator lease"]
+    try:
+        expires = datetime.fromisoformat(str(lease.get("expires_at", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return ["orchestrator lease expiry is invalid"]
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc):
+        return ["orchestrator lease expired"]
+    return []
+
+
+def pending_action_issues(state: dict[str, Any]) -> list[str]:
+    action = state.get("pending_human_action")
+    if not isinstance(action, dict):
+        return ["pending_human_action object is required"]
+    issues: list[str] = []
+    required = (
+        "gate_id",
+        "gate_type",
+        "ticket_id",
+        "revision",
+        "reason",
+        "decision_summary",
+        "evidence_summary",
+        "blocked_scope",
+        "continuing_scope",
+        "accepted_replies",
+        "announced_at",
+    )
+    for field in required:
+        if action.get(field) in (None, "", []):
+            issues.append(f"pending_human_action.{field} is required")
+    if action.get("notification_status") != "ANNOUNCED":
+        issues.append("pending human action was not announced in the main conversation")
+    if not isinstance(action.get("accepted_replies"), list):
+        issues.append("pending_human_action.accepted_replies must be a list")
+    return issues
 
 
 def validate_cost_controls(control: dict[str, Any], issues: list[str]) -> None:
@@ -285,8 +380,11 @@ def validate_verification_gates(control: dict[str, Any], issues: list[str]) -> d
     return gates
 
 
-def validate_common(state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def validate_common(
+    state: dict[str, Any], *, allow_active: bool = False
+) -> tuple[dict[str, Any], list[str]]:
     issues: list[str] = []
+    validate_run_identity(state, issues)
     control = state.get("control")
     if not isinstance(control, dict):
         return {}, ["missing control object"]
@@ -296,7 +394,7 @@ def validate_common(state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if control.get("manifest_reconciled") is not True:
         issues.append("control.manifest_reconciled must be true")
 
-    validate_phases(control, issues)
+    validate_phases(control, issues, allow_active=allow_active)
     validate_cost_controls(control, issues)
     validate_verification_gates(control, issues)
 
@@ -309,14 +407,18 @@ def validate_common(state: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         issues.append("launch-unknown phases remain: " + ", ".join(map(str, launch_unknown)))
 
     next_action = control.get("next_automatic_action")
-    if next_action not in NO_AUTOMATIC_ACTION:
+    allowed_actions = NO_AUTOMATIC_ACTION | (SUPERVISED_WAIT_ACTIONS if allow_active else set())
+    if next_action not in allowed_actions:
         issues.append(f"automatic action remains: {next_action}")
 
     return control, issues
 
 
 def validate_yield(state: dict[str, Any]) -> list[str]:
-    control, issues = validate_common(state)
+    raw_control = state.get("control")
+    reason = raw_control.get("terminal_reason") if isinstance(raw_control, dict) else None
+    allow_active = reason in {"SUPERVISED_ACTIVE", "AWAITING_REQUIRED_USER_INPUT"}
+    control, issues = validate_common(state, allow_active=allow_active)
     if not control:
         return issues
 
@@ -335,10 +437,26 @@ def validate_yield(state: dict[str, Any]) -> list[str]:
     }:
         issues.append("open size or cost checkpoint requires a checkpoint-compatible terminal reason")
 
-    if reason == "AWAITING_REQUIRED_USER_INPUT":
+    active = [
+        phase
+        for phase in control.get("phases", [])
+        if isinstance(phase, dict) and phase.get("launch_state") in ACTIVE_PHASE_STATES
+    ]
+    if reason == "SUPERVISED_ACTIVE":
+        if not active:
+            issues.append("SUPERVISED_ACTIVE requires at least one active phase")
+        issues.extend(supervision_issues(state))
+        issues.extend(active_lease_issues(state))
+        if control.get("pending_human_gates"):
+            issues.append("SUPERVISED_ACTIVE cannot hide a pending human gate")
+    elif reason == "AWAITING_REQUIRED_USER_INPUT":
         gates = as_list(control.get("pending_human_gates"), "control.pending_human_gates", issues)
         if not gates:
             issues.append("AWAITING_REQUIRED_USER_INPUT requires a pending human gate or decision")
+        issues.extend(pending_action_issues(state))
+        if active:
+            issues.extend(supervision_issues(state))
+            issues.extend(active_lease_issues(state))
     elif reason == "BLOCKED":
         blockers = as_list(control.get("blocking_conditions"), "control.blocking_conditions", issues)
         if not blockers:

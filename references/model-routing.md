@@ -29,6 +29,16 @@ Use intrinsic criticality and complexity directly. Do not derive a combined cont
 - Route focused follow-up review from current effective intrinsic criticality
   and remediation-verification complexity.
 
+Do not route a model for deterministic control work: task polling, Git/GitHub
+status reads, exact-head command execution, log hashing, token-ledger
+reconciliation, or unchanged waits. Record these as `deterministic/zero-token`.
+Decision-packet generation, unchanged-wait suppression, activity-budget
+evaluation, and handoff-token validation are also deterministic/zero-token
+through `control_plane_runner.py` and `run_registry.py`.
+Use `Terra/H` only when a structured failure or finding inventory requires
+bounded classification; escalate through the applicable matrix only when the
+technical decision itself has that evidenced complexity or risk.
+
 Use explicit per-thread model and reasoning overrides for every routed phase.
 Never use the parent thread's model or reasoning effort as an implicit routed
 setting. Record the matrix inputs, selected cell, requested model and effort,
@@ -95,6 +105,11 @@ because human gates are expected, or because child analyses and reviews use
 Do not recommend `XH` for routine orchestration. When one isolated dependency
 or architecture conflict needs deeper reasoning, keep the orchestrator at
 `High` and dispatch a scoped `Sol/XH` arbitration thread.
+
+Do not keep an overprovisioned orchestrator merely for continuity. Every
+controlled successor applies this same preflight recommendation from the
+current run state and receives only the bounded decision packet. Rotation does
+not authorize a stronger model or effort.
 
 After resolving the source, selection, run mode, and repository configuration,
 but before triage or any child dispatch:
@@ -188,6 +203,11 @@ choose the more demanding plausible matrix cell. Do not spend additional
 triage tokens trying to replace the full analysis.
 
 ## Strict routing enforcement
+
+Apply every matrix lookup through `scripts/train_controller.py`. The matrices
+in this reference and the controller constants are a versioned pair; change and
+test them together. A manually selected model/effort is not valid merely
+because it is stronger. The controller rejects any unexplained mismatch.
 
 Before dispatching any analysis, implementation, initial review, or follow-up
 review:
@@ -361,6 +381,22 @@ Route a focused follow-up review from:
   remediation diff and unresolved-finding risk; and
 - the complexity of verifying the remediation, not the original ticket's
   implementation complexity.
+
+Before matrix lookup, classify the remediation delta:
+
+- `mechanical`: assertion, message, documentation, fixture, or configuration
+  correction with a direct deterministic oracle;
+- `bounded-behavioral`: a local behavior correction with a reproducing
+  regression test and no new contract or invariant;
+- `cross-cutting`: several modules or a protected boundary interact, while the
+  approved scope remains valid;
+- `material-scope`: architecture, schema/data strategy, authorization,
+  functional scope, shared contract, or another protected surface changed.
+
+`material-scope` never uses a focused re-review. The controller requires a new
+scope revision and a full review. For the other classes, use the verification
+complexity demonstrated by the delta and its oracle; do not inherit the
+original ticket complexity or the parent conversation's setting.
 
 | Effective intrinsic criticality ↓ / Follow-up verification complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|

@@ -10,6 +10,7 @@
 - Human analysis gates
 - Pre-implementation reconciliation
 - Analysis revision
+- Resume and reuse
 
 ## Default policy
 
@@ -244,3 +245,24 @@ Keep one analysis thread per ticket throughout initial analysis, consolidation a
 Create a replacement thread only when the original is unavailable. Give the replacement the ticket, original report, dependency graph, upstream diffs, reconciliation evidence, classifications, model-routing history, and human-gate state. Report the substitution.
 
 If revision routing requires `max` or `ultra`, preserve the separate explicit authorization rule from [model-routing.md](model-routing.md).
+
+## Resume and reuse
+
+Persist every completed analysis as the durable artifact defined by
+[run-continuity.md](run-continuity.md). On restart or transfer to a new main
+conversation, discover the canonical run before creating analysis threads and
+classify each artifact:
+
+- `REUSABLE` when its ticket/source revision, analysis base, proportionality
+  profile, scope, and governing project rules remain valid;
+- `RECONCILE` when changed upstream or repository evidence can be handled by a
+  targeted amendment while stable findings remain valid;
+- `INVALID` only when missing or materially obsolete evidence prevents safe
+  reuse.
+
+Do not repeat a full analysis because the orchestrator conversation changed,
+its compact summary was lost, or another run ID was accidentally proposed.
+When reconciliation is required, provide only changed evidence and preserve
+the original analysis revision history and token ledger. Before an unavoidable
+replacement analysis, record the invalidation evidence and open the duplicate-
+cost checkpoint.

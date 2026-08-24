@@ -4,7 +4,11 @@ Ticket Train is an explicitly invoked Codex skill for orchestrating bounded,
 reviewable implementation batches from a user-provided ticket source. It keeps
 analysis, implementation, acceptance testing, remediation, and review in
 separate visible contexts while the main conversation acts as a compact control
-plane.
+plane. A deterministic state machine owns phase order, concurrency, gates,
+routing checks, pull-request targets, and completion; prompts remain responsible
+for technical judgment. A deterministic runner emits bounded decision packets,
+suppresses unchanged waits, and rotates the replaceable main adapter before its
+conversation becomes a dominant cost center.
 
 The skill is designed for multi-ticket work where sequencing, dependency
 management, verification quality, human approval, context growth, and token
@@ -31,7 +35,18 @@ Ticket Train can:
   train pull request against the repository base branch;
 - report architecture, functional, data, contract, security, operational, test,
   review, manual-validation, and token-usage outcomes;
-- persist enough durable state to reconcile interrupted or restarted runs.
+- persist enough durable state to reconcile interrupted or restarted runs;
+- build every model handoff as a bounded, hash-addressed context packet with
+  no inherited conversation history;
+- run exact-head verification commands with a deterministic zero-token runner;
+- reject invalid or skipped lifecycle transitions through a revision-checked,
+  idempotent procedural controller;
+- identify one canonical run across main conversations, prevent duplicate
+  analysis, and transfer orchestration through an explicit single-owner lease;
+- suppress unchanged orchestration without a model wake and rotate the
+  orchestrator through a single-use, history-free controlled handoff;
+- install verified supervision before child work starts and surface every
+  human approval as an explicit main-conversation action.
 
 Ticket Train does not infer a ticket source, silently use hidden workers, weaken
 tests to obtain a green result, close source tickets without authorization, or
@@ -95,6 +110,11 @@ It also recommends an orchestrator model and reasoning effort and requires an
 explicit startup confirmation. Reasoning above `xhigh` always requires separate
 user authorization.
 
+Reusing the same repository, train branch, source, and ticket set discovers
+the existing run even from another main conversation. The new conversation
+adopts or explicitly takes over that run; it does not rerun completed triage
+or analysis merely to reconstruct context.
+
 ## Dry-run and live execution
 
 In `dry-run` mode, Ticket Train performs ticket normalization, routing triage,
@@ -139,10 +159,11 @@ flowchart TD
     H2 --> I
     I --> J[Red, green, environment, and functional-readiness gates]
     J --> K[Independent exhaustive review]
-    K --> L[Grouped remediation and targeted re-review]
-    L --> M[Human pre-merge gate when required]
-    M --> N[Serialized merge into train]
-    N --> O{Queue or checkpoint?}
+    K --> L[Exact-head CI and Copilot collection]
+    L --> M[Grouped remediation and targeted re-review]
+    M --> N[Human pre-merge gate when required]
+    N --> N2[Guarded serialized merge into train]
+    N2 --> O{Queue or checkpoint?}
     O -->|More eligible tickets| F
     O -->|Complete or bounded stop| P[Final train pull request]
     P --> Q[Integrated validation and final review]
@@ -227,6 +248,12 @@ Copilot, CI, and human findings are deduplicated into one ledger. Accepted
 findings are grouped into a compact remediation packet rather than handled in
 many conversational loops.
 
+The ticket PR is marked ready before GitHub collection. The ledger records the
+exact collection interval, source counts, CI state, Copilot state, and durable
+evidence for the same head. Collection may finish early when CI is terminal and
+Copilot has responded; otherwise unavailable/timeout conclusions wait for a
+deadline at least ten minutes after collection begins.
+
 Every confirmed behavioral defect requires a reproducing regression test.
 Follow-up review is targeted by default and expands to another full review only
 when remediation materially changes architecture, migrations, authorization,
@@ -235,18 +262,28 @@ after two cycles and reports a root-cause and cost checkpoint.
 
 ### 7. Train integration and finalization
 
-Ticket pull requests merge into the train one at a time. Open ticket branches
+Ticket pull requests merge into the train one at a time through the bundled
+guarded merge command. It rechecks the controller permit, live PR head/base,
+draft state, and successful completed GitHub checks immediately before merge.
+Direct agent-issued GitHub merge commands are outside the workflow. Open ticket branches
 are refreshed against the updated train and affected evidence is rerun before
 their merge.
 
 The train freezes after five integrated tickets or an earlier cumulative-size
 checkpoint. Finalization creates or updates one train-to-base pull request,
 runs cross-ticket acceptance and environment checks on its exact head, performs
-an independent final review, collects external comments, and reports remaining
-manual validation and attention points.
+an independent final review, then opens a bounded GitHub feedback window. One
+exact-head snapshot inventories Codex, CI, Copilot, and human findings; every
+finding receives one technical disposition before readiness. A new head
+invalidates that snapshot and triggers focused verification and collection
+again. Finalization starts automatically when the selected queue is terminal;
+the user does not need to request the PR or reconfirm the resolved base branch.
 
 Only the user may merge that final pull request, either directly or by an
-explicit request to Codex.
+explicit request to Codex. The `auto-merge` approval mode concerns ticket
+branches entering the train; it never authorizes train-to-base merge. A Codex
+final merge requires a head-specific recorded user authorization and the same
+live guarded merge command.
 
 ## Branch and pull-request model
 
@@ -274,7 +311,14 @@ uncontrolled parallel merges into the train.
 - One exhaustive review per stable scope.
 - At most two grouped remediation/re-review cycles.
 - Deterministic supervision and log extraction instead of repeated model turns.
+- Maximum 16 KiB orchestrator decision packets and zero model wake for
+  unchanged state.
+- Automatic controlled orchestrator rotation at 25 million segment tokens, 50
+  model wakes, 500 tool calls, or one context compaction, with a warning at 10
+  million tokens.
 - Compact handoff packets for remediation and follow-up review.
+- A 50-million-token phase circuit breaker, a one-compaction limit, and a
+  follow-up/initial-review ratio checkpoint.
 - Exact-if-available token accounting by session, ticket, and phase.
 
 Ticket Train also maintains a proportionality profile so recommendations stay
@@ -289,12 +333,82 @@ in visible phase threads. A durable manifest records phase identities, launch
 attempts, branches, pull requests, test evidence, reviews, token snapshots, and
 gate states outside the target repository.
 
+The current main thread is a thin, replaceable adapter. It reads a maximum 16
+KiB decision packet produced by `control_plane_runner.py`, performs the named
+Codex/Git/GitHub action, and records the result as an immutable event. It does
+not read the complete manifest or reconstruct the schedule from chat history.
+Unsupported transitions fail closed, including implementation without a
+parallel independent-test task, review before functional readiness, focused
+re-review without a full baseline, ticket PRs targeting the base branch, and
+completion without the final PR/review/token/report evidence.
+
+Missing information is also procedural state. A worker can return
+`needs_input`, or the orchestrator can record a product/legal/environment
+question directly. The controller then exposes one explicit `ACTION REQUIRED`
+packet with the exact question, accepted answer formats, blocked scope, and
+work that continues independently. After the answer, the same visible worker
+is resumed when applicable.
+
+Every run has one fingerprint, one canonical manifest under
+`$CODEX_HOME/ticket-train/runs`, and one orchestrator lease. Before creating a
+run, the registry searches for an existing match. A new main conversation must
+adopt the existing state or receive explicit takeover authorization. Completed
+analysis artifacts are reused or targeted for reconciliation instead of being
+silently repeated.
+
+The registry also detects manifests from the deprecated
+`$CODEX_HOME/ticket-trains` layout. It blocks a fresh run until those manifests
+are adopted into a canonical reconciliation shell, inventoried, and resolved.
+
+Supervision is resolved before any child starts. Long work uses a verified
+run-scoped watcher when the orchestrator cannot remain in foreground wait. It
+reports transitions immediately and suppresses unchanged state without a
+model wake. If the host requires liveness, it emits a deterministic product
+notification from the manifest. Its `heartbeat` decision forbids pausing or deletion while any
+automatic action, user reminder, verification, review, or finalization remains.
+The user does not need to create a scheduled task.
+
+Each main conversation is one measured orchestration segment. At a hard
+activity threshold, the owner prepares a bounded packet and single-use token,
+creates one fresh visible successor, and atomically transfers the same run
+lease. The former conversation becomes read-only. No analysis, implementation,
+or review phase is repeated, and the successor does not inherit old turns.
+
+Foreground waiting exists only for the current orchestrator turn. If a task
+creation returns a queued client ID, the orchestrator resolves the actual
+visible thread and keeps waiting in that turn. The controller rejects yielding
+with queued, running, or launch-unknown foreground work; only a verified
+background watcher can protect work after a turn ends.
+
+Human gates are first-class durable state. Every approval request is headed
+`ACTION REQUIRED` in the main conversation, contains a self-sufficient decision
+packet and exact accepted replies, and remains visible in liveness updates
+until resolved. Repeated unchanged reminders use deterministic notifications
+instead of replaying the full model context.
+
+Final pull-request feedback is first-class state too: collection window,
+deadline, snapshot ID, exact head, source counts, unresolved review threads,
+per-finding dispositions, and remediation verification are all stored before
+the train can complete.
+
 The bundled deterministic tools support this control plane:
 
+- [`train_controller.py`](scripts/train_controller.py) is the authoritative
+  state machine and next-action planner;
+- [`control_plane_runner.py`](scripts/control_plane_runner.py) creates bounded
+  wake packets, suppresses unchanged state, and enforces orchestrator budgets;
+- [`merge_pull_request.py`](scripts/merge_pull_request.py) is the only
+  agent-authorized ticket or final PR merge path and rechecks live GitHub state;
 - [`train_supervisor.py`](scripts/train_supervisor.py) reconciles thread,
   GitHub, test, and verification events into the run manifest;
-- [`control_guard.py`](scripts/control_guard.py) prevents unsafe yield,
-  completion, or functional-readiness transitions;
+- [`context_packet.py`](scripts/context_packet.py) creates bounded,
+  hash-addressed, history-free handoffs;
+- [`verification_runner.py`](scripts/verification_runner.py) executes exact-head
+  command plans and stores full logs without an LLM supervision loop;
+- [`run_registry.py`](scripts/run_registry.py) creates, discovers, and claims
+  canonical runs without duplicate ownership;
+- [`control_guard.py`](scripts/control_guard.py) diagnoses older manifests;
+  current lifecycle authority belongs only to the procedural controller;
 - [`token_usage.py`](scripts/token_usage.py) captures and reconciles available
   token counters.
 
@@ -330,21 +444,31 @@ ticket-train/
 │   └── openai.yaml
 ├── references/
 │   ├── analysis-policy.md
+│   ├── control-plane-runner.md
+│   ├── controller-protocol.md
 │   ├── criticality.md
 │   ├── efficiency-policy.md
 │   ├── model-routing.md
 │   ├── orchestration-control.md
 │   ├── report-template.md
 │   ├── review-policy.md
+│   ├── run-continuity.md
 │   ├── ticket-sources.md
 │   ├── usage-reporting.md
 │   ├── verification-policy.md
 │   └── workflow.md
 └── scripts/
     ├── control_guard.py
+    ├── control_plane_runner.py
+    ├── context_packet.py
+    ├── merge_pull_request.py
+    ├── run_registry.py
     ├── test_ticket_train_tools.py
+    ├── test_train_controller.py
     ├── token_usage.py
-    └── train_supervisor.py
+    ├── train_controller.py
+    ├── train_supervisor.py
+    └── verification_runner.py
 ```
 
 `SKILL.md` is the Codex entry point. The reference files hold the complete
@@ -362,6 +486,10 @@ accounting checks.
   valid baseline; unavailable measurements are reported rather than estimated.
 - Repository rules and applicable `AGENTS.md` instructions always take
   precedence over this generic workflow.
+- The local controller cannot directly call the Codex desktop task API. The
+  active main conversation still performs tool calls, but it no longer decides
+  their order or whether lifecycle gates passed. This host adapter is awakened
+  only for changed state and rotated under a hard context budget.
 
 ## License
 
