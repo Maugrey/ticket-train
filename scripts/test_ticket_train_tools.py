@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,9 +17,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import control_guard
+import control_plane_runner
+import context_packet
 import run_registry
 import token_usage
+import train_controller
 import train_supervisor
+import verification_runner
 
 
 def valid_state() -> dict:
@@ -282,14 +288,269 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(state["control"]["cost_anomaly_status"], "checkpoint-open")
             self.assertEqual(state["legacy_manifest_inventory"], [str(legacy_path.resolve())])
 
+    def test_controlled_handoff_transfers_the_single_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_registry.init_run(self.init_args(root))
+            path = root / "test-run" / "manifest.json"
+            packet = root / "handoff.json"
+            packet.write_text("{}\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    run_registry.prepare_handoff(argparse.Namespace(
+                        state=path,
+                        from_thread="thread-a",
+                        reason="budget",
+                        packet=packet,
+                        handoff_minutes=15,
+                    )),
+                    0,
+                )
+            token = json.loads(output.getvalue())["handoff_token"]
+            prepared_state = json.loads(path.read_text(encoding="utf-8"))
+            prepared_state["procedure"] = {
+                "schema_version": 4,
+                "revision": 0,
+                "run_status": "ACTIVE",
+                "orchestrator_confirmed": False,
+                "tickets": {"T-1": {"status": "DISCOVERED"}},
+                "phases": {},
+                "human_gates": {},
+                "cost_control": {"anomalies": []},
+                "finalization": {"status": "NOT_STARTED"},
+            }
+            self.assertEqual(
+                train_controller.next_actions(prepared_state)[0]["action"],
+                "COMPLETE_CONTROLLED_ORCHESTRATOR_HANDOFF",
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    run_registry.accept_handoff(argparse.Namespace(
+                        state=path,
+                        to_thread="thread-b",
+                        handoff_token=token,
+                        lease_minutes=30,
+                    )),
+                    0,
+                )
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(state["orchestrator_lease"]["owner_thread_id"], "thread-b")
+            self.assertIsNone(state["pending_orchestrator_handoff"])
+            self.assertEqual(state["handoff_history"][-1]["reason"], "controlled-budget")
+
+
+class ControlPlaneRunnerTests(unittest.TestCase):
+    def create_manifest(self, root: Path) -> Path:
+        args = RunRegistryTests().init_args(root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_registry.init_run(args)
+        path = root / "test-run" / "manifest.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            train_controller.bootstrap(argparse.Namespace(
+                state=path,
+                base_branch="main",
+                approval_mode="standard",
+            ))
+        return path
+
+    def test_unchanged_step_is_suppressed_without_model_wake(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.create_manifest(root)
+            first = io.StringIO()
+            with contextlib.redirect_stdout(first):
+                self.assertEqual(
+                    control_plane_runner.step(argparse.Namespace(state=path, output_dir=None)),
+                    0,
+                )
+            second = io.StringIO()
+            with contextlib.redirect_stdout(second):
+                self.assertEqual(
+                    control_plane_runner.step(argparse.Namespace(state=path, output_dir=None)),
+                    0,
+                )
+            self.assertEqual(json.loads(first.getvalue())["status"], "packet-written")
+            repeated = json.loads(second.getvalue())
+            self.assertEqual(repeated["status"], "unchanged-suppressed")
+            self.assertEqual(repeated["wake_kind"], "NO_MODEL_WAKE")
+
+    def test_hard_budget_requests_orchestrator_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.create_manifest(root)
+            with contextlib.redirect_stdout(io.StringIO()):
+                control_plane_runner.record_activity(argparse.Namespace(
+                    state=path,
+                    thread_id="thread-a",
+                    baseline_total_tokens=1_000,
+                    latest_total_tokens=25_001_000,
+                    model_wakes=10,
+                    tool_calls=100,
+                    context_compactions=0,
+                ))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                control_plane_runner.step(argparse.Namespace(state=path, output_dir=None))
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["wake_kind"], "ROTATE_ORCHESTRATOR")
+            packet = json.loads(Path(result["packet_reference"]).read_text(encoding="utf-8"))
+            self.assertEqual(packet["orchestrator_budget"]["status"], "REQUIRED")
+
 
 class TokenUsageTests(unittest.TestCase):
+    @staticmethod
+    def write_session(path: Path, thread_id: str, total_tokens: int, extra_events: list[dict] | None = None) -> None:
+        usage = token_usage.empty_usage()
+        usage["total_tokens"] = total_tokens
+        events = [
+            {"type": "session_meta", "payload": {"id": thread_id}},
+            *list(extra_events or []),
+            {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage}}},
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
     def test_phase_attempt_family_pattern(self) -> None:
         match = token_usage.PHASE_ATTEMPT_PATTERN.fullmatch("run:T-1:review:2")
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.group("family"), "run:T-1:review")
         self.assertEqual(match.group("attempt"), "2")
+
+    def test_started_hidden_sessions_are_discovered_from_orchestrator_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "orchestrator.jsonl"
+            path.write_text(
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "sub_agent_activity",
+                        "kind": "started",
+                        "agent_thread_id": "00000000-0000-0000-0000-000000000001",
+                        "agent_path": "/root/review",
+                    },
+                }) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                token_usage.read_started_subagents(path),
+                {"00000000-0000-0000-0000-000000000001": "/root/review"},
+            )
+
+    def test_all_orchestrator_handoffs_are_included(self) -> None:
+        manifest = {
+            "orchestrator_lease": {"owner_thread_id": "thread-current"},
+            "handoff_history": [{
+                "from_thread_id": "thread-original",
+                "to_thread_id": "thread-current",
+            }],
+        }
+        self.assertEqual(
+            token_usage.collect_orchestrator_thread_ids(manifest),
+            ["thread-current", "thread-original"],
+        )
+
+    def test_ledger_requires_orchestrator_and_maps_discovered_hidden_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex"
+            orchestrator_id = "thread-orchestrator"
+            child_id = "thread-hidden-child"
+            self.write_session(
+                codex_home / "sessions" / f"{orchestrator_id}.jsonl",
+                orchestrator_id,
+                100,
+                [{
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "sub_agent_activity",
+                        "kind": "started",
+                        "agent_thread_id": child_id,
+                        "agent_path": "/root/review",
+                    },
+                }],
+            )
+            self.write_session(codex_home / "sessions" / f"{child_id}.jsonl", child_id, 200)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps({
+                "orchestrator_lease": {"owner_thread_id": orchestrator_id},
+                "handoff_history": [],
+                "procedure": {"phases": {
+                    "run:T-1:review:1": {
+                        "phase_key": "run:T-1:review:1",
+                        "ticket_id": "T-1",
+                        "thread_id": child_id,
+                        "usage_captured": True,
+                    },
+                }},
+            }), encoding="utf-8")
+            output = root / "ledger.json"
+            token_usage.ledger_command(argparse.Namespace(
+                manifest=manifest_path,
+                thread=None,
+                codex_home=codex_home,
+                output=output,
+            ))
+            ledger = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(ledger["aggregate"]["status"], "complete")
+            self.assertTrue(ledger["orchestrator_session_included"])
+            self.assertEqual(ledger["unmapped_hidden_sessions"], [])
+            self.assertEqual(ledger["phase_usage"]["run:T-1:review:1"]["total_tokens"], 200)
+
+
+class VerificationRunnerTests(unittest.TestCase):
+    def test_runner_records_zero_model_tokens_and_exact_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            (root / "tracked.txt").write_text("test\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "test"], cwd=root, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            plan = root / "plan.json"
+            plan.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "workdir": str(root),
+                    "expected_head": head,
+                    "commands": [{"id": "python", "argv": [sys.executable, "-c", "print('ok')"]}],
+                }),
+                encoding="utf-8",
+            )
+            output = root / "artifacts" / "result.json"
+            summary = verification_runner.run_plan(plan, output, root / "logs")
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "passed")
+            self.assertEqual(result["model_tokens"], 0)
+            self.assertEqual(result["final_head"], head)
+            self.assertEqual(summary["sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+
+
+class ContextPacketTests(unittest.TestCase):
+    def test_packet_is_bounded_hash_addressed_and_history_free(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "payload.json"
+            source.write_text(json.dumps({"ticket": "T-1", "diff_summary": ["src/a.ts"]}), encoding="utf-8")
+            output = root / "packet.json"
+            descriptor = context_packet.build_packet(source, output, "profile-1", "base", "head")
+            self.assertEqual(descriptor["history_turns_included"], 0)
+            self.assertLessEqual(descriptor["byte_count"], context_packet.MAX_BYTES)
+            self.assertEqual(len(descriptor["sha256"]), 64)
+
+    def test_packet_rejects_conversation_transcripts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "payload.json"
+            source.write_text(json.dumps({"conversation_history": ["too much context"]}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                context_packet.build_packet(source, root / "packet.json", "profile-1", "base", "head")
 
 
 def valid_verification_gate() -> dict:

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_registry
 import train_controller
+import merge_pull_request
 
 
 class Harness:
@@ -85,6 +86,37 @@ class Harness:
             ),
             0,
         )
+
+    @staticmethod
+    def context_packet(base: str = "base-sha", head: str = "ticket-sha") -> dict[str, object]:
+        return {
+            "format": "fresh-compact-v1",
+            "reference": "artifacts/context.json",
+            "sha256": "a" * 64,
+            "byte_count": 1024,
+            "history_turns_included": 0,
+            "profile_revision": "profile-1",
+            "exact_base": base,
+            "exact_head": head,
+        }
+
+    @staticmethod
+    def deterministic_verification_fields() -> dict[str, object]:
+        return {
+            "execution_mode": "deterministic",
+            "model_tokens": 0,
+            "operational_change_applicable": False,
+            "runner_version": "1",
+            "runner_result_reference": "logs/verification-result.json",
+            "runner_result_sha256": "b" * 64,
+            "command_results": [{
+                "command_id": "tests",
+                "status": "passed",
+                "exit_code": 0,
+                "duration_seconds": 1.0,
+                "log_reference": "logs/tests.log",
+            }],
+        }
     def analyze(self, criticality: str = "LOW", complexity: str = "LOW") -> None:
         analysis_model, analysis_effort = train_controller.setting_from_matrix(
             train_controller.ANALYSIS_MATRIX, criticality, complexity
@@ -97,6 +129,7 @@ class Harness:
                 base_commit="base-sha",
                 model="gpt-5.6-terra",
                 reasoning_effort="high",
+                context_packet=self.context_packet("base-sha", "base-sha"),
             ),
             0,
         )
@@ -129,6 +162,7 @@ class Harness:
                 reasoning_effort=analysis_effort,
                 routing_conformance="conformant",
                 reasoning_authorized=True,
+                context_packet=self.context_packet("base-sha", "base-sha"),
             ),
             0,
         )
@@ -162,7 +196,20 @@ class Harness:
             self.apply(
                 "DEPENDENCIES_CONSOLIDATED",
                 dependency_revision="dependencies-1",
-                graph={"T-1": {"hard_dependencies": [], "collision_domains": ["module-a"]}},
+                graph={"T-1": {
+                    "hard_dependencies": [],
+                    "collision_domains": ["module-a"],
+                    "planned_material_files": ["src/module-a.ts"],
+                    "structural_domains": ["module-a"],
+                    "schema_or_data_transformations": [],
+                }},
+                schedule={"T-1": {"mode": "sequential", "reason": "single ticket"}},
+                train_size_budget={
+                    "material_file_count": 1,
+                    "schema_or_data_transformation_count": 0,
+                    "structural_domain_count": 1,
+                    "checkpoint": "clear",
+                },
             ),
             0,
         )
@@ -185,6 +232,8 @@ class Harness:
                 acceptance_reasoning_effort="high",
                 acceptance_routing_conformance="conformant",
                 reasoning_authorized=True,
+                implementation_context_packet=self.context_packet("base-sha", "base-sha"),
+                acceptance_context_packet=self.context_packet("base-sha", "base-sha"),
             ),
             0,
         )
@@ -199,6 +248,8 @@ class Harness:
                 host_id=f"host-{thread_id}",
                 visibility_verified=True,
                 visibility_verified_at="2026-08-01T10:00:00+00:00",
+                execution_visibility="user-visible",
+                visibility_evidence_reference=f"tasks/{thread_id}.json",
             ),
             0,
         )
@@ -245,6 +296,7 @@ class Harness:
                 logs_reference="logs/verification.json",
                 supabase_auth_applicable=False,
                 automatable_manual_scenarios=[],
+                **self.deterministic_verification_fields(),
             ),
             0,
         )
@@ -255,11 +307,13 @@ class Harness:
             ticket_id="T-1",
             url="https://example.invalid/pr/1",
             base_branch=base_branch,
+            base_commit="base-sha",
             head_branch="codex/t-1",
             head_commit="ticket-sha",
+            is_draft=False,
         )
 
-    def clean_review(self) -> None:
+    def clean_review(self, reconcile: bool = True) -> None:
         self.assert_code(
             self.apply(
                 "REVIEW_DISPATCHED",
@@ -274,6 +328,7 @@ class Harness:
                 routing_conformance="conformant",
                 scope_revision="scope-1",
                 reasoning_authorized=True,
+                context_packet=self.context_packet("base-sha", "ticket-sha"),
             ),
             0,
         )
@@ -302,6 +357,8 @@ class Harness:
             ),
             0,
         )
+        if not reconcile:
+            return
         self.assert_code(
             self.apply(
                 "TICKET_FINDINGS_RECONCILED",
@@ -309,6 +366,28 @@ class Harness:
                 head_commit="ticket-sha",
                 ledger_status="complete",
                 sources_dispositioned=["codex", "ci", "copilot"],
+                feedback_collection_started_at="2026-08-01T10:00:00+00:00",
+                feedback_collection_deadline_at="2026-08-01T10:10:00+00:00",
+                feedback_collected_at="2026-08-01T10:02:00+00:00",
+                ci_status="passed",
+                copilot_status="received",
+                source_counts={"codex": 1, "ci": 1, "copilot": 1},
+                source_findings=[
+                    {"finding_id": "codex-1", "source": "codex"},
+                    {"finding_id": "ci-1", "source": "ci"},
+                    {"finding_id": "copilot-1", "source": "copilot"},
+                ],
+                finding_dispositions=[
+                    {
+                        "finding_id": finding_id,
+                        "disposition": "rejected-incorrect",
+                        "blocking": False,
+                        "remediation_status": "not-required",
+                        "verification": "reviewed",
+                    }
+                    for finding_id in ("codex-1", "ci-1", "copilot-1")
+                ],
+                feedback_evidence_reference="artifacts/ticket-feedback.json",
                 blocking_findings=[],
             ),
             0,
@@ -335,17 +414,21 @@ class TrainControllerTests(unittest.TestCase):
                 "FINAL_PR_RECORDED",
                 url="https://example.invalid/pr/final",
                 base_branch="main",
+                base_commit="base-sha",
                 head_branch="codex/train-test",
                 head_commit="train-sha",
+                is_draft=False,
             ),
             0,
         )
+
         self.assertEqual(
             run.apply(
                 "FINAL_VERIFICATION_RECORDED",
                 status="passed",
                 head_commit="train-sha",
                 evidence_reference="logs/final.json",
+                **run.deterministic_verification_fields(),
             ),
             0,
         )
@@ -361,6 +444,7 @@ class TrainControllerTests(unittest.TestCase):
                 reasoning_effort="high",
                 routing_conformance="conformant",
                 reasoning_authorized=True,
+                context_packet=run.context_packet("base-sha", "train-sha"),
             ),
             0,
         )
@@ -393,6 +477,260 @@ class TrainControllerTests(unittest.TestCase):
             0,
         )
 
+    def test_foreground_wait_cannot_yield_with_a_running_child(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            self.assertEqual(
+                run.apply(
+                    "PHASE_DISPATCHED",
+                    kind="triage",
+                    phase_key="run:run:triage:1",
+                    base_commit="base-sha",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="high",
+                    context_packet=run.context_packet("base-sha", "base-sha"),
+                ),
+                0,
+            )
+            run.materialize("run:run:triage:1", "thread-triage")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    train_controller.check(argparse.Namespace(state=run.path, mode="yield")),
+                    2,
+                )
+            self.assertIn("foreground supervision cannot survive", output.getvalue())
+
+    def test_ticket_merge_permit_requires_reconciled_ci_and_copilot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.functional_ready()
+            self.assertEqual(run.record_pr(), 0)
+            run.clean_review()
+            self.assertEqual(
+                train_controller.merge_permit_issues(
+                    run.state(), action="ticket", ticket_id="T-1", head_commit="ticket-sha"
+                ),
+                [],
+            )
+            state = run.state()
+            state["procedure"]["tickets"]["T-1"]["finding_ledger"]["ci_status"] = "failed"
+            self.assertIn(
+                "ticket CI is not acceptable",
+                train_controller.merge_permit_issues(
+                    state, action="ticket", ticket_id="T-1", head_commit="ticket-sha"
+                ),
+            )
+
+    def test_failed_ticket_ci_requires_a_blocking_pending_remediation_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.functional_ready()
+            self.assertEqual(run.record_pr(), 0)
+            run.clean_review(reconcile=False)
+            fields = {
+                "ticket_id": "T-1",
+                "head_commit": "ticket-sha",
+                "ledger_status": "complete",
+                "sources_dispositioned": ["codex", "ci", "copilot"],
+                "feedback_collection_started_at": "2026-08-01T10:00:00+00:00",
+                "feedback_collection_deadline_at": "2026-08-01T10:10:00+00:00",
+                "feedback_collected_at": "2026-08-01T10:02:00+00:00",
+                "ci_status": "failed",
+                "copilot_status": "received",
+                "source_counts": {"codex": 0, "ci": 1, "copilot": 0},
+                "source_findings": [{"finding_id": "ci-1", "source": "ci"}],
+                "feedback_evidence_reference": "artifacts/ticket-feedback.json",
+                "blocking_findings": ["ci-1"],
+            }
+            invalid_disposition = [{
+                "finding_id": "ci-1",
+                "disposition": "rejected-incorrect",
+                "blocking": False,
+                "remediation_status": "not-required",
+                "verification": "CI failed",
+            }]
+            self.assertEqual(
+                run.apply(
+                    "TICKET_FINDINGS_RECONCILED",
+                    finding_dispositions=invalid_disposition,
+                    **fields,
+                ),
+                2,
+            )
+            valid_disposition = [{
+                "finding_id": "ci-1",
+                "disposition": "accepted-deferred",
+                "blocking": True,
+                "remediation_status": "pending",
+                "verification": "Exact-head CI failure requires remediation",
+            }]
+            self.assertEqual(
+                run.apply(
+                    "TICKET_FINDINGS_RECONCILED",
+                    finding_dispositions=valid_disposition,
+                    **fields,
+                ),
+                0,
+            )
+            self.assertEqual(
+                run.state()["procedure"]["tickets"]["T-1"]["status"],
+                "NEEDS_REMEDIATION",
+            )
+            self.assertIn(
+                "ticket CI is not acceptable",
+                train_controller.merge_permit_issues(
+                    run.state(), action="ticket", ticket_id="T-1", head_commit="ticket-sha"
+                ),
+            )
+
+    def test_external_ticket_pr_head_drift_is_recorded_before_finding_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.functional_ready()
+            self.assertEqual(run.record_pr(), 0)
+            run.clean_review(reconcile=False)
+
+            self.assertEqual(
+                run.apply(
+                    "TICKET_PR_HEAD_DRIFT_RECORDED",
+                    ticket_id="T-1",
+                    previous_head_commit="ticket-sha",
+                    head_commit="external-descendant-sha",
+                    relationship="descendant",
+                    relationship_evidence_reference="artifacts/head-drift.json",
+                    observed_at="2026-08-23T06:22:39+00:00",
+                    source="copilot",
+                ),
+                0,
+            )
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "AWAITING_FINDING_RECONCILIATION")
+            self.assertEqual(item["pull_request"]["head_commit"], "external-descendant-sha")
+            self.assertTrue(item["pull_request"]["head_drift_unreconciled"])
+            self.assertTrue(item["verification"]["stale_due_to_head_drift"])
+            self.assertTrue(item["reviews"][-1]["stale_due_to_head_drift"])
+
+    def test_external_ticket_pr_head_drift_requires_matching_proven_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.functional_ready()
+            self.assertEqual(run.record_pr(), 0)
+            run.clean_review(reconcile=False)
+
+            self.assertEqual(
+                run.apply(
+                    "TICKET_PR_HEAD_DRIFT_RECORDED",
+                    ticket_id="T-1",
+                    previous_head_commit="wrong-head",
+                    head_commit="external-sha",
+                    relationship="descendant",
+                    relationship_evidence_reference="artifacts/head-drift.json",
+                    observed_at="2026-08-23T06:22:39+00:00",
+                    source="copilot",
+                ),
+                2,
+            )
+            self.assertEqual(
+                run.apply(
+                    "TICKET_PR_HEAD_DRIFT_RECORDED",
+                    ticket_id="T-1",
+                    previous_head_commit="ticket-sha",
+                    head_commit="external-sha",
+                    relationship="unknown",
+                    relationship_evidence_reference="artifacts/head-drift.json",
+                    observed_at="2026-08-23T06:22:39+00:00",
+                    source="copilot",
+                ),
+                2,
+            )
+
+    def seed_exhausted_ticket_remediation(self, run: Harness) -> None:
+        run.confirm()
+        run.analyze()
+        run.functional_ready()
+        self.assertEqual(run.record_pr(), 0)
+        state = run.state()
+        item = state["procedure"]["tickets"]["T-1"]
+        item["status"] = "NEEDS_REMEDIATION"
+        item["remediation_cycles"] = train_controller.AUTOMATIC_REMEDIATION_CYCLE_LIMIT
+        run_registry.save_json(run.path, state)
+
+    def provide_remediation_exception_input(self, run: Harness) -> None:
+        self.assertEqual(
+            run.apply(
+                "HUMAN_INPUT_REQUESTED",
+                ticket_id="T-1",
+                gate_id="T-1:remediation-exception:1",
+                revision="root-cause-1",
+                question="Authorize one additional remediation cycle?",
+                reason="The root-cause checkpoint found a bounded broken test oracle.",
+                blocked_scope="T-1 remediation",
+                continuing_scope="none",
+                accepted_replies=["Authorize", "Reject"],
+            ),
+            0,
+        )
+        self.assertEqual(
+            run.apply(
+                "GATE_ANNOUNCED",
+                gate_id="T-1:remediation-exception:1",
+                revision="root-cause-1",
+                decision_summary="One ticket-scoped cycle requires explicit authorization.",
+                evidence_summary="Two automatic cycles are exhausted and the remaining fix is bounded.",
+                blocked_scope="T-1 remediation",
+                continuing_scope="none",
+                accepted_replies=["Authorize", "Reject"],
+            ),
+            0,
+        )
+        self.assertEqual(
+            run.apply(
+                "INPUT_PROVIDED",
+                gate_id="T-1:remediation-exception:1",
+                revision="root-cause-1",
+                response_summary="The user authorized one additional remediation cycle.",
+                response_artifact="main-thread:user-message-3",
+            ),
+            0,
+        )
+
+    def grant_remediation_exception(self, run: Harness, additional_cycles: int = 1) -> int:
+        return run.apply(
+            "REMEDIATION_LIMIT_EXCEPTION_GRANTED",
+            ticket_id="T-1",
+            gate_id="T-1:remediation-exception:1",
+            additional_cycles=additional_cycles,
+            user_decision_reference="main-thread:user-message-3",
+            root_cause_reference="artifacts/root-cause.json",
+            reason="Bounded test-oracle correction after the automatic budget was exhausted.",
+            authorized_at="2026-08-01T10:02:00+00:00",
+        )
+
+    def dispatch_remediation(self, run: Harness, phase_key: str) -> int:
+        return run.apply(
+            "REMEDIATION_DISPATCHED",
+            ticket_id="T-1",
+            phase_key=phase_key,
+            base_commit="ticket-sha",
+            branch="codex/t-1-remediation",
+            complexity="LOW",
+            model="gpt-5.6-terra",
+            reasoning_effort="medium",
+            routing_conformance="conformant",
+            reasoning_authorized=True,
+            context_packet=run.context_packet("ticket-sha", "ticket-sha"),
+        )
+
     def test_execution_dispatch_is_an_atomic_implementation_test_pair(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
@@ -420,6 +758,109 @@ class TrainControllerTests(unittest.TestCase):
             self.assertEqual(
                 run.state()["procedure"]["phases"]["run:T-1:implementation:1"]["launch_state"],
                 "RUNNING",
+            )
+
+    def test_hidden_phase_requires_phase_specific_user_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            self.assertEqual(
+                run.apply(
+                    "PHASE_DISPATCHED",
+                    kind="triage",
+                    phase_key="run:run:triage:1",
+                    base_commit="base-sha",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="high",
+                    context_packet=run.context_packet("base-sha", "base-sha"),
+                ),
+                0,
+            )
+            hidden_launch = {
+                "phase_key": "run:run:triage:1",
+                "launch_state": "RUNNING",
+                "thread_id": "hidden-session-1",
+                "agent_session_id": "hidden-session-1",
+                "visibility_verified": False,
+                "execution_visibility": "hidden-authorized",
+                "hidden_authorization_id": "hidden-auth-1",
+            }
+            self.assertEqual(run.apply("PHASE_LAUNCH_OBSERVED", **hidden_launch), 2)
+            self.assertEqual(
+                run.apply(
+                    "HIDDEN_FALLBACK_AUTHORIZED",
+                    authorization_id="hidden-auth-1",
+                    phase_key="run:run:triage:1",
+                    user_decision_reference="main-thread:user-message-1",
+                    reason="Visible task creation is unavailable.",
+                    authorized_at="2026-08-01T10:00:00+00:00",
+                ),
+                0,
+            )
+            self.assertEqual(run.apply("PHASE_LAUNCH_OBSERVED", **hidden_launch), 0)
+            phase = run.state()["procedure"]["phases"]["run:run:triage:1"]
+            self.assertFalse(phase["visibility_verified"])
+            self.assertEqual(phase["execution_visibility"], "hidden-authorized")
+
+    def test_cost_anomaly_stops_successor_until_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            self.assertEqual(
+                run.apply(
+                    "PHASE_DISPATCHED",
+                    kind="triage",
+                    phase_key="run:run:triage:1",
+                    base_commit="base-sha",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="high",
+                    context_packet=run.context_packet("base-sha", "base-sha"),
+                ),
+                0,
+            )
+            run.materialize("run:run:triage:1", "thread-triage")
+            self.assertEqual(
+                run.apply(
+                    "PHASE_COMPLETED",
+                    phase_key="run:run:triage:1",
+                    envelope={
+                        "phase_key": "run:run:triage:1",
+                        "phase_status": "completed",
+                        "actual_model": "gpt-5.6-terra",
+                        "actual_reasoning_effort": "high",
+                        "result_summary": "done",
+                        "artifacts": {"triage": "triage.json"},
+                        "tests_and_checks": ["routing complete"],
+                        "residual_risks": "none",
+                        "requested_or_recommended_next_action": "continue",
+                        "files_modified": "none",
+                        "usage": {"measurement": "complete", "total_tokens": 50_000_001},
+                    },
+                ),
+                0,
+            )
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "RESOLVE_COST_ANOMALY_CHECKPOINT")
+            self.assertEqual(
+                run.apply(
+                    "HIDDEN_FALLBACK_AUTHORIZED",
+                    authorization_id="hidden-auth-cost",
+                    phase_key="run:run:triage:1",
+                    user_decision_reference="main-thread:user-message-2",
+                    reason="test",
+                    authorized_at="2026-08-01T10:01:00+00:00",
+                ),
+                2,
+            )
+            anomaly_id = action["anomalies"][0]["anomaly_id"]
+            self.assertEqual(
+                run.apply(
+                    "COST_ANOMALY_RESOLVED",
+                    anomaly_id=anomaly_id,
+                    resolution="restart-fresh-compact",
+                    resolution_evidence="new compact task will be used",
+                ),
+                0,
             )
 
     def test_review_before_functional_readiness_is_rejected(self) -> None:
@@ -471,6 +912,109 @@ class TrainControllerTests(unittest.TestCase):
                 routing_conformance="conformant",
             )
             self.assertEqual(code, 2)
+
+    def test_third_remediation_requires_a_recorded_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.seed_exhausted_ticket_remediation(run)
+            self.assertEqual(self.dispatch_remediation(run, "run:T-1:remediation:3"), 2)
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "ROOT_CAUSE_CHECKPOINT_REQUIRED")
+
+    def test_remediation_exception_requires_the_resolved_ticket_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.seed_exhausted_ticket_remediation(run)
+            self.assertEqual(self.grant_remediation_exception(run), 2)
+
+    def test_remediation_exception_grants_exactly_one_ticket_scoped_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.seed_exhausted_ticket_remediation(run)
+            self.provide_remediation_exception_input(run)
+            self.assertEqual(self.grant_remediation_exception(run, additional_cycles=2), 2)
+            self.assertEqual(self.grant_remediation_exception(run), 0)
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "DISPATCH_FRESH_BATCHED_REMEDIATION",
+            )
+            self.assertEqual(self.dispatch_remediation(run, "run:T-1:remediation:3"), 0)
+            state = run.state()
+            item = state["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["remediation_cycles"], 3)
+            self.assertEqual(item["remediation_limit_exception"]["status"], "CONSUMED")
+
+            item["status"] = "NEEDS_REMEDIATION"
+            run_registry.save_json(run.path, state)
+            self.assertEqual(self.dispatch_remediation(run, "run:T-1:remediation:4"), 2)
+
+    def test_consumed_exception_can_be_reauthorized_for_one_more_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.seed_exhausted_ticket_remediation(run)
+            self.provide_remediation_exception_input(run)
+            self.assertEqual(self.grant_remediation_exception(run), 0)
+            self.assertEqual(self.dispatch_remediation(run, "run:T-1:remediation:3"), 0)
+
+            state = run.state()
+            state["procedure"]["tickets"]["T-1"]["status"] = "NEEDS_REMEDIATION"
+            run_registry.save_json(run.path, state)
+            for event_type, fields in (
+                (
+                    "HUMAN_INPUT_REQUESTED",
+                    {
+                        "ticket_id": "T-1",
+                        "gate_id": "T-1:remediation-exception:2",
+                        "revision": "root-cause-2",
+                        "question": "Authorize one final bounded remediation cycle?",
+                        "reason": "A new root-cause checkpoint found a separate bounded defect.",
+                        "blocked_scope": "T-1 remediation",
+                        "continuing_scope": "none",
+                        "accepted_replies": ["Authorize", "Reject"],
+                    },
+                ),
+                (
+                    "GATE_ANNOUNCED",
+                    {
+                        "gate_id": "T-1:remediation-exception:2",
+                        "revision": "root-cause-2",
+                        "decision_summary": "One more ticket-scoped cycle requires explicit authorization.",
+                        "evidence_summary": "The previous exception is consumed and the new correction is bounded.",
+                        "blocked_scope": "T-1 remediation",
+                        "continuing_scope": "none",
+                        "accepted_replies": ["Authorize", "Reject"],
+                    },
+                ),
+                (
+                    "INPUT_PROVIDED",
+                    {
+                        "gate_id": "T-1:remediation-exception:2",
+                        "revision": "root-cause-2",
+                        "response_summary": "The user authorized one final bounded remediation cycle.",
+                        "response_artifact": "main-thread:user-message-4",
+                    },
+                ),
+            ):
+                self.assertEqual(run.apply(event_type, **fields), 0)
+
+            self.assertEqual(
+                run.apply(
+                    "REMEDIATION_LIMIT_EXCEPTION_GRANTED",
+                    ticket_id="T-1",
+                    gate_id="T-1:remediation-exception:2",
+                    additional_cycles=1,
+                    user_decision_reference="main-thread:user-message-4",
+                    root_cause_reference="artifacts/root-cause-2.json",
+                    reason="A second bounded correction after the prior exceptional cycle was consumed.",
+                    authorized_at="2026-08-01T10:03:00+00:00",
+                ),
+                0,
+            )
+            self.assertEqual(self.dispatch_remediation(run, "run:T-1:remediation:4"), 0)
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["remediation_cycles"], 4)
+            self.assertEqual(item["remediation_limit_exception"]["status"], "CONSUMED")
+            self.assertEqual(len(item["remediation_limit_exception_history"]), 1)
 
     def test_human_gate_cannot_be_resolved_before_announcement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -641,7 +1185,7 @@ class TrainControllerTests(unittest.TestCase):
                     snapshot_id="snapshot-1",
                     collection_id="feedback-1",
                     head_commit="train-sha",
-                    collected_at="2026-08-01T10:05:00+00:00",
+                    collected_at="2026-08-01T10:15:00+00:00",
                     ci_status="passed",
                     copilot_status="received",
                     source_counts={"codex": 0, "ci": 0, "copilot": 1, "human": 0},
@@ -710,6 +1254,149 @@ class TrainControllerTests(unittest.TestCase):
                 2,
             )
 
+    def test_copilot_unavailable_cannot_bypass_feedback_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.reach_final_review(run)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FEEDBACK_COLLECTION_STARTED",
+                    collection_id="feedback-1",
+                    head_commit="train-sha",
+                    started_at="2026-08-01T10:00:00+00:00",
+                    deadline_at="2026-08-01T10:15:00+00:00",
+                    expected_sources=["codex", "ci", "copilot", "human"],
+                ),
+                0,
+            )
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FEEDBACK_SNAPSHOT_RECORDED",
+                    snapshot_id="snapshot-1",
+                    collection_id="feedback-1",
+                    head_commit="train-sha",
+                    collected_at="2026-08-01T10:05:00+00:00",
+                    ci_status="passed",
+                    copilot_status="unavailable",
+                    copilot_status_evidence="GitHub API returned no review yet",
+                    source_counts={"codex": 0, "ci": 0, "copilot": 0, "human": 0},
+                    source_findings=[],
+                    unresolved_thread_ids=[],
+                    evidence_reference="logs/github-feedback.json",
+                ),
+                2,
+            )
+
+    def test_terminal_copilot_quota_with_user_override_can_close_feedback_early(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.reach_final_review(run)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FEEDBACK_COLLECTION_STARTED",
+                    collection_id="feedback-1",
+                    head_commit="train-sha",
+                    started_at="2026-08-01T10:00:00+00:00",
+                    deadline_at="2026-08-01T10:15:00+00:00",
+                    expected_sources=["codex", "ci", "copilot", "human"],
+                ),
+                0,
+            )
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FEEDBACK_SNAPSHOT_RECORDED",
+                    snapshot_id="snapshot-1",
+                    collection_id="feedback-1",
+                    head_commit="train-sha",
+                    collected_at="2026-08-01T10:05:00+00:00",
+                    ci_status="passed",
+                    copilot_status="unavailable",
+                    terminal_unavailability_kind="quota_exhausted",
+                    copilot_status_evidence="GitHub Copilot returned an explicit quota-exhausted review response.",
+                    user_override_reference="main-thread:user-explicitly-skipped-quota-wait",
+                    source_counts={"codex": 0, "ci": 0, "copilot": 0, "human": 0},
+                    source_findings=[],
+                    unresolved_thread_ids=[],
+                    evidence_reference="logs/github-feedback.json",
+                ),
+                0,
+            )
+
+    def test_new_final_remediation_cycle_clears_prior_cycle_pr_and_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.reach_final_review(run)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FEEDBACK_COLLECTION_STARTED",
+                    collection_id="feedback-1",
+                    head_commit="train-sha",
+                    started_at="2026-08-01T10:00:00+00:00",
+                    deadline_at="2026-08-01T10:10:00+00:00",
+                    expected_sources=["codex", "ci", "copilot", "human"],
+                ),
+                0,
+            )
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FEEDBACK_SNAPSHOT_RECORDED",
+                    snapshot_id="snapshot-1",
+                    collection_id="feedback-1",
+                    head_commit="train-sha",
+                    collected_at="2026-08-01T10:10:00+00:00",
+                    ci_status="passed",
+                    copilot_status="received",
+                    source_counts={"codex": 1, "ci": 0, "copilot": 0, "human": 0},
+                    source_findings=[{"finding_id": "finding-1", "source": "codex"}],
+                    unresolved_thread_ids=[],
+                    evidence_reference="logs/github-feedback.json",
+                ),
+                0,
+            )
+            self.assertEqual(
+                run.apply(
+                    "FINAL_FINDINGS_RECONCILED",
+                    head_commit="train-sha",
+                    feedback_snapshot_id="snapshot-1",
+                    ledger_status="complete",
+                    sources_dispositioned=["codex", "ci", "copilot", "human"],
+                    finding_dispositions=[{
+                        "finding_id": "finding-1",
+                        "disposition": "accepted-deferred",
+                        "blocking": True,
+                        "remediation_status": "pending",
+                        "verification": "regression required",
+                    }],
+                    remaining_unresolved_thread_ids=[],
+                    blocking_findings=["finding-1"],
+                ),
+                0,
+            )
+            state = run.state()
+            final = state["procedure"]["finalization"]
+            final["remediation_cycles"] = 1
+            final["remediation_pull_request"] = {"url": "https://example.invalid/pr/old"}
+            final["remediation_merge"] = {"merge_commit": "old-merge"}
+            run_registry.save_json(run.path, state)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_REMEDIATION_DISPATCHED",
+                    phase_key="run:run:final-remediation:2",
+                    base_commit="train-sha",
+                    branch="codex/final-remediation-2",
+                    criticality="LOW",
+                    complexity="LOW",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="medium",
+                    routing_conformance="conformant",
+                    context_packet=run.context_packet("train-sha", "train-sha"),
+                ),
+                0,
+            )
+            final = run.state()["procedure"]["finalization"]
+            self.assertNotIn("remediation_pull_request", final)
+            self.assertNotIn("remediation_merge", final)
+
     def test_same_event_id_is_idempotent_even_with_old_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
@@ -729,6 +1416,73 @@ class TrainControllerTests(unittest.TestCase):
             self.assertIn("finalization evidence is incomplete", issues)
             self.assertIn("final train PR is missing", issues)
 
+    def test_final_remediation_merge_permit_uses_completed_phase_and_train_pr(self) -> None:
+        state = {
+            "run_identity": {"train_branch": "codex/train-test"},
+            "procedure": {
+                "approval_mode": "auto-merge",
+                "phases": {
+                    "run:final:remediation:1": {
+                        "kind": "final_remediation",
+                        "launch_state": "COMPLETED",
+                        "branch": "codex/final-remediation-1",
+                        "base": "old-train-sha",
+                    }
+                },
+                "finalization": {
+                    "status": "AWAITING_FINAL_PR_UPDATE",
+                    "remediation_pull_request": {
+                        "url": "https://example.invalid/pull/2",
+                        "base_branch": "codex/train-test",
+                        "base_commit": "old-train-sha",
+                        "head_branch": "codex/final-remediation-1",
+                        "head_commit": "remediation-sha",
+                        "is_draft": False,
+                    },
+                },
+            },
+        }
+        self.assertEqual(
+            train_controller.merge_permit_issues(
+                state,
+                action="final-remediation",
+                ticket_id=None,
+                head_commit="remediation-sha",
+            ),
+            [],
+        )
+        state["procedure"]["finalization"]["remediation_pull_request"]["head_commit"] = "other-sha"
+        self.assertIn(
+            "final remediation pull-request head differs from requested merge head",
+            train_controller.merge_permit_issues(
+                state,
+                action="final-remediation",
+                ticket_id=None,
+                head_commit="remediation-sha",
+            ),
+        )
+
+    def test_live_github_gate_rejects_pending_final_remediation_ci(self) -> None:
+        issues = merge_pull_request.github_gate_issues(
+            {
+                "state": "OPEN",
+                "isDraft": False,
+                "headRefOid": "remediation-sha",
+                "baseRefName": "codex/train-test",
+                "headRefName": "codex/final-remediation-1",
+                "statusCheckRollup": [{
+                    "name": "quality",
+                    "status": "IN_PROGRESS",
+                    "conclusion": None,
+                }],
+            },
+            expected_head="remediation-sha",
+            expected_base="codex/train-test",
+            expected_head_branch="codex/final-remediation-1",
+            ci_not_configured=False,
+        )
+        self.assertTrue(any("not complete" in issue for issue in issues))
+
     def test_dry_run_stops_after_analysis_report_and_usage_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = Harness(Path(directory), execution_mode="dry-run")
@@ -746,6 +1500,16 @@ class TrainControllerTests(unittest.TestCase):
                     analysis_reports_ready=True,
                     task_inventory_ready=True,
                     completion_report_ready=True,
+                    ledger_reference="reports/dry-run-token-ledger.json",
+                    ledger_sha256="d" * 64,
+                    authoritative_phase_count=2,
+                    measured_phase_count=2,
+                    orchestrator_session_included=True,
+                    hidden_sessions_reconciled=True,
+                    unmeasured_phase_keys=[],
+                    unmeasured_session_ids=[],
+                    task_inventory_requested_count=1,
+                    task_inventory_terminal_count=1,
                 ),
                 0,
             )
@@ -773,8 +1537,10 @@ class TrainControllerTests(unittest.TestCase):
                     "FINAL_PR_RECORDED",
                     url="https://example.invalid/pr/final",
                     base_branch="main",
+                    base_commit="base-sha",
                     head_branch="codex/train-test",
                     head_commit="train-sha",
+                    is_draft=False,
                 ),
                 0,
             )
@@ -784,6 +1550,7 @@ class TrainControllerTests(unittest.TestCase):
                     status="passed",
                     head_commit="train-sha",
                     evidence_reference="logs/final.json",
+                    **run.deterministic_verification_fields(),
                 ),
                 0,
             )
@@ -799,6 +1566,7 @@ class TrainControllerTests(unittest.TestCase):
                     reasoning_effort="high",
                     routing_conformance="conformant",
                     reasoning_authorized=True,
+                    context_packet=run.context_packet("base-sha", "train-sha"),
                 ),
                 0,
             )
@@ -847,7 +1615,7 @@ class TrainControllerTests(unittest.TestCase):
                     snapshot_id="snapshot-1",
                     collection_id="feedback-1",
                     head_commit="train-sha",
-                    collected_at="2026-08-01T10:05:00+00:00",
+                    collected_at="2026-08-01T10:15:00+00:00",
                     ci_status="passed",
                     copilot_status="received",
                     source_counts={"codex": 0, "ci": 0, "copilot": 0, "human": 0},
@@ -884,11 +1652,48 @@ class TrainControllerTests(unittest.TestCase):
                     attention_points_summary_ready=True,
                     task_inventory_ready=True,
                     completion_report_ready=True,
+                    ledger_reference="reports/token-ledger.json",
+                    ledger_sha256="c" * 64,
+                    authoritative_phase_count=5,
+                    measured_phase_count=5,
+                    orchestrator_session_included=True,
+                    hidden_sessions_reconciled=True,
+                    unmeasured_phase_keys=[],
+                    unmeasured_session_ids=[],
+                    task_inventory_requested_count=1,
+                    task_inventory_terminal_count=1,
                 ),
                 0,
             )
             self.assertEqual(run.apply("RUN_COMPLETED"), 0)
             self.assertEqual(run.state()["procedure"]["run_status"], "COMPLETED")
+            self.assertEqual(
+                run.apply(
+                    "FINAL_BASE_MERGE_AUTHORIZED",
+                    authorization_id="auth-1",
+                    head_commit="train-sha",
+                    pull_request_url="https://example.invalid/pr/final",
+                    user_decision_reference="thread-message-1",
+                    authorized_at="2026-08-01T10:20:00+00:00",
+                ),
+                0,
+            )
+            self.assertEqual(
+                train_controller.merge_permit_issues(
+                    run.state(), action="final", ticket_id=None, head_commit="train-sha"
+                ),
+                [],
+            )
+            self.assertEqual(
+                run.apply(
+                    "FINAL_BASE_MERGED",
+                    head_commit="train-sha",
+                    merge_commit="base-merge-sha",
+                    merged_at="2026-08-01T10:21:00+00:00",
+                ),
+                0,
+            )
+            self.assertEqual(run.state()["procedure"]["finalization"]["status"], "DELIVERED_IN_BASE")
 
 
 if __name__ == "__main__":

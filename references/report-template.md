@@ -46,11 +46,14 @@ dependency, and residual risk is represented in the compact digest.
 - Triage routing: Terra/High
 - Routing enforcement: strict
 - Coordination policy: compact-control-plane
+- Control-plane runner: deterministic-decision-packets
+- Decision-packet limit: 16 KiB
+- Orchestrator rotation: automatic budgeted handoff at 25M tokens, 50 model wakes, 500 tool calls, or one context compaction
 - Supervision policy: event-driven-deterministic
 - Child-thread visibility: user-visible
 - Launch reconciliation: required
 - Supervision mode: active-until-terminal
-- Liveness reporting: transitions plus 15-minute liveness | user override
+- Liveness reporting: transitions plus deterministic host notifications | user override
 - Canonical run ID and fingerprint:
 - Orchestrator lease owner:
 - Supervisor mode and watcher ID:
@@ -104,9 +107,9 @@ unknown, do not present it as inferred.
 ## Live train status report
 
 Publish this compact report on every material state transition. During long
-unchanged work, publish it at the liveness cadence from
-[orchestration-control.md](orchestration-control.md) without repeating detailed
-ticket reports.
+unchanged work, do not wake the model to republish it. Use a deterministic host
+notification from [orchestration-control.md](orchestration-control.md) only
+when the host or user requires liveness.
 
 ```markdown
 ## Train status
@@ -121,6 +124,11 @@ ticket reports.
 - Supervision: <mode, last check, next check>
 - Durable state updated at:
 - Cost anomaly: none | <reason and checkpoint>
+- Control-plane wake: no-model-wake | deterministic | adapter | technical-decision | rotation
+- Decision packet: <reference, bytes, SHA-256>
+- Orchestrator segment budget: <tokens, wakes, tool calls, compactions, clear|warning|rotation-required>
+- Controlled handoff: none | prepared | accepted <old -> new>
+- Context packet: <reference, bytes, SHA-256> | not yet dispatched
 - Functional verification gates: <ticket and status>
 ```
 
@@ -146,6 +154,8 @@ Publish after adopting a run in the same or a new main conversation:
 - Pending human action: none | <gate, revision, accepted replies>
 - Next automatic action:
 - Supervision mode and next check:
+- Decision packet used for recovery:
+- Orchestrator segment and handoff status:
 - Token/cost impact of the interruption:
 ```
 
@@ -487,6 +497,8 @@ above.
 ### Verification
 
 - Automated tests:
+- Execution mode: deterministic / zero model tokens
+- Runner result and SHA-256:
 - Project checks:
 - Red evidence and base commit:
 - Green evidence and exact head:
@@ -514,6 +526,8 @@ above.
 - Remaining non-blocking findings:
 - Complete review passes for stable scope: <count>/1
 - Remediation cycles: <count>/2
+- Remediation delta: mechanical | bounded-behavioral | cross-cutting | material-scope | not applicable
+- Follow-up verification complexity:
 - Minimum required correction:
 - Optional hardening:
 - Explicitly deferred post-MVP:
@@ -622,6 +636,8 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Launch anomalies and duplicate-attempt dispositions:
 - Durable state reconciliation: complete | partial
 - Canonical run identity and orchestrator handoffs:
+- Control-plane runner and suppressed unchanged observations:
+- Orchestrator segments and budget-triggered rotations:
 - Supervision history and liveness compliance:
 - Human actions announced and resolved:
 - Requested tickets and final states:
@@ -663,6 +679,9 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Copilot/comments dispositioned | complete \| pending \| unavailable \| not configured | | |
 | GitHub feedback snapshot covers final head | complete \| stale \| missing | | |
 | Token accounting reported | complete \| partial \| unavailable | | |
+| Orchestrator segments included | <measured>/<known> | | |
+| Hidden sessions reconciled | yes \| no | | |
+| Authoritative phases measured | <measured>/<authoritative> | | |
 | Functional verification summarized | complete \| incomplete | | |
 | Manual validation summarized | complete \| incomplete | | |
 | Code/application attention points summarized | complete \| incomplete | | |
@@ -719,11 +738,15 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 
 ### Session token ledger
 
-| Session | Ticket/phase | Attempt | Authoritative or duplicate | Baseline | Final | Delta | Coverage |
+| Session | Ticket/phase | Attempt | Authoritative, duplicate, or orchestrator segment | Baseline | Final | Delta | Coverage |
 |---|---|---:|---|---:|---:|---:|---|
 | <thread-id> | | | | | | | complete \| unavailable |
 
 - Duplicate sessions included:
+- Hidden sessions discovered and mapped:
+- Unmapped hidden sessions:
+- Orchestrator segments included: <measured>/<known>
+- Authoritative phases measured: <measured>/<authoritative>
 - Failed or cancelled attempts included:
 - Unmeasured phases:
 - Session diagnostics: <assistant messages, tool calls, token counter events, context compactions>

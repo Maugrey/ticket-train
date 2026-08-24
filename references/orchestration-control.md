@@ -17,7 +17,10 @@
 
 ## Control-plane invariants
 
-Use the main conversation as the only orchestrator. Every triage, analysis,
+Use one leased main conversation at a time as the orchestrator adapter. The
+canonical run may rotate through several fresh adapter conversations under
+[control-plane-runner.md](control-plane-runner.md), but never has two active
+owners. Every triage, analysis,
 implementation, independent acceptance-test authoring, review, follow-up
 review, and final-train review phase must run
 in a separate user-visible Codex thread when thread-management tools are
@@ -51,6 +54,11 @@ the corresponding event is rejected.
 `train_supervisor.py` collects deterministic thread, GitHub, test, and
 verification observations. It does not own lifecycle transitions. Convert its
 changed observations into controller events authorized by `next_actions`.
+
+`control_plane_runner.py` is the normal read boundary for the main
+conversation. It emits a bounded decision packet, classifies the wake, and
+suppresses an unchanged state. Do not load the complete manifest merely to
+decide what happens next.
 
 ## Canonical run and ownership
 
@@ -107,6 +115,11 @@ launch_attempts
 last_observed_at
 final_report_captured
 usage_captured
+execution_visibility
+visibility_evidence_reference
+context_packet_reference
+context_packet_sha256
+context_packet_bytes
 ```
 
 Never create a second attempt while the previous attempt is `LAUNCH_UNKNOWN`,
@@ -127,6 +140,8 @@ Apply this sequence for every phase:
    until the real thread ID appears, then register its host ID and initial
    cursor. Verify the materialized task through a user-visible list/read
    operation and persist `visibility_verified = true` with its timestamp.
+   Do not publish a final response while doing this in foreground mode: a
+   client ID proves only queued work and cannot wake the orchestrator later.
 5. When a call returns an error, times out, loses its response handler, or has
    an otherwise ambiguous outcome, mark `LAUNCH_UNKNOWN`. Do not assume that
    no side effect occurred.
@@ -142,6 +157,18 @@ Apply this sequence for every phase:
    blocker. Never switch silently to hidden execution.
 8. Report every launch anomaly and its resolution in the main conversation and
    durable manifest.
+
+If visible creation remains unavailable and the user explicitly accepts a
+hidden fallback, first record `HIDDEN_FALLBACK_AUTHORIZED` for that one phase,
+including the user-decision reference. Then record the actual hidden agent
+session ID with `execution_visibility = hidden-authorized` and
+`visibility_verified = false`. Authorization is one-use and cannot cover
+another phase or an entire train.
+
+Before step 2, generate the phase handoff with `scripts/context_packet.py`.
+Persist its SHA-256 descriptor and pass it unchanged to the controller. A
+packet cannot include conversation history, raw logs, or private reasoning and
+cannot exceed 64 KiB.
 
 Treat duplicate phase keys or multiple live threads for one phase as an
 orchestration incident. Stop dispatching that phase, select one authoritative
@@ -197,6 +224,11 @@ orchestrator must still wait for and collect it. Reject an incomplete envelope
 through a targeted follow-up in the same visible thread instead of reconstructing
 the technical result from raw logs.
 
+The adapter supplies `actual_model` and `actual_reasoning_effort` from the
+recorded explicit task dispatch. Do not take these values from a child's
+natural-language self-identification or a generic UI label. Such text is not a
+routing attestation and must not trigger a rerun or human approval request.
+
 ## Active supervision loop
 
 Resolve supervision before dispatch. Use foreground transition waits or create
@@ -204,8 +236,10 @@ and verify a run-scoped background watcher. Persist the mode, watcher ID,
 `last_check_at`, and `next_check_at`. If neither is reliable, block before
 launching children. The user is never responsible for creating this watcher.
 
-After dispatch, keep the orchestrator turn active while any phase is queued,
-running, launch-unknown, or ready for an automatic successor.
+After dispatch, keep the run supervised while any phase is queued, running,
+launch-unknown, or ready for an automatic successor. The same model
+conversation need not stay active when a verified deterministic background
+watcher can preserve and signal changed state.
 
 Use one event-driven `wait_threads` call for all active user-visible threads
 with their latest host IDs and cursors. Prefer the longest product-approved
@@ -217,27 +251,33 @@ wait that still permits required user updates. On every wake-up:
    reported a blocker, or requires a targeted amendment.
 4. Capture the completed phase's token counters before starting its successor.
 5. Validate routing conformance and phase output completeness.
-6. Publish the compact state transition in the main conversation.
-7. Dispatch every newly ready automatic successor.
-8. Wait again while active work remains.
+6. Apply the changed controller event.
+7. Run `control_plane_runner.py step`.
+8. On `unchanged-suppressed`, return to the wait without a model message.
+9. Otherwise read only the new decision packet, publish any material
+   transition, and execute its authorized successor.
+10. Record current orchestrator activity and rotate before another ordinary
+    model action when the packet says `ROTATE_ORCHESTRATOR`.
 
 When no state, cursor, blocker, decision, or result changed, do not read a
 thread, rewrite a narrative status, or create another model-visible report.
-Reuse the deterministic snapshot and wait again. A model wake must correspond
-to a transition, dispatch, failure, blocker, or technical decision whenever
-the product supports transition-triggered waits.
+The runner must return `unchanged-suppressed`; reuse the prior packet and wait
+again. A model wake must correspond to a transition, dispatch, failure,
+blocker, gate announcement, report, or technical decision whenever the
+product supports transition-triggered waits.
 
 A child completion does not by itself justify ending the orchestrator turn.
 The orchestrator owns result collection, state advancement, and successor
 dispatch. Do not rely on the user to notice a completed child or send a message
 that wakes the main conversation.
 
-At every background wake, run `train_controller.py heartbeat` first. Follow
-its `heartbeat_decision` and `next_actions`; do not derive lifecycle state from
-the automation prompt. Never pause or delete the watcher unless the command
-returns `may_pause_or_delete_watcher = true`. An announced information request
-keeps reminders active, and merged tickets without a final pull request remain
-automatically runnable.
+At every changed background observation, run `train_controller.py heartbeat`
+and `control_plane_runner.py step`. Follow the packet; do not derive lifecycle
+state from the automation prompt. An unchanged heartbeat does not wake the
+model. Never pause or delete the watcher unless the heartbeat returns
+`may_pause_or_delete_watcher = true`. An announced information request keeps
+deterministic reminders active, and merged tickets without a final pull
+request remain automatically runnable.
 
 If normal thread waits are temporarily unavailable, use a bounded monitor or
 product-supported wake-up mechanism while continuing to reconcile the same
@@ -246,10 +286,21 @@ cannot be restored, persist the state and report a blocker.
 
 When the host requires the main turn to yield during long work, use
 `SUPERVISED_ACTIVE` only after the deterministic guard verifies the watcher.
-The watcher checks no less often than every five minutes and produces a
-manifest-derived liveness update at least every 15 minutes while active work
-remains. It wakes the model immediately for transitions, blockers, successor
-dispatch, or human decisions.
+The watcher checks at its configured bounded interval and emits a cheap
+product-level liveness signal only when the host requires one. It does not
+wake the model for unchanged state. It wakes the model immediately for
+transitions, blockers, successor dispatch, or human decisions.
+
+`FOREGROUND_WAIT` cannot protect work after the main turn ends. The
+authoritative yield check therefore fails while any phase is queued, running,
+or launch-unknown in foreground mode. Either continue transition-aware waits
+in the same turn, or create and verify a real background watcher before
+yielding; changing the manifest label without a live watcher is forbidden.
+
+Before every model wake and supervised yield, enforce the activity and packet
+budgets from [control-plane-runner.md](control-plane-runner.md). A required
+rotation transfers the single lease to one fresh visible successor using the
+bounded packet; it never duplicates the run or a technical phase.
 
 ## Progress reporting
 
@@ -263,19 +314,17 @@ Report immediately when a phase:
 - changes the next automatic action;
 - encounters or resolves a launch anomaly.
 
-For long unchanged work, follow the product's mandatory communication cadence
-without rereading child context. Publish ordinary train status only on a
-material transition or at an explicit user-requested interval. If the platform
-requires a heartbeat, keep it to one line derived from the durable snapshot.
-Do not dump raw logs or repeat unchanged detailed reports.
+For long unchanged work, publish no model-authored train status. If the host
+requires a communication cadence, emit a one-line deterministic product
+notification derived from the durable snapshot, without opening the
+orchestrator conversation or rereading child context. Detailed status is
+published only on a material transition or at an explicit user request.
 
-While work is active, the default maximum user-visible silence is 15 minutes.
-This liveness message is a one-line deterministic status and must not reread
-child context. A pending human action is never unchanged noise: its reminder
-begins with `ACTION REQUIRED` and cannot be replaced by `DONT_NOTIFY`.
-Repeat the exact question, gate revision, accepted replies, blocked scope, and
-independently continuing scope. "Waiting for information" without these
-fields is a control defect.
+A pending human action is never hidden. Its initial `ACTION REQUIRED` message
+is model-authored once and persisted. Later unchanged reminders, when desired,
+are deterministic notifications that repeat the exact question, gate
+revision, accepted replies, blocked scope, and independently continuing
+scope. "Waiting for information" without these fields is a control defect.
 
 Use the status template in [report-template.md](report-template.md).
 
@@ -311,6 +360,11 @@ unmeasured_phase_inventory
 cost_anomaly_status
 pending_human_action
 analysis_artifacts
+control_plane_runner_version
+decision_packet_reference_and_hash
+suppressed_unchanged_observations
+orchestrator_segments_and_activity_budgets
+pending_orchestrator_handoff
 ```
 
 Do not leave the manifest at a stale high-level state while child work
@@ -335,6 +389,10 @@ python scripts/train_supervisor.py human-gate --state <manifest> --event-json <c
 python scripts/train_supervisor.py clear-human-gate --state <manifest> --gate-id <id> --decision <decision> --next-action <action>
 python scripts/train_supervisor.py analysis-artifact --state <manifest> --event-json <analysis-evidence-json>
 python scripts/train_supervisor.py status --state <manifest>
+python scripts/verification_runner.py --plan <verification-plan.json> --output <result.json> --logs-dir <external-log-directory>
+python scripts/context_packet.py --input <payload.json> --output <packet.json> --profile-revision <revision> --base <sha> --head <sha>
+python scripts/control_plane_runner.py step --state <manifest>
+python scripts/control_plane_runner.py record-activity --state <manifest> --thread-id <id> --baseline-total-tokens <n> --latest-total-tokens <n> --model-wakes <n> --tool-calls <n> --context-compactions <n>
 ```
 
 The thread connector remains responsible for waiting on user-visible tasks;
@@ -499,7 +557,10 @@ These are automatic successors, not work the user must request.
 
 `SUPERVISED_ACTIVE` is the narrow exception for queued/running phases. It
 requires verified supervision and no hidden human gate. It is not a completion
-state and must include the next check time in the user-visible status.
+state. Before yielding, `control_plane_runner.py step` must return
+`NO_MODEL_WAKE` or `unchanged-suppressed`; otherwise execute or hand off its
+action first. Store the next deterministic check time in the manifest without
+requiring a model-authored status.
 
 For `AWAITING_REQUIRED_USER_INPUT`, identify the exact ticket, revision, gate,
 and decision needed. Continue unrelated safe work before yielding. Publish the
@@ -541,6 +602,11 @@ On restart, context compaction, new main conversation, or user resumption:
 5. Recompute `next_automatic_action` from authoritative live state.
 6. Report a compact recovered status and continue automatically unless a human
    gate or blocker is active.
+
+If the prior conversation reached its orchestration budget, resume through a
+prepared controlled handoff rather than generic takeover. Accept the
+single-use token, read only the bounded decision packet, verify the new lease,
+and continue without importing prior turns.
 
 Classify completed analysis artifacts as `REUSABLE`, `RECONCILE`, or `INVALID`
 before launching analysis. Reuse stable evidence and perform only targeted

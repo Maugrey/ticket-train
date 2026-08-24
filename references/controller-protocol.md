@@ -19,12 +19,15 @@ The deterministic controller owns:
 - ticket and train lifecycle state;
 - human-gate creation, announcement, and exact-revision resolution;
 - model-routing matrix lookup and conformance;
+- bounded hash-addressed context-packet validation;
+- user-visible versus explicitly authorized hidden execution identity;
 - atomic implementation/acceptance-test pair creation;
 - verification-before-review ordering;
 - full-review-before-follow-up ordering;
 - review and remediation limits;
 - pull-request base and exact-head relationships;
 - final pull request, verification, review, feedback, usage, and report gates;
+- deterministic zero-token command evidence and token-cost circuit breakers;
 - explicit information requests, their main-thread announcement, and
   same-thread phase resumption after a user answer;
 - the list of allowed next actions.
@@ -43,6 +46,12 @@ The main Codex conversation is a thin adapter. It asks the controller for the
 next action, executes only that action through the available task, GitHub, and
 shell tools, then records the observed result as a new event. It must not
 invent a transition because a prompt says that a phase is probably finished.
+
+The adapter reads controller state through
+`scripts/control_plane_runner.py`, not by loading the full manifest into the
+conversation. The runner emits a maximum 16 KiB decision packet, suppresses
+unchanged waits, and requires a controlled orchestrator handoff at its context
+budget. Read [control-plane-runner.md](control-plane-runner.md).
 
 ## Bootstrap
 
@@ -104,13 +113,28 @@ completion.
 After the task tool responds, apply `PHASE_LAUNCH_OBSERVED`:
 
 - `QUEUED` requires a client task ID;
-- `RUNNING` requires the real task ID and verified user visibility;
+- visible `RUNNING` requires the real task ID, `execution_visibility =
+  user-visible`, and durable visibility evidence;
+- hidden `RUNNING` requires a prior phase-specific
+  `HIDDEN_FALLBACK_AUTHORIZED` event containing the user's decision reference,
+  then records the actual agent session ID without claiming visibility;
 - `LAUNCH_UNKNOWN` preserves an ambiguous outcome and prevents a retry;
 - `BLOCKED` requires completed reconciliation evidence in the orchestration
   report.
 
+A returned `clientThreadId` is only queue evidence. It cannot satisfy visible
+launch, supervision, or progress reporting. Resolve and verify the real
+`threadId` before treating the phase as running. Under `FOREGROUND_WAIT`, the
+orchestrator must remain in the same turn and wait for transitions; the yield
+guard rejects every queued, running, or launch-unknown phase in that mode.
+
 Silence is not an event and never changes a phase to blocked. Only an
 authoritative task transition or completion envelope changes phase state.
+
+Every dispatch also carries a descriptor produced by `context_packet.py`.
+The packet uses `fresh-compact-v1`, includes no inherited turns, names the
+exact base/head and proportionality-profile revision, is SHA-256 addressed,
+and is no larger than 64 KiB.
 
 ## Completion envelopes
 
@@ -135,6 +159,12 @@ The controller rejects a completion when:
 - phase token usage or an explicit unavailable measurement is absent;
 - a non-completed outcome is mislabeled as completed.
 
+Take actual model and effort from the explicit task-dispatch record. The
+adapter injects those recorded values into the completion event; it must not
+substitute a child's natural-language model name or UI label. A child's claim
+is diagnostic text only and cannot create a routing gate or authorize a
+rerun.
+
 Store detailed logs outside the repository. Events contain concise evidence
 and durable references, not full transcripts or secrets.
 
@@ -147,38 +177,78 @@ The following gates are enforced as code:
 3. Every ticket is triaged before analysis.
 4. Every analysis uses the matrix-selected setting.
 5. Dependencies are consolidated only after all analyses are recorded.
+   Consolidation includes file/domain/transformation inventories, an explicit
+   schedule, a cumulative size budget, and rejects a parallel group with an
+   unproven shared file or collision domain.
 6. A matrix-required analysis approval is announced in the main conversation
    before it can be resolved.
 7. Hard dependencies are merged before an execution pair starts.
 8. Implementation and independent tests start as one atomic pair from the
    same base.
 9. Both workers finish before functional verification.
-10. Red, green, environment, and applicable Supabase/Auth evidence pass before
+10. Verification commands run through `verification_runner.py`, preserve the
+    exact Git head, store complete logs outside the repository, and record
+    `model_tokens = 0`. A failed run is recorded before technical failure
+    adjudication.
+11. Red, green, environment, and applicable Supabase/Auth evidence pass before
+    review. Every verification explicitly classifies operational changes; a
+    changed scheduler, workflow, provider, webhook, or runtime configuration
+    requires a deterministic presence preflight and complete inventory before
     review.
-11. A ticket pull request must target the train branch.
-12. The first review is exhaustive and covers the verified ticket head.
-13. Codex, CI, Copilot, and available human findings are reconciled into one
-    exact-head ledger before remediation or merge.
-14. A follow-up review requires an exhaustive baseline and remediation.
-15. A focused follow-up cannot use a setting above the trustworthy initial
+12. A ticket pull request must target the train branch.
+13. The first review is exhaustive and covers the verified ticket head.
+14. The ticket PR is ready, then Codex, CI, Copilot, and available human
+    findings are collected and reconciled into one exact-head ledger before
+    remediation or merge. The ticket event records actual collection times,
+    stable finding IDs, source counts matching that inventory, exactly one
+    technical disposition per finding, CI and Copilot terminal states, and
+    durable evidence.
+    Copilot `unavailable` or `timed_out` is rejected before the recorded
+    deadline, which is at least ten minutes after collection starts.
+    A completed failed CI run may be recorded only when at least one CI
+    finding is `accepted-deferred`, blocking, listed in `blocking_findings`,
+    and has `pending` remediation. This transition enters remediation; it
+    never makes the ticket mergeable.
+15. A follow-up review requires an exhaustive baseline, remediation, and a
+    structured delta classification with its own verification complexity.
+16. A focused follow-up cannot use a setting above the trustworthy initial
     review ceiling.
-16. The ticket cannot merge until review is clean and the exact human
-    pre-merge gate, when applicable, is approved.
-17. Finalization freezes active work.
-18. The final train pull request exists before final review.
-19. Final verification and final review cover the same exact PR head.
-20. After the final review, a bounded GitHub feedback collection covers
+17. A ticket receives at most two automatic remediation cycles. One third
+    cycle requires a completed root-cause checkpoint, an explicit user input
+    gate, and a controller-recorded run-scoped, ticket-scoped, single-use
+    exception. The exception grants exactly one cycle and is consumed at
+    dispatch.
+18. The ticket cannot merge until review is clean, live exact-head GitHub
+    checks pass, Copilot is terminal and dispositioned, and the exact human
+    pre-merge gate, when applicable, is approved. Agent merges use only
+    `merge_pull_request.py`; direct GitHub merge commands are unsupported.
+19. Finalization freezes active work.
+20. The final train pull request exists and is no longer draft before final
+    review.
+21. Final verification and final review cover the same exact PR head.
+22. After the final review, a feedback window of at least ten minutes covers
     Codex, CI, Copilot, and human sources on that same exact head. Every
     collected finding receives exactly one technical disposition. `timed_out`
-    is accepted only after the recorded deadline; `not_configured` and
-    `unavailable` require evidence.
-21. Blocking final-review findings enter at most two routed final-remediation
+    and `unavailable` are accepted only after the recorded deadline;
+    `not_configured` and `unavailable` require evidence.
+23. Blocking final-review findings enter at most two routed final-remediation
     cycles; every updated PR head invalidates prior verification and review,
     GitHub feedback snapshot, and ledger, then receives targeted follow-up
     review unless material scope changed.
-22. CI, Copilot disposition, finding ledger, token ledger, manual validation,
+24. CI, Copilot disposition, finding ledger, token ledger, manual validation,
     attention points, task inventory, and the completion report are recorded
     before `RUN_COMPLETED`.
+25. A phase above 50 million tokens, more than one context compaction, or a
+    focused re-review above twice its initial-review usage opens a blocking
+    cost checkpoint. Only `COST_ANOMALY_RESOLVED` may advance the run until a
+    quality-neutral restart/continuation or user-approved quality tradeoff is
+    recorded.
+26. Merging the final train into the base branch additionally requires a
+    `FINAL_BASE_MERGE_AUTHORIZED` event tied to the exact final head and a
+    direct user decision reference. Approval mode never supplies this event.
+    This authorization may be recorded after `RUN_COMPLETED`, because normal
+    delivery reports complete before the user decides whether Codex should
+    perform the final merge.
 
 Approval modes alter only the two human-validation matrices. They do not
 bypass any other procedural gate.
@@ -205,25 +275,36 @@ Only one human action is announced at a time, and it is mirrored as
 
 ## Next-action loop
 
-Read compact state and the allowed next actions with:
+The controller still exposes raw compact status for diagnostics:
 
 ```powershell
 python scripts/train_controller.py status --state <run-manifest.json>
 ```
 
+For routine execution, reduce it to a bounded wake packet:
+
+```powershell
+python scripts/control_plane_runner.py step --state <run-manifest.json>
+```
+
 The adapter follows this loop:
 
-1. Read `next_actions`.
-2. Execute only the listed deterministic or model task.
-3. Record the outcome as one event using the returned revision.
-4. Publish a user-visible transition when state materially changes.
-5. Repeat until the controller returns a wait, human gate, blocker, checkpoint,
+1. Apply only changed observations.
+2. Run the control-plane step.
+3. Stop immediately on `unchanged-suppressed`; this consumes no model wake.
+4. Read only the newly generated decision packet.
+5. Read its bounded `next_actions`.
+6. Execute only the listed deterministic, adapter, or model task.
+7. Record the outcome as one event using the returned revision.
+8. Publish a user-visible transition when state materially changes.
+9. Repeat until the controller returns a wait, human gate, blocker, checkpoint,
    or completion action.
 
 An unchanged wait snapshot does not produce an event, manifest revision,
-detailed thread read, or model-written status. A non-LLM host should perform
-task polling where the product exposes a stable API. Wake the model only for a
-transition, technical decision, failure, blocker, or report.
+decision packet, detailed thread read, or model-written status. A non-LLM host
+should perform task polling where the product exposes a stable API. Wake the
+model only for a transition, task dispatch, technical decision, failure,
+blocker, gate announcement, or report.
 
 For a background wake-up, use the deterministic heartbeat projection:
 
@@ -255,6 +336,18 @@ gate; do not maintain two independently advancing state machines.
 
 Do not declare success when the procedural controller rejects completion.
 
+For merges, first run the controller permit and then the live guarded merger:
+
+```powershell
+python scripts/train_controller.py permit-merge --state <run-manifest.json> --action ticket --ticket-id <ticket> --head-commit <sha>
+python scripts/merge_pull_request.py --state <run-manifest.json> --repo <owner/name> --action ticket --ticket-id <ticket>
+python scripts/merge_pull_request.py --state <run-manifest.json> --repo <owner/name> --action final
+```
+
+The merge script verifies the live PR state, draft state, base/head branches,
+exact head, and completed successful checks immediately before merging, then
+records the resulting merge event. Do not replace it with `gh pr merge`.
+
 In dry-run mode, dependency consolidation and every applicable human analysis
 gate still apply, but the controller never offers an execution-pair action.
 `DRY_RUN_EVIDENCE_RECORDED` closes the analyzed tickets only after analysis
@@ -277,10 +370,19 @@ Never rerun triage, analysis, implementation, or review merely to rebuild
 conversation context. The event log and durable artifacts are the recovery
 source of truth.
 
+When the control-plane runner requests rotation, prepare a single-use handoff
+through `run_registry.py prepare-handoff`, create exactly one fresh visible
+successor with the bounded packet, and transfer ownership through
+`accept-handoff`. The controller returns only
+`COMPLETE_CONTROLLED_ORCHESTRATOR_HANDOFF` while a transfer is prepared. A
+prepared but unaccepted handoff fails the yield guard.
+
 ## Adapter limitation
 
-The bundled Python controller cannot itself create Codex tasks because the
+The bundled Python controller and runner cannot themselves create Codex tasks because the
 desktop task API is supplied to the active Codex conversation rather than as a
 stable local process API. Until such an API is available, the main conversation
-must execute the controller's dispatch actions. This remaining adapter is
-intentionally narrow: it does not decide order, retries, gates, or completion.
+must execute the controller's dispatch actions and transition-aware waits.
+This remaining adapter is intentionally narrow: it does not poll unchanged
+state, decide order, retries, gates, or completion, and it is rotated before
+its conversation context becomes a dominant cost center.

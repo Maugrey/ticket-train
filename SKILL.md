@@ -14,6 +14,9 @@ Read these references before starting:
 - [controller-protocol.md](references/controller-protocol.md) for the
   authoritative procedural state machine, event contract, next-action loop,
   and adapter boundary. Apply it before interpreting the narrative workflow.
+- [control-plane-runner.md](references/control-plane-runner.md) for bounded
+  decision packets, unchanged-wait suppression, orchestrator activity budgets,
+  and controlled handoffs to fresh visible orchestrator tasks.
 - [workflow.md](references/workflow.md) for lifecycle, concurrency, branches, gates, and stopping rules.
 - [orchestration-control.md](references/orchestration-control.md) for visible-thread launch, ambiguous outcomes, active supervision, durable recovery, and yield gates.
 - [run-continuity.md](references/run-continuity.md) for canonical run identity,
@@ -65,15 +68,19 @@ Before triage, resolve and echo:
 9. Token usage reporting, fixed to `exact-if-available` unless the user explicitly disables it.
 10. Routing enforcement, fixed to `strict`.
 11. Coordination policy, fixed to `compact-control-plane`.
-12. Actual orchestrator model and reasoning effort, when observable.
-13. Recommended orchestrator model and effort under the startup preflight.
-14. Proportionality profile revision and its material assumptions.
-15. Train size budget and current estimated review surface.
-16. Review-pass budget, fixed to one complete pass and at most two grouped
+12. Control-plane runner, fixed to `deterministic-decision-packets`.
+13. Orchestrator rotation, fixed to `automatic-budgeted-handoff` with a 10M
+    soft warning, 25M hard token limit, 50 model wakes, 500 tool calls, one
+    context compaction, and 16 KiB decision packets.
+14. Actual orchestrator model and reasoning effort, when observable.
+15. Recommended orchestrator model and effort under the startup preflight.
+16. Proportionality profile revision and its material assumptions.
+17. Train size budget and current estimated review surface.
+18. Review-pass budget, fixed to one complete pass and at most two grouped
     remediation/follow-up cycles per stable scope.
-17. Cost-control policy, fixed to `strict-quality-preserving`.
-18. Verification policy, fixed to `parallel-independent-red-green`.
-19. Environment tiers required by the selected tickets.
+19. Cost-control policy, fixed to `strict-quality-preserving`.
+20. Verification policy, fixed to `parallel-independent-red-green`.
+21. Environment tiers required by the selected tickets.
 
 Before publishing the startup preflight, use
 [run_registry.py](scripts/run_registry.py) to discover or create the canonical
@@ -94,6 +101,12 @@ authoritative lifecycle. Before every dispatch or transition, read its
 as an idempotent, revision-checked event. A prompt, child-thread conclusion, or
 orchestrator inference cannot authorize a transition that the controller
 rejects.
+
+Build every phase handoff with [context_packet.py](scripts/context_packet.py).
+Pass the returned descriptor to the dispatch event. The controller rejects a
+packet above 64 KiB, a packet without an exact base/head and profile revision,
+or any packet that includes conversation history. Do not manually recreate a
+full prior conversation in a fresh task.
 
 Require the user to provide or confirm the ticket source and selection. Never invent a source by scanning TODOs, comments, or arbitrary repository files.
 
@@ -169,6 +182,12 @@ state transitions, compact reports, and durable references in the main
 conversation. Do not copy raw logs, full child reports, or unchanged progress
 snapshots into the orchestrator context.
 
+After every changed observation, run
+`scripts/control_plane_runner.py step`. Read only a newly written bounded
+decision packet and execute its declared wake class. A result of
+`unchanged-suppressed` means no model wake, no detailed task read, and no
+user-facing status. Never run a prompt-authored polling or heartbeat loop.
+
 The main thread is an adapter, not the scheduler. It must not decide the next
 phase from conversational memory. Use `train_controller.py status`, execute
 the returned action through the available task/Git/GitHub tool, and feed the
@@ -178,24 +197,56 @@ Include the controller revision and update time in material status reports;
 reconcile immediately if tasks, Git, or GitHub advanced beyond that state.
 
 Maintain exactly one orchestrator lease and one canonical manifest. Resolve
-and verify foreground waiting or a run-scoped background watcher before the
-first child dispatch. A background watcher is part of the workflow, not a
-recovery action the user must request. While work is active, confirm liveness
-to the user at least every 15 minutes even without a material transition.
-At every watcher wake, run `train_controller.py heartbeat`. Never pause or
-delete the watcher unless it returns `may_pause_or_delete_watcher = true`.
+and verify foreground transition waiting or a run-scoped deterministic
+background watcher before the first child dispatch. A background watcher is
+part of the workflow, not a recovery action the user must request. Do not wake
+a model for periodic liveness. Publish transitions immediately; when the host
+requires unchanged liveness, emit it from a deterministic product notification
+without replaying the orchestrator context. At every changed watcher
+observation, run `control_plane_runner.py step` and wake a model only when its
+packet requires one.
+
+`FOREGROUND_WAIT` is valid only inside the current orchestrator turn. It never
+survives a final response. When any phase is queued, running, or launch-unknown
+under this mode, keep calling transition-aware task waits and advancing the
+controller until the phase is captured or an actual gate/blocker exists. A
+nonzero foreground yield check is a hard stop, not a status that may be
+explained away in prose.
 
 Follow [orchestration-control.md](references/orchestration-control.md) for
 every phase dispatch. Record a unique phase key and launch intent before
 creation, reconcile asynchronous or ambiguous outcomes before retrying, and
-keep the orchestrator active until it reaches an allowed human gate, blocker,
-completion, or checkpoint.
+keep the run supervised until it reaches an allowed human gate, blocker,
+completion, or checkpoint. The same orchestrator conversation need not remain
+active after durable supervision is verified.
+
+When task creation returns only `clientThreadId`, record `QUEUED`: this is not
+a task launch and not a user-visible thread. Resolve the real `threadId`, read
+or list it to prove visibility, record `RUNNING`, and start a wait in the same
+turn. Never send a final response merely saying that queued work was launched.
+For read-only analysis and review, prefer a visible local-environment task that
+inspects exact Git refs; do not request a new worktree when it adds only a
+materialization queue and no isolation benefit.
+
+Treat model/effort routing as controller evidence from the explicit task-tool
+dispatch, not as a natural-language self-identification by the child. Inject
+the routed values into the completion event from the recorded dispatch. A
+child UI label such as `standard` or `GPT-5 (Codex)` is not evidence of a
+routing mismatch and must never create a human gate or duplicate execution.
 
 Use [train_supervisor.py](scripts/train_supervisor.py) to reconcile changed
 thread snapshots, GitHub status, and test artifacts into the manifest. Do not
 use LLM turns for unchanged polling or raw-log status extraction.
 Treat supervisor observations as inputs to controller events; they do not
 advance lifecycle state by themselves.
+
+Record the current orchestrator segment with `control_plane_runner.py
+record-activity` at material checkpoints. Before another ordinary model
+action, rotate to one fresh visible orchestrator when any hard budget is
+reached. Prepare and accept that single-owner transfer through
+`run_registry.py prepare-handoff` and `accept-handoff`; pass only the bounded
+decision packet and single-use token. Never fork or replay the old
+conversation. Count every segment in orchestration usage.
 
 Keep a mapping from ticket to source locator, analysis base commit, intrinsic criticality, complexity, conditional assumptions, validity conditions, reconciliation state, routing decisions, routing conformance, dependencies, worker thread, reviewer thread, branch, worktree, pull request, usage snapshots, gate state, and train commit. Also track the final train pull request, reviewed head, CI and Copilot state, final finding ledger, manual validation plan, and code/application attention points.
 
@@ -255,8 +306,9 @@ At a high level:
 6. Record that confirmation as an idempotent controller event. Create and
    version the mandatory proportionality profile and transmit it
    to every technical phase.
-7. Resolve and verify foreground or background supervision. Stop before child
-   dispatch if neither is reliable.
+7. Resolve and verify foreground or background deterministic supervision,
+   bootstrap the control-plane runner, and stop before child dispatch if no
+   transition-aware mechanism is reliable.
 8. Perform a short routing triage in a dedicated read-only thread with an
    explicit `Terra/H` override, without producing a technical plan.
 9. Record one common analysis base commit and queue every selected ticket for analysis immediately.
@@ -266,6 +318,12 @@ At a high level:
    Apply the visible launch and active supervision protocol to every dispatch;
    never interpret an ambiguous creation response as proof that no task was
    created.
+   Record `execution_visibility = user-visible` and durable visibility evidence.
+   If visible launch is unavailable, stop and obtain a phase-specific user
+   authorization before recording `HIDDEN_FALLBACK_AUTHORIZED`; never label a
+   hidden session as visible.
+   After each changed observation, generate one bounded decision packet. Do
+   not expose raw controller state or full child history to the orchestrator.
 11. Route and run one full analysis per ticket with at most five active threads, without dependency or human-gate waits. Reuse a valid durable analysis on resume.
 12. Consolidate returned dependency contracts and route targeted amendments to original analysis threads.
 13. Require every recommendation to separate the minimum required correction,
@@ -294,7 +352,10 @@ At a high level:
     the independent test commit through a test pull request into the ticket
     branch or an equivalent durable merge.
 25. Run baseline-red, exact-head integrated-green, environment-parity, and
-    applicable Supabase/Auth/RLS checks. Adjudicate failures before review.
+    applicable Supabase/Auth/RLS checks with
+    [verification_runner.py](scripts/verification_runner.py). This command
+    execution is deterministic and records zero model tokens. Wake a model
+    only to classify a failure that the structured result cannot resolve.
 26. Record functional evidence through the controller, run
     `control_guard.py check-verification`, and mark the ticket pull request
     ready for automated code review only when functional readiness passes.
@@ -304,42 +365,70 @@ At a high level:
 29. Consolidate Codex, Copilot, CI, and human findings into one deduplicated
     disposition ledger, then send one grouped remediation packet to a fresh
     compact remediation thread on the same branch and worktree.
+    A completed failed CI run is admissible in this ledger only as an
+    accepted-deferred blocking CI finding with pending remediation. It must
+    transition the ticket to remediation and never relax a merge permit.
 30. Require a reproducing regression test for every confirmed behavioral
-    defect, then run a targeted re-review by default. Permit another full review only for
+    defect, then classify the remediation delta as `mechanical`,
+    `bounded-behavioral`, `cross-cutting`, or `material-scope` and route a
+    targeted re-review from its actual verification complexity. Permit another full review only for
     the material scope changes listed in the efficiency policy, never merely
     because the train base advanced.
 31. Stop automatic remediation after two cycles and perform a root-cause and
-    cost-anomaly checkpoint instead of looping.
+    cost-anomaly checkpoint instead of looping. A third cycle is allowed only
+    when the user explicitly authorizes one additional cycle after that
+    checkpoint and the controller records a run-scoped, ticket-scoped,
+    single-use exception. Never edit the manifest directly or raise the
+    default two-cycle budget.
 32. Measure non-overlapping triage, analysis, consolidation, reconciliation,
     plan-contract validation, implementation, acceptance-test authoring,
     red/green/environment validation, initial review, remediation, follow-up review, final train
-    validation, and orchestration usage.
-33. Apply the matrix-based human pre-merge gate selected by the run mode.
-34. Serialize merges into the train.
-35. Report each integrated ticket and its ticket total in the main thread.
-36. When the requested live queue finishes or a ticket-count or size
+    validation, and orchestration usage. Record deterministic verification,
+    CI polling, and GitHub polling as zero-model-token phases rather than
+    assigning them to a review session.
+33. Mark the ticket PR ready, collect exact-head CI and GitHub review state,
+    and reconcile Codex, CI, and Copilot findings. If Copilot responds and CI
+    completes, collection may close immediately; otherwise retain a deadline
+    at least ten minutes after collection starts and permit unavailable or
+    timed-out status only after that deadline. A failed terminal CI result is
+    collected immediately as a blocking remediation finding, not mislabeled
+    as unavailable and not ignored.
+34. Apply the matrix-based human pre-merge gate selected by the run mode.
+35. Serialize merges into the train exclusively through
+    `scripts/merge_pull_request.py`. Direct `gh pr merge`, API merge, or web
+    merge by an agent is prohibited because it bypasses the controller and
+    live exact-head CI guard.
+36. Report each integrated ticket and its ticket total in the main thread.
+37. When the requested live queue finishes or a ticket-count or size
     checkpoint is reached, freeze finalization, push the train, and create or update one
     final train pull request against the already resolved base branch. This is
     an automatic successor; do not wait for the user to request the PR or ask
     them to reconfirm `main` versus `master`.
-37. Run integrated cross-ticket acceptance and applicable clean-reset
-    Supabase/Auth/RLS checks on the exact train head.
-38. Review cross-ticket interactions and unreviewed integration surfaces in
+38. Run integrated cross-ticket acceptance and applicable clean-reset
+    Supabase/Auth/RLS checks on the exact train head through the deterministic
+    verification runner.
+39. Review cross-ticket interactions and unreviewed integration surfaces in
     the current final pull request, reuse trustworthy unchanged ticket-review
     evidence, consolidate all feedback, and apply the same grouped-remediation
     and targeted-re-review limits.
-39. After that review, start a bounded exact-head GitHub feedback collection,
+40. After that review, start a bounded exact-head GitHub feedback collection
+    of at least ten minutes,
     snapshot Codex, CI, Copilot, and human findings, and give every collected
     finding one technical disposition. Record final PR, validation, review,
     feedback snapshot, ledger, token ledger, reports, and attention summaries
     as separate controller events. `RUN_COMPLETED` must be rejected until all
     are present at the same final head.
-40. Report the final pull request, its exact reviewed head, readiness, a
+41. Report the final pull request, its exact reviewed head, readiness, a
     deduplicated manual validation plan, and separate code and application
     attention points.
-41. Report the measured run total with baseline/final/delta for every known
-    session, including duplicate attempts and explicitly unmeasured phases.
-42. Keep the train frozen after five integrated tickets or a cumulative-size
+42. Report the measured run total with baseline/final/delta for every known
+    session, including the orchestrator, sessions discovered from hidden-agent
+    activity, duplicate attempts, and explicitly unmeasured phases. A
+    sequential phase family is not a duplicate merely because its attempt
+    suffix changed. Report every controlled orchestrator segment separately
+    and sum them under orchestration; a valid budget handoff is not a
+    duplicate.
+43. Keep the train frozen after five integrated tickets or a cumulative-size
     checkpoint until the user merges it or explicitly authorizes more tickets.
 
 For sequential or dependent tickets, complete the predecessor's implementation, automated validation, required human validation, and train merge before starting the dependent implementation. Do not delay the dependent analysis.
@@ -379,6 +468,16 @@ Pause and report a blocker when:
 - the automatic review/remediation pass budget is exhausted;
 - a token-cost anomaly requires an expensive repeat and no quality-neutral
   continuation is established.
+- a phase exceeds 50 million tokens, performs more than one context
+  compaction, or a focused re-review exceeds twice its initial-review token
+  total and the controller's cost checkpoint is unresolved;
+- a fresh phase lacks a valid bounded context-packet descriptor;
+- a supposedly visible phase lacks durable visibility evidence or a hidden
+  fallback lacks phase-specific user authorization;
+- the current orchestrator reached a hard activity budget and its controlled
+  handoff has not been accepted;
+- a decision packet exceeds 16 KiB or an unchanged observation would require
+  replaying the main conversation;
 
 When information rather than approval is missing, apply
 `HUMAN_INPUT_REQUESTED` or a child `PHASE_TERMINATED` with `needs_input`.
@@ -393,8 +492,9 @@ Publish every required decision in the main conversation using the `ACTION
 REQUIRED` report from [report-template.md](references/report-template.md), then
 persist the complete `pending_human_action`. Never rely on a child thread,
 automation transcript, or silent status field to tell the user that approval
-is waiting. Keep verified supervision active and remind the user at the
-configured cadence until the exact gate revision is resolved.
+is waiting. Keep verified supervision active. When reminders are configured,
+emit them through deterministic product notifications from the persisted gate;
+do not wake the full orchestrator merely to repeat unchanged text.
 
 After five integrated tickets, do not start a sixth ticket. Create or update
 the final train pull request, complete its validation and feedback loop, and
@@ -405,6 +505,14 @@ Never merge the train into `main` or `master` unless either:
 
 - the user performs the merge on GitHub; or
 - the user explicitly asks Codex to perform that merge.
+
+The approval mode named `auto-merge` applies only to matrix-selected human
+pre-merge gates for ticket branches entering the train. It is not permission
+to merge the train into the base branch. When the user explicitly asks Codex
+to perform the final merge, record `FINAL_BASE_MERGE_AUTHORIZED` for the exact
+final PR head, then use `scripts/merge_pull_request.py --action final`; a
+generic startup approval, an approval-mode label, or prior merge consent for
+another head is insufficient.
 
 ## Keep source status separate
 
@@ -460,7 +568,10 @@ Use [token_usage.py](scripts/token_usage.py) under [usage-reporting.md](referenc
 Use its `ledger` command at checkpoints and completion to reconcile
 baseline/final/delta for every known session and every manifest phase. Count
 duplicate and failed attempts instead of discarding them, and list every
-phase whose counter or baseline is unavailable.
+phase whose counter or baseline is unavailable. A report may be `complete`
+only when every orchestrator segment is present, every authoritative procedural
+phase is measured, and every hidden session discovered from orchestrator
+activity is mapped or explicitly reconciled.
 
 Reuse trustworthy CI evidence only when it is tied to the exact reviewed head
 commit and all required checks are available. Reviewers still run independent
@@ -468,12 +579,23 @@ risk-targeted checks for the ticket's critical surfaces. If CI evidence is
 missing, stale, or broken, fall back to the project-required local validation
 and disclose the duplication.
 
+Before every ticket-to-train merge, the ticket finding event must contain the
+actual GitHub collection interval, source counts, evidence reference, CI
+status, Copilot status, stable finding inventory, and exactly one technical
+disposition per collected finding for the same head. Source names or aggregate
+counts alone are not evidence. Run the guarded merge script only after
+`train_controller.py permit-merge --action ticket` passes. Before a requested
+train-to-base merge, rerun the live GitHub check through the same script; any
+pending or failing check blocks the merge even if local tests were green.
+
 Before every final response, apply the yield gate from
 [orchestration-control.md](references/orchestration-control.md). Do not end the
-orchestrator turn while visible work is queued or running, a launch outcome is
-unknown, an automatic successor is ready, or completed evidence remains to be
-captured. At live completion, create or update the final pull request before
-the final Codex review and feedback collection.
+orchestrator turn while a launch outcome is unknown, an automatic successor is
+ready, completed evidence remains uncaptured, or active work lacks verified
+deterministic supervision. A verified background watcher may protect queued or
+running work without retaining the same model conversation. At live
+completion, create or update the final pull request before the final Codex
+review and feedback collection.
 
 Run `train_controller.py check --mode yield` or `--mode completion` against
 the reconciled canonical manifest before every yield, completion, or
@@ -484,9 +606,10 @@ override or replace the versioned procedural state.
 
 Use terminal reason `SUPERVISED_ACTIVE` only when active work is protected by
 a verified foreground wait or background watcher. It is not permission to
-stop following the run. If the guard reports missing ownership, visibility,
-supervision, or human-action notification, correct that control defect before
-yielding.
+stop following the run. Run `control_plane_runner.py step` first; it must
+return `NO_MODEL_WAKE` before a supervised yield. If the guard reports missing
+ownership, visibility, supervision, handoff, or human-action notification,
+correct that control defect before yielding.
 
 At completion, early stop, and every ticket-count or size checkpoint, provide
 one consolidated report for every requested ticket and state exactly what

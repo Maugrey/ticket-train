@@ -70,6 +70,7 @@ concurrency_or_idempotency_cases
 existing_data_and_migration_cases
 environment_assumptions
 external_integration_boundaries
+operational_configuration_contract
 manual_only_scenarios_and_justification
 ```
 
@@ -159,6 +160,18 @@ testing harder than coding. Record requested and actual routing normally.
 
 ## Red and green evidence
 
+Execute red, green, environment, migration, and project-required commands with
+`scripts/verification_runner.py`. Provide a JSON plan containing the exact
+worktree, expected Git head, and argv list for every command. The runner writes
+full stdout/stderr logs outside the repository, verifies that the head did not
+change, and returns a hashed structured result with `model_tokens = 0`.
+
+The controller accepts both `passed` and `failed` runner results so failure
+evidence is durable. It allows review only after a passing result. A model may
+classify a failed result as implementation defect, test defect, environment
+defect, contract ambiguity, or infrastructure flake; it must not supervise a
+passing command or narrate unchanged output.
+
 Require both evidence states:
 
 ### Baseline red
@@ -236,6 +249,10 @@ integrated_green_head
 ticket_head
 environment_parity_status = passed | not-applicable
 environment_fingerprint
+operational_change_applicable = true | false
+operational_preflight_status = passed | not-applicable
+operational_preflight_evidence
+required_configuration_inventory
 supabase_auth_applicable = true | false
 supabase_auth_verification_status = passed | not-applicable
 privileged_credentials_setup_only = true
@@ -253,6 +270,10 @@ The gate requires:
 - acceptance-test commit integrated into the ticket branch;
 - exact-head green evidence;
 - required environment-parity status;
+- explicit operational-change classification and, when applicable, verified
+  presence of every required repository variable, secret name, scheduler,
+  deployment setting, provider configuration, and health endpoint without
+  reading or logging secret values;
 - Supabase/Auth status when applicable;
 - zero automatable scenario delegated to the user;
 - full logs captured outside the repository;
@@ -341,6 +362,15 @@ If hosted-only verification is required but credentials or a disposable
 environment are unavailable, mark the gate `environment-blocked`; do not call
 it passed or silently transfer an automatable check to the user.
 
+The same fail-closed rule applies to deployment and operations changes. When a
+ticket adds or changes a workflow, scheduler, cron endpoint, provider, runtime
+environment variable, webhook, queue, or background worker, inventory the
+required configuration and verify its presence through deterministic CLI/API
+metadata before review. Never infer configuration from documentation or
+`env.example`. A missing repository variable or secret name is an explicit
+environment/input gate, not a successful implementation and not a post-merge
+manual test.
+
 ## Reviewer responsibilities
 
 The reviewer receives the final implementation/test diff, contracts,
@@ -391,6 +421,12 @@ For applicable Supabase work, start from a clean reset, apply migrations in
 delivery order, seed representative roles, and rerun affected Auth/RLS and
 environment checks.
 
+Repeat the operational configuration preflight on the final head whenever any
+integrated ticket classified it as applicable. Record the inventory and
+evidence in `FINAL_VERIFICATION_RECORDED`; final readiness is rejected while a
+required scheduler variable, secret name, provider setting, or deployment
+endpoint is absent.
+
 Reuse ticket evidence only when its commits, fixtures, environment contract,
 and behavior are unchanged in the train. The final review concentrates on
 cross-ticket interactions and evidence invalidated by integration.
@@ -419,6 +455,8 @@ diagnosis and remediation. Keep the cost controlled:
 - at most two active implementation/test pairs;
 - one initial acceptance-test authoring pass;
 - deterministic red/green and environment execution without model narration;
+- zero model tokens for command execution, exact-head checks, log capture, and
+  unchanged CI polling;
 - compact contracts instead of implementation-thread history;
 - targeted test remediation rather than regenerating the suite;
 - no complete code review before functional readiness.

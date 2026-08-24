@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from contextlib import contextmanager
@@ -18,6 +19,7 @@ from typing import Any, Iterator
 
 ACTIVE_RUN_STATES = {"ACTIVE", "AWAITING_USER", "BLOCKED", "CHECKPOINT"}
 DEFAULT_LEASE_MINUTES = 30
+DEFAULT_HANDOFF_MINUTES = 15
 
 
 def now() -> datetime:
@@ -274,6 +276,16 @@ def init_run(args: argparse.Namespace) -> int:
                 "tickets": tickets,
             },
             "orchestrator_lease": lease(args.orchestrator_thread, args.lease_minutes),
+            "pending_orchestrator_handoff": None,
+            "orchestrator_rotation_policy": {
+                "mode": "automatic-budgeted-handoff",
+                "soft_total_tokens": 10_000_000,
+                "hard_total_tokens": 25_000_000,
+                "max_model_wakes": 50,
+                "max_tool_calls": 500,
+                "max_context_compactions": 1,
+                "decision_packet_max_bytes": 16_384,
+            },
             "supervision": {
                 "mode": "UNRESOLVED",
                 "status": "INACTIVE",
@@ -348,6 +360,9 @@ def claim(args: argparse.Namespace) -> int:
     root = path.parent.parent
     with directory_lock(root):
         state = load_json(path)
+        pending_handoff = state.get("pending_orchestrator_handoff")
+        if isinstance(pending_handoff, dict) and pending_handoff.get("status") == "PREPARED":
+            raise ValueError("a prepared handoff must be accepted with accept-handoff, not claim")
         current = state.get("orchestrator_lease")
         current_owner = current.get("owner_thread_id") if isinstance(current, dict) else None
         expired = lease_expired(current)
@@ -397,6 +412,146 @@ def claim(args: argparse.Namespace) -> int:
     return 0
 
 
+def prepare_handoff(args: argparse.Namespace) -> int:
+    """Prepare a single-use controlled handoff without creating a second run."""
+    path = args.state.expanduser().resolve()
+    root = path.parent.parent
+    packet_path = args.packet.expanduser().resolve()
+    if not packet_path.is_file():
+        raise ValueError(f"handoff decision packet does not exist: {packet_path}")
+    with directory_lock(root):
+        state = load_json(path)
+        current = state.get("orchestrator_lease")
+        owner = current.get("owner_thread_id") if isinstance(current, dict) else None
+        if owner != args.from_thread:
+            raise ValueError("only the current orchestrator owner may prepare a handoff")
+        pending = state.get("pending_orchestrator_handoff")
+        if isinstance(pending, dict) and pending.get("status") == "PREPARED":
+            raise ValueError("an orchestrator handoff is already prepared")
+        token = secrets.token_urlsafe(24)
+        token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        timestamp = now()
+        handoff = {
+            "status": "PREPARED",
+            "from_thread_id": args.from_thread,
+            "reason": args.reason,
+            "packet_reference": str(packet_path),
+            "token_sha256": token_sha256,
+            "prepared_at": timestamp.isoformat(),
+            "expires_at": (timestamp + timedelta(minutes=args.handoff_minutes)).isoformat(),
+        }
+        state["pending_orchestrator_handoff"] = handoff
+        if isinstance(current, dict):
+            current["handoff_status"] = "PREPARED"
+            current["handoff_expires_at"] = handoff["expires_at"]
+        control_plane = state.get("control_plane")
+        if isinstance(control_plane, dict):
+            rotation = control_plane.setdefault("rotation", {})
+            rotation["status"] = "PREPARED"
+            rotation["handoff_packet_reference"] = handoff["packet_reference"]
+        state["manifest_updated_at"] = now_iso()
+        save_json(path, state)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "status": "handoff-prepared",
+                "manifest": str(path),
+                "from_thread_id": args.from_thread,
+                "handoff_token": token,
+                "expires_at": handoff["expires_at"],
+                "packet_reference": handoff["packet_reference"],
+                "required_action": "create one visible successor and pass the packet plus single-use token",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def accept_handoff(args: argparse.Namespace) -> int:
+    """Atomically transfer the lease to the prepared visible successor."""
+    path = args.state.expanduser().resolve()
+    root = path.parent.parent
+    with directory_lock(root):
+        state = load_json(path)
+        pending = state.get("pending_orchestrator_handoff")
+        if not isinstance(pending, dict) or pending.get("status") != "PREPARED":
+            raise ValueError("no prepared orchestrator handoff exists")
+        if datetime.fromisoformat(str(pending["expires_at"]).replace("Z", "+00:00")) <= now():
+            raise ValueError("prepared orchestrator handoff has expired")
+        supplied = hashlib.sha256(args.handoff_token.encode("utf-8")).hexdigest()
+        if not secrets.compare_digest(supplied, str(pending.get("token_sha256") or "")):
+            raise ValueError("invalid orchestrator handoff token")
+        if pending.get("from_thread_id") == args.to_thread:
+            raise ValueError("handoff successor must be a different thread")
+        history = state.setdefault("handoff_history", [])
+        if not isinstance(history, list):
+            raise ValueError("handoff_history must be a list")
+        accepted_at = now_iso()
+        history.append(
+            {
+                "from_thread_id": pending["from_thread_id"],
+                "to_thread_id": args.to_thread,
+                "at": accepted_at,
+                "reason": f"controlled-{pending['reason']}",
+                "packet_reference": pending["packet_reference"],
+            }
+        )
+        state["orchestrator_lease"] = lease(args.to_thread, args.lease_minutes)
+        state["pending_orchestrator_handoff"] = None
+        control_plane = state.get("control_plane")
+        if isinstance(control_plane, dict):
+            rotation = control_plane.setdefault("rotation", {})
+            rotation.update({"status": "CLEAR", "reasons": [], "accepted_at": accepted_at})
+        state["manifest_updated_at"] = accepted_at
+        save_json(path, state)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "status": "handoff-accepted",
+                "manifest": str(path),
+                "owner_thread_id": args.to_thread,
+                "packet_reference": pending["packet_reference"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def cancel_handoff(args: argparse.Namespace) -> int:
+    """Cancel a prepared handoff when visible successor creation failed."""
+    path = args.state.expanduser().resolve()
+    root = path.parent.parent
+    with directory_lock(root):
+        state = load_json(path)
+        pending = state.get("pending_orchestrator_handoff")
+        if not isinstance(pending, dict) or pending.get("status") != "PREPARED":
+            raise ValueError("no prepared orchestrator handoff exists")
+        if pending.get("from_thread_id") != args.from_thread:
+            raise ValueError("only the preparing orchestrator may cancel the handoff")
+        supplied = hashlib.sha256(args.handoff_token.encode("utf-8")).hexdigest()
+        if not secrets.compare_digest(supplied, str(pending.get("token_sha256") or "")):
+            raise ValueError("invalid orchestrator handoff token")
+        state["pending_orchestrator_handoff"] = None
+        current = state.get("orchestrator_lease")
+        if isinstance(current, dict):
+            current.pop("handoff_status", None)
+            current.pop("handoff_expires_at", None)
+        control_plane = state.get("control_plane")
+        if isinstance(control_plane, dict):
+            rotation = control_plane.setdefault("rotation", {})
+            rotation.update({"status": "REQUIRED", "cancelled_at": now_iso()})
+        state["manifest_updated_at"] = now_iso()
+        save_json(path, state)
+    sys.stdout.write(json.dumps({"status": "handoff-cancelled", "manifest": str(path)}, indent=2) + "\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command_name", required=True)
@@ -430,6 +585,27 @@ def build_parser() -> argparse.ArgumentParser:
     acquire.add_argument("--takeover", action="store_true")
     acquire.add_argument("--user-authorized-takeover", action="store_true")
     acquire.set_defaults(handler=claim)
+
+    prepare = subparsers.add_parser("prepare-handoff")
+    prepare.add_argument("--state", type=Path, required=True)
+    prepare.add_argument("--from-thread", required=True)
+    prepare.add_argument("--reason", choices=("budget", "compaction", "manual"), required=True)
+    prepare.add_argument("--packet", type=Path, required=True)
+    prepare.add_argument("--handoff-minutes", type=int, default=DEFAULT_HANDOFF_MINUTES)
+    prepare.set_defaults(handler=prepare_handoff)
+
+    accept = subparsers.add_parser("accept-handoff")
+    accept.add_argument("--state", type=Path, required=True)
+    accept.add_argument("--to-thread", required=True)
+    accept.add_argument("--handoff-token", required=True)
+    accept.add_argument("--lease-minutes", type=int, default=DEFAULT_LEASE_MINUTES)
+    accept.set_defaults(handler=accept_handoff)
+
+    cancel = subparsers.add_parser("cancel-handoff")
+    cancel.add_argument("--state", type=Path, required=True)
+    cancel.add_argument("--from-thread", required=True)
+    cancel.add_argument("--handoff-token", required=True)
+    cancel.set_defaults(handler=cancel_handoff)
     return parser
 
 
@@ -438,6 +614,8 @@ def main() -> int:
     args = parser.parse_args()
     if getattr(args, "lease_minutes", DEFAULT_LEASE_MINUTES) <= 0:
         parser.error("--lease-minutes must be positive")
+    if getattr(args, "handoff_minutes", DEFAULT_HANDOFF_MINUTES) <= 0:
+        parser.error("--handoff-minutes must be positive")
     try:
         return int(args.handler(args))
     except (OSError, ValueError, json.JSONDecodeError) as error:

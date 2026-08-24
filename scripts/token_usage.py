@@ -151,6 +151,30 @@ def read_session_diagnostics(path: Path) -> dict[str, int]:
     return diagnostics
 
 
+def read_started_subagents(path: Path) -> dict[str, str]:
+    """Return hidden agent sessions explicitly started by an orchestrator session."""
+
+    discovered: dict[str, str] = {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") != "sub_agent_activity" or payload.get("kind") != "started":
+                    continue
+                thread_id = payload.get("agent_thread_id")
+                if isinstance(thread_id, str) and THREAD_ID_PATTERN.fullmatch(thread_id):
+                    discovered[thread_id] = str(payload.get("agent_path") or "hidden-agent")
+    except OSError:
+        return discovered
+    return discovered
+
+
 def capture_thread(codex_home: Path, thread_id: str, label: str) -> dict[str, Any]:
     candidates = candidate_session_files(codex_home, thread_id)
     if not candidates:
@@ -259,7 +283,39 @@ def collect_manifest_session_records(manifest: dict[str, Any]) -> list[dict[str,
                 visit(child, f"{path}[{index}]")
 
     visit(manifest, "manifest")
+    for owner in collect_orchestrator_thread_ids(manifest):
+        if THREAD_ID_PATTERN.fullmatch(owner):
+            records.append(
+                {
+                    "thread_id": owner,
+                    "phase_key": None,
+                    "label": "orchestrator",
+                    "ticket_id": None,
+                    "attempt": None,
+                    "launch_state": None,
+                    "authoritative": True,
+                    "duplicate_of": None,
+                    "manifest_path": "manifest.orchestrator-ownership-history",
+                }
+            )
     return records
+
+
+def collect_orchestrator_thread_ids(manifest: dict[str, Any]) -> list[str]:
+    thread_ids: set[str] = set()
+    lease = manifest.get("orchestrator_lease")
+    if isinstance(lease, dict) and isinstance(lease.get("owner_thread_id"), str):
+        thread_ids.add(lease["owner_thread_id"])
+    history = manifest.get("handoff_history")
+    if isinstance(history, list):
+        for handoff in history:
+            if not isinstance(handoff, dict):
+                continue
+            for field in ("from_thread_id", "to_thread_id"):
+                value = handoff.get(field)
+                if isinstance(value, str):
+                    thread_ids.add(value)
+    return sorted(thread_ids)
 
 
 def ledger_session(
@@ -522,6 +578,28 @@ def ledger_command(args: argparse.Namespace) -> None:
     for record in records:
         by_thread.setdefault(str(record["thread_id"]), []).append(record)
 
+    orchestrator_thread_ids = collect_orchestrator_thread_ids(manifest)
+    for orchestrator_thread_id in orchestrator_thread_ids:
+        for candidate in candidate_session_files(resolve_codex_home(args.codex_home), orchestrator_thread_id):
+            if read_session_usage_bounds(candidate, orchestrator_thread_id) is None:
+                continue
+            for child_id, agent_path in read_started_subagents(candidate).items():
+                by_thread.setdefault(child_id, []).append(
+                    {
+                        "thread_id": child_id,
+                        "phase_key": None,
+                        "label": f"hidden:{agent_path}",
+                        "ticket_id": None,
+                        "attempt": None,
+                        "launch_state": None,
+                        "authoritative": None,
+                        "duplicate_of": None,
+                        "manifest_path": "orchestrator-session:sub_agent_activity",
+                        "discovered_hidden_session": True,
+                    }
+                )
+            break
+
     phase_to_threads: dict[str, set[str]] = {}
     for thread_id, metadata in by_thread.items():
         for item in metadata:
@@ -534,25 +612,15 @@ def ledger_command(args: argparse.Namespace) -> None:
         for phase_key, thread_ids in phase_to_threads.items()
         if len(thread_ids) > 1
     }
-    phase_family_to_threads: dict[str, set[str]] = {}
-    phase_family_attempts: dict[str, list[tuple[int, str]]] = {}
+    phase_attempt_families: dict[str, list[dict[str, Any]]] = {}
     for phase_key, thread_ids in phase_to_threads.items():
         match = PHASE_ATTEMPT_PATTERN.fullmatch(phase_key)
         family = match.group("family") if match else phase_key
         attempt = int(match.group("attempt")) if match else 1
-        phase_family_to_threads.setdefault(family, set()).update(thread_ids)
         for thread_id in thread_ids:
-            phase_family_attempts.setdefault(family, []).append((attempt, thread_id))
-    duplicate_phase_families = {
-        family: sorted(thread_ids)
-        for family, thread_ids in phase_family_to_threads.items()
-        if len(thread_ids) > 1
-    }
-    authoritative_by_family = {
-        family: max(attempts)[1]
-        for family, attempts in phase_family_attempts.items()
-        if family in duplicate_phase_families
-    }
+            phase_attempt_families.setdefault(family, []).append(
+                {"attempt": attempt, "phase_key": phase_key, "thread_id": thread_id}
+            )
 
     codex_home = resolve_codex_home(args.codex_home)
     sessions: dict[str, dict[str, Any]] = {}
@@ -568,57 +636,77 @@ def ledger_command(args: argparse.Namespace) -> None:
                 item.get("authoritative") is True for item in metadata
             )
             session["authoritative"] = explicitly_authoritative
-        duplicate_families_for_session: list[str] = []
-        authoritative_families_for_session: list[str] = []
-        for phase_key in session.get("phase_keys", []):
-            match = PHASE_ATTEMPT_PATTERN.fullmatch(phase_key)
-            family = match.group("family") if match else phase_key
-            if family in duplicate_phase_families:
-                duplicate_families_for_session.append(family)
-                if authoritative_by_family.get(family) == thread_id:
-                    authoritative_families_for_session.append(family)
-        if duplicate_families_for_session:
-            session["duplicate"] = True
-            session["duplicate_phase_families"] = sorted(set(duplicate_families_for_session))
-            session["authoritative_for_duplicate_families"] = sorted(
-                set(authoritative_families_for_session)
-            )
+        session["discovered_hidden_session"] = any(
+            item.get("discovered_hidden_session") is True for item in metadata
+        )
+        session["ticket_ids"] = sorted(
+            {str(item["ticket_id"]) for item in metadata if item.get("ticket_id")}
+        )
         sessions[thread_id] = session
         usage = normalize_usage(session.get("delta_usage"))
         if session.get("status") == "available" and usage is not None:
             available_usage.append(usage)
 
-    control = manifest.get("control") if isinstance(manifest.get("control"), dict) else {}
-    phases = control.get("phases") if isinstance(control, dict) else []
+    procedure = manifest.get("procedure") if isinstance(manifest.get("procedure"), dict) else {}
+    phases_object = procedure.get("phases") if isinstance(procedure, dict) else {}
+    phases = list(phases_object.values()) if isinstance(phases_object, dict) else []
     unmeasured_phases: list[dict[str, Any]] = []
-    if isinstance(phases, list):
-        for phase in phases:
-            if not isinstance(phase, dict):
-                continue
-            phase_key = phase.get("phase_key")
-            thread_id = phase.get("thread_id")
-            if not thread_id:
-                unmeasured_phases.append(
-                    {"phase_key": phase_key, "reason": "thread-id-missing"}
-                )
-                continue
-            session = sessions.get(str(thread_id))
-            if not session or session.get("status") != "available":
-                unmeasured_phases.append(
-                    {
-                        "phase_key": phase_key,
-                        "thread_id": thread_id,
-                        "reason": "session-usage-unavailable",
-                    }
-                )
-            elif phase.get("usage_captured") is not True:
-                unmeasured_phases.append(
-                    {
-                        "phase_key": phase_key,
-                        "thread_id": thread_id,
-                        "reason": "phase-window-not-captured",
-                    }
-                )
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        phase_key = phase.get("phase_key")
+        thread_id = phase.get("thread_id")
+        if not thread_id:
+            unmeasured_phases.append(
+                {"phase_key": phase_key, "reason": "thread-id-missing"}
+            )
+            continue
+        session = sessions.get(str(thread_id))
+        if not session or session.get("status") != "available":
+            unmeasured_phases.append(
+                {
+                    "phase_key": phase_key,
+                    "thread_id": thread_id,
+                    "reason": "session-usage-unavailable",
+                }
+            )
+        elif phase.get("usage_captured") is not True:
+            unmeasured_phases.append(
+                {
+                    "phase_key": phase_key,
+                    "thread_id": thread_id,
+                    "reason": "phase-window-not-captured",
+                }
+            )
+
+    mapped_phase_threads = {
+        str(phase.get("thread_id")) for phase in phases if isinstance(phase, dict) and phase.get("thread_id")
+    }
+    unmapped_hidden_sessions = sorted(
+        thread_id
+        for thread_id, session in sessions.items()
+        if session.get("discovered_hidden_session") is True and thread_id not in mapped_phase_threads
+    )
+    missing_orchestrator_sessions = sorted(
+        thread_id
+        for thread_id in orchestrator_thread_ids
+        if sessions.get(thread_id, {}).get("status") != "available"
+    )
+    orchestrator_session_included = bool(orchestrator_thread_ids) and not missing_orchestrator_sessions
+
+    phase_usage: dict[str, dict[str, int]] = {}
+    ticket_usage: dict[str, list[dict[str, int]]] = {}
+    orchestration_usage = empty_usage()
+    for session in sessions.values():
+        usage = normalize_usage(session.get("delta_usage"))
+        if session.get("status") != "available" or usage is None:
+            continue
+        if session.get("thread_id") in orchestrator_thread_ids:
+            orchestration_usage = sum_usage([orchestration_usage, usage])
+        for phase_key in session.get("phase_keys", []):
+            phase_usage[phase_key] = usage
+        for ticket_id in session.get("ticket_ids", []):
+            ticket_usage.setdefault(ticket_id, []).append(usage)
 
     unavailable_sessions = sum(
         1 for session in sessions.values() if session.get("status") != "available"
@@ -631,14 +719,37 @@ def ledger_command(args: argparse.Namespace) -> None:
             "manifest": str(args.manifest.expanduser().resolve()),
             "sessions": sessions,
             "duplicate_phase_keys": duplicate_phase_keys,
-            "duplicate_phase_families": duplicate_phase_families,
+            "phase_attempt_families": phase_attempt_families,
             "unmeasured_phases": unmeasured_phases,
+            "unmapped_hidden_sessions": unmapped_hidden_sessions,
+            "orchestrator_session_included": orchestrator_session_included,
+            "orchestrator_session_ids": orchestrator_thread_ids,
+            "missing_orchestrator_sessions": missing_orchestrator_sessions,
+            "orchestrator_segments_known": len(orchestrator_thread_ids),
+            "orchestrator_segments_measured": (
+                len(orchestrator_thread_ids) - len(missing_orchestrator_sessions)
+            ),
+            "orchestrator_segments_complete": orchestrator_session_included,
+            "phase_usage": phase_usage,
+            "ticket_usage": {
+                ticket_id: sum_usage(items) for ticket_id, items in sorted(ticket_usage.items())
+            },
+            "orchestration_usage": orchestration_usage,
             "aggregate": {
-                "status": aggregate_status(len(available_usage), unavailable_sessions + len(unmeasured_phases)),
+                "status": aggregate_status(
+                    len(available_usage),
+                    unavailable_sessions
+                    + len(unmeasured_phases)
+                    + len(unmapped_hidden_sessions)
+                    + (0 if orchestrator_session_included else 1),
+                ),
                 "usage": sum_usage(available_usage),
                 "available_sessions": len(available_usage),
                 "unavailable_sessions": unavailable_sessions,
                 "unmeasured_phases": len(unmeasured_phases),
+                "unmapped_hidden_sessions": len(unmapped_hidden_sessions),
+                "authoritative_phase_count": len(phases),
+                "measured_phase_count": len(phases) - len(unmeasured_phases),
                 "duplicate_sessions": sum(
                     1 for session in sessions.values() if session.get("duplicate")
                 ),

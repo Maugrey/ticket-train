@@ -259,12 +259,15 @@ A train-base refresh alone does not force a complete ticket review. Inspect
 the changed contracts and collision domains, rerun affected tests, and perform
 a targeted integration-impact review unless the semantic scope above changed.
 
-Allow at most two remediation/follow-up cycles. If blocking findings remain,
-stop the loop and run a root-cause checkpoint. Determine whether the problem
-is an invalid analysis contract, an unstable requirement, an epic, a broken
-test oracle, or a worker/reviewer disagreement. Publish the complete remaining
-ledger and obtain any material user decision. Do not start a third automatic
-cycle.
+Allow at most two automatic remediation/follow-up cycles. If blocking findings
+remain, stop the loop and run a root-cause checkpoint. Determine whether the
+problem is an invalid analysis contract, an unstable requirement, an epic, a
+broken test oracle, or a worker/reviewer disagreement. Publish the complete
+remaining ledger and obtain any material user decision. Start a third cycle
+only when the user explicitly authorizes exactly one additional cycle and the
+controller records a run-scoped, ticket-scoped, single-use exception linked to
+that decision and checkpoint. Never change the default budget or edit the
+manifest directly.
 
 Apply the same pass budget to final-train review. The first final review
 concentrates on cross-ticket interactions, integration glue, cumulative
@@ -287,6 +290,11 @@ Pass only:
 - the remediation diff scope and required tests;
 - links to complete logs and durable evidence.
 
+Generate this handoff with `scripts/context_packet.py`. The packet is
+hash-addressed, includes exact base/head and profile revision, contains zero
+conversation-history turns, and cannot exceed 64 KiB. A fresh task without a
+valid packet is not eligible for dispatch.
+
 The original worker remains the owner in the logical manifest, but the fresh
 thread is the execution context. When original implementation context is
 material, include a compact worker-produced handoff rather than the entire
@@ -296,6 +304,11 @@ history.
 
 Supervision is event-driven. Use thread wait cursors, GitHub status queries,
 test result artifacts, and the durable manifest as the source of truth.
+
+Use [control-plane-runner.md](control-plane-runner.md) as the only routine
+read boundary for the orchestrator. Its 16 KiB decision packets replace full
+manifest replay, and its semantic hash suppresses unchanged waits without a
+model wake.
 
 Use [controller-protocol.md](controller-protocol.md) for lifecycle transitions.
 The controller's unchanged `WAIT_FOR_PHASE_TRANSITION` result must be handled
@@ -327,12 +340,22 @@ pull-request head, checks, and comment inventory when GitHub is in scope.
 Parse test commands into durable result artifacts with command, exit status,
 head commit, duration, and concise failure summary. Update the manifest from
 those artifacts; do not ask a model to rediscover status from raw logs.
+Use `scripts/verification_runner.py` for exact-head command execution. Its
+structured result records zero model tokens; invoke a model only to adjudicate
+a failed result that is not mechanically classifiable.
 
-Use an internal deterministic check interval of at most five minutes and a
-user-visible liveness interval of at most 15 minutes while work remains
-active. The liveness message is one line from the manifest and does not reread
-child context. Report transitions immediately. A pending human action is
-always visible and reminded; never suppress it as an unchanged heartbeat.
+Use an internal deterministic check interval appropriate to the host. Do not
+generate periodic liveness through a model. When the host requires unchanged
+liveness, emit one deterministic product notification from the manifest.
+Report transitions immediately. A pending human action is always visible and
+may be reminded deterministically; never hide it as unchanged noise.
+
+Treat every orchestrator conversation as one replaceable activity segment.
+Warn at 10 million segment tokens and rotate before another ordinary model
+action at 25 million tokens, 50 model wakes, 500 tool calls, or one context
+compaction. A controlled rotation preserves the run ID and creates one fresh
+visible adapter; it does not repeat a technical phase and is not a duplicate
+session.
 
 ## Logs and context packets
 
@@ -371,15 +394,29 @@ these occurs:
 - a third remediation cycle would be required;
 - a thread compacted more than once or its context can no longer be handed off
   compactly;
+- one model phase exceeds 50 million total tokens;
+- a focused follow-up review exceeds twice the total tokens of its complete
+  review baseline;
 - usage measurement for a completed phase is missing;
 - unchanged polling or repeated full-thread reads were detected;
 - actual routing is more expensive than the matrix-selected setting;
 - cumulative train size crossed a configured checkpoint.
+- a hidden session discovered in orchestrator activity is not mapped to an
+  authorized phase;
 - another manifest or run ID exists for the same canonical run fingerprint;
 - a completed analysis would be repeated because orchestration moved to a new
   conversation.
+- an orchestrator segment crossed a hard activity budget but continued without
+  an accepted controlled handoff;
+- a decision packet exceeded 16 KiB or unchanged state was replayed into a
+  model conversation;
 
 At the checkpoint, preserve completed work, report consumed and missing usage
 by phase, identify the cause, and propose the least expensive quality-neutral
 continuation. Any option that lowers review depth, model routing, tests, or
 protected-boundary coverage requires explicit user approval.
+
+The procedural controller blocks every successor event while one of these
+anomalies remains open. Resolve it as `restart-fresh-compact`,
+`continue-quality-neutral`, or `user-approved-quality-tradeoff`; the last form
+requires a durable reference to the user's explicit decision.

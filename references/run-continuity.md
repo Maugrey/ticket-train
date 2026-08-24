@@ -74,6 +74,15 @@ be replaced only with explicit user authorization. Record every handoff and
 mark the former owner superseded. Once superseded, the former orchestrator
 must not dispatch new phases if it wakes later.
 
+The exception is a budgeted controlled handoff authorized by the explicitly
+invoked train workflow. It is not a takeover. The current owner prepares one
+single-use token tied to a bounded decision packet, creates exactly one fresh
+visible successor, and that successor atomically accepts the lease. The old
+conversation becomes read-only immediately after acceptance. Follow
+[control-plane-runner.md](control-plane-runner.md). A prepared transfer blocks
+ordinary lifecycle actions and yielding until accepted or explicitly
+cancelled after a conclusive launch failure.
+
 Use:
 
 ```powershell
@@ -81,6 +90,8 @@ python scripts/run_registry.py init --repository <repo> --train-branch <branch> 
 python scripts/run_registry.py init --repository <repo> --train-branch <branch> --source <source> --tickets <id,id> --orchestrator-thread <thread-id> --execution-mode <mode> --adopt-legacy
 python scripts/run_registry.py claim --state <manifest> --orchestrator-thread <thread-id>
 python scripts/run_registry.py claim --state <manifest> --orchestrator-thread <thread-id> --takeover --user-authorized-takeover
+python scripts/run_registry.py prepare-handoff --state <manifest> --from-thread <thread-id> --reason budget --packet <decision-packet.json>
+python scripts/run_registry.py accept-handoff --state <manifest> --to-thread <new-thread-id> --handoff-token <single-use-token>
 ```
 
 ## Durable evidence, not conversational memory
@@ -92,6 +103,9 @@ reconstructing technical work from chat history. Persist:
 - orchestrator lease and handoff history;
 - every phase key, actual visible thread ID, visibility verification,
   completion envelope, and usage boundary;
+- every phase-specific hidden-fallback authorization, actual hidden agent
+  session ID, and explicit `visibility_verified = false` state;
+- every compact context-packet descriptor and exact base/head;
 - per-ticket analysis artifact and revision;
 - dependency contract, consolidated digest, classification, and gate result;
 - product decisions and proportionality-profile revision;
@@ -100,11 +114,25 @@ reconstructing technical work from chat history. Persist:
 - active supervisor mode and watcher identity;
 - the single pending human action, if any;
 - duplicate sessions, failed attempts, and unmeasured usage.
+- orchestrator usage plus every hidden session discovered from its activity
+  log, including sessions not yet mapped to a procedural phase.
+- control-plane decision packets, suppressed unchanged observations,
+  orchestrator activity segments, and controlled handoffs.
 
 A launch/client ID is not a visible thread ID. A phase may become `RUNNING`
 only after the real thread ID has been resolved and a read/list operation has
 verified that the user-visible task exists. Persist
 `visibility_verified = true` and its timestamp.
+
+When only a client ID exists under `FOREGROUND_WAIT`, keep the orchestrator
+turn alive until the task materializes or launch reconciliation reaches a real
+blocker. Never end the turn on a queued client ID: there is no durable wake-up
+mechanism behind that state.
+
+A hidden fallback may become `RUNNING` only after the user authorizes that
+exact phase and the controller consumes `HIDDEN_FALLBACK_AUTHORIZED`. Persist
+the actual agent session ID, do not set `visibility_verified = true`, and do
+not reuse the authorization.
 
 Do not infer `BLOCKED`, `FAILED`, or `RUNNING` from absence of new text. Use
 the authoritative thread state, completion envelope, Git/GitHub evidence, and
@@ -164,8 +192,9 @@ The deterministic watcher:
 - writes `last_check_at` and `next_check_at` after every check;
 - never launches a replacement merely because a task is silent.
 
-At every wake, it first executes `train_controller.py heartbeat` and obeys the
-returned decision. It may pause or delete itself only when
+At every changed wake, it first executes `train_controller.py heartbeat`, then
+`control_plane_runner.py step`, and obeys the bounded decision packet. An
+unchanged observation is suppressed without a model wake. It may pause or delete itself only when
 `may_pause_or_delete_watcher` is true. It cannot convert "no currently running
 child" into completion while verification, integration, final pull-request,
 final review, GitHub feedback collection, reporting, or another automatic
@@ -175,13 +204,15 @@ Defaults:
 
 ```text
 maximum internal supervision interval = 5 minutes
-maximum user-visible silence while work is active = 15 minutes
-human-action reminder interval = 15 minutes
+model-authored unchanged liveness = prohibited
+unchanged liveness = deterministic product notification when required
+human-action reminders = deterministic from persisted gate
 ```
 
-The 15-minute liveness update is derived from the manifest and costs no child
-thread reread. It states active tasks, last confirmed transition, next check,
-and whether user action is required. Transition reports remain immediate.
+Any required unchanged liveness update is derived from the manifest and costs
+no child-thread reread or model wake. It states active tasks, last confirmed
+transition, next check, and whether user action is required. Transition reports
+remain immediate.
 
 If background automation cannot be created or verified, stay in foreground
 wait mode. If neither mode is reliable, stop before dispatch and report a
@@ -191,7 +222,14 @@ mechanism.
 `SUPERVISED_ACTIVE` is the only allowed yield while work is still queued or
 running. It requires an active supervisor, verified schedule, no hidden human
 gate, and a reconciled manifest. Run `control_guard.py check-yield` before
-using it.
+using it. Also require `control_plane_runner.py step` to return
+`unchanged-suppressed` or `NO_MODEL_WAKE`; otherwise execute or hand off its
+action first.
+
+The procedural `train_controller.py check --mode yield` is authoritative for
+new runs and rejects active work under `FOREGROUND_WAIT`. Only a verified
+`BACKGROUND_WATCHER` with a persisted watcher ID can make
+`SUPERVISED_ACTIVE` survive the end of the current turn.
 
 ## Human actions are first-class state
 
@@ -248,10 +286,11 @@ announced_at
 last_reminder_at
 ```
 
-While it remains pending, every liveness report begins with `ACTION REQUIRED`
-and repeats the exact decision in compact form. Never suppress every reminder
-for a pending gate. When the user responds, resolve the exact gate revision,
-record the decision, clear pending state, and continue automatically.
+While it remains pending, every deterministic reminder begins with `ACTION
+REQUIRED` and repeats the exact decision in compact form. Never wake the full
+orchestrator merely to reproduce unchanged gate text. When the user responds,
+resolve the exact gate revision, record the decision, clear pending state, and
+continue automatically.
 
 For an information request, also repeat the exact question and accepted answer
 formats. Record the answer through `INPUT_PROVIDED`. If the request came from
