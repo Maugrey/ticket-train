@@ -160,11 +160,14 @@ modify production behavior. If a production seam is required for testability,
 return a contract amendment request; do not implement the seam on the test
 branch.
 
-Route the acceptance-test worker through the implementation matrix using
-effective intrinsic criticality and verification complexity. Use at least
-`Terra/H`. Verification complexity may exceed implementation complexity when
-environment parity, roles, migrations, concurrency, or a weak oracle make
-testing harder than coding. Record requested and actual routing normally.
+Route the acceptance-test worker through the dedicated acceptance matrix in
+[model-routing.md](model-routing.md), using effective intrinsic criticality
+and verification complexity. Verification complexity may exceed residual
+implementation complexity when environment parity, roles, migrations,
+concurrency, or a weak oracle make testing harder than coding. `Luna/M` is
+allowed only for one deterministic `LOW/LOW` behavior with the complete
+mechanical proof; several scenarios or any indirect oracle require Terra or
+Sol. Record requested and actual routing normally.
 
 ## Red and green evidence
 

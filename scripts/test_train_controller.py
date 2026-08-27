@@ -84,7 +84,7 @@ class Harness:
                 return 2
 
     def confirm(self) -> None:
-        self.assert_code(self.apply("ORCHESTRATOR_CONFIRMED"), 0)
+        self.assert_code(self.apply("ORCHESTRATOR_CONFIRMED", **self.orchestrator_confirmation_fields()), 0)
         self.assert_code(
             self.apply(
                 "SUPERVISION_CONFIGURED",
@@ -94,6 +94,17 @@ class Harness:
             ),
             0,
         )
+
+    @staticmethod
+    def orchestrator_confirmation_fields() -> dict[str, object]:
+        return {
+            "orchestration_profile": "normal",
+            "recommended_model": "gpt-5.6-terra",
+            "recommended_reasoning_effort": "medium",
+            "current_model": "gpt-5.6-terra",
+            "current_reasoning_effort": "medium",
+            "confirmation_reference": "thread-main:confirmation-1",
+        }
 
     @staticmethod
     def context_packet(base: str = "base-sha", head: str = "ticket-sha") -> dict[str, object]:
@@ -136,13 +147,15 @@ class Harness:
                 phase_key="run:run:triage:1",
                 base_commit="base-sha",
                 model="gpt-5.6-terra",
-                reasoning_effort="high",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                triage_profile="standard",
                 context_packet=self.context_packet("base-sha", "base-sha"),
             ),
             0,
         )
         self.materialize("run:run:triage:1", "thread-triage")
-        self.complete_phase("run:run:triage:1", "gpt-5.6-terra", "high")
+        self.complete_phase("run:run:triage:1", "gpt-5.6-terra", "medium")
         self.assert_code(
             self.apply(
                 "TICKET_TRIAGED",
@@ -150,8 +163,9 @@ class Harness:
                 phase_key="run:run:triage:1",
                 criticality=criticality,
                 complexity=complexity,
+                confidence="high",
                 triage_model="gpt-5.6-terra",
-                triage_reasoning_effort="high",
+                triage_reasoning_effort="medium",
                 analysis_model=analysis_model,
                 analysis_reasoning_effort=analysis_effort,
                 analysis_routing_conformance="conformant",
@@ -194,6 +208,10 @@ class Harness:
                 structural_digest="all six domains assessed",
                 implementation_contract_revision="implementation-1",
                 verification_contract_revision="verification-1",
+                residual_implementation_complexity=complexity,
+                verification_complexity=complexity,
+                complexity_reduction_evidence="no reduction claimed",
+                unresolved_implementation_difficulty=[],
                 report_thread_id="thread-analysis",
                 model=analysis_model,
                 reasoning_effort=analysis_effort,
@@ -244,7 +262,7 @@ class Harness:
                 implementation_reasoning_effort="medium",
                 implementation_routing_conformance="conformant",
                 acceptance_model="gpt-5.6-terra",
-                acceptance_reasoning_effort="high",
+                acceptance_reasoning_effort="medium",
                 acceptance_routing_conformance="conformant",
                 implementation_unity_requirement=implementation_unity_requirement,
                 acceptance_unity_requirement=acceptance_unity_requirement,
@@ -299,7 +317,7 @@ class Harness:
         self.materialize("run:T-1:implementation:1", "thread-impl")
         self.materialize("run:T-1:acceptance:1", "thread-tests")
         self.complete_phase("run:T-1:implementation:1", "gpt-5.6-terra", "medium")
-        self.complete_phase("run:T-1:acceptance:1", "gpt-5.6-terra", "high")
+        self.complete_phase("run:T-1:acceptance:1", "gpt-5.6-terra", "medium")
         self.assert_code(
             self.apply(
                 "EXECUTION_PAIR_INTEGRATED",
@@ -354,8 +372,11 @@ class Harness:
                 base_commit="base-sha",
                 head_commit="ticket-sha",
                 model="gpt-5.6-terra",
-                reasoning_effort="high",
+                reasoning_effort="medium",
                 routing_conformance="conformant",
+                criticality="LOW",
+                complexity="LOW",
+                classification_evidence="bounded diff with direct oracle",
                 scope_revision="scope-1",
                 reasoning_authorized=True,
                 context_packet=self.context_packet("base-sha", "ticket-sha"),
@@ -375,7 +396,7 @@ class Harness:
                     "phase_key": "run:T-1:review:1",
                     "phase_status": "completed",
                     "actual_model": "gpt-5.6-terra",
-                    "actual_reasoning_effort": "high",
+                    "actual_reasoning_effort": "medium",
                     "result_summary": "clean",
                     "artifacts": {"reviewed_head": "ticket-sha"},
                     "tests_and_checks": ["evidence checked"],
@@ -425,6 +446,247 @@ class Harness:
 
 
 class TrainControllerTests(unittest.TestCase):
+    def test_active_routing_policy_snapshot(self) -> None:
+        self.assertEqual(train_controller.ROUTING_POLICY_VERSION, "2026-08-27-v2")
+        self.assertEqual(train_controller.ANALYSIS_MATRIX, {
+            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+            "NORMAL": ("Terra/H", "Sol/M", "Sol/H", "Sol/XH"),
+            "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
+            "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
+        })
+        self.assertEqual(train_controller.IMPLEMENTATION_MATRIX, {
+            "LOW": ("Terra/M", "Terra/M", "Sol/H", "Sol/XH"),
+            "NORMAL": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+            "HIGH": ("Sol/M", "Sol/H", "Sol/XH", "Sol/XH"),
+            "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+        })
+        self.assertEqual(train_controller.ACCEPTANCE_MATRIX, {
+            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+            "NORMAL": ("Terra/H", "Terra/H", "Sol/H", "Sol/XH"),
+            "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
+            "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+        })
+        self.assertEqual(train_controller.INITIAL_REVIEW_MATRIX, {
+            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+            "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
+            "HIGH": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/XH"),
+            "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
+        })
+        self.assertEqual(train_controller.FOLLOWUP_REVIEW_MATRIX, {
+            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+            "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
+            "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
+            "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+        })
+        self.assertIs(train_controller.REMEDIATION_MATRIX, train_controller.IMPLEMENTATION_MATRIX)
+        self.assertIs(train_controller.FINAL_REVIEW_MATRIX, train_controller.INITIAL_REVIEW_MATRIX)
+
+    def test_route_vocabulary_has_luna_and_sol_medium_but_not_ultra(self) -> None:
+        self.assertEqual(train_controller.SETTING_NAMES["Luna/M"], ("gpt-5.6-luna", "medium"))
+        self.assertEqual(train_controller.SETTING_NAMES["Sol/M"], ("gpt-5.6-sol", "medium"))
+        self.assertNotIn("Sol/Ultra", train_controller.SETTING_NAMES)
+
+    def test_human_validation_matrices_remain_independent_from_model_routing(self) -> None:
+        analysis_yes = {
+            (criticality, complexity)
+            for criticality in train_controller.CRITICALITIES
+            for complexity in train_controller.COMPLEXITIES
+            if train_controller.analysis_human_gate(criticality, complexity, "standard")
+        }
+        merge_yes = {
+            (criticality, complexity)
+            for criticality in train_controller.CRITICALITIES
+            for complexity in train_controller.COMPLEXITIES
+            if train_controller.merge_human_gate(criticality, complexity, "standard")
+        }
+        self.assertEqual(analysis_yes, {
+            ("HIGH", "MAXIMUM"),
+            ("CRITICAL", "LOW"), ("CRITICAL", "MEDIUM"),
+            ("CRITICAL", "HIGH"), ("CRITICAL", "MAXIMUM"),
+        })
+        self.assertEqual(merge_yes, {
+            ("LOW", "MAXIMUM"),
+            ("NORMAL", "HIGH"), ("NORMAL", "MAXIMUM"),
+            ("HIGH", "LOW"), ("HIGH", "MEDIUM"),
+            ("HIGH", "HIGH"), ("HIGH", "MAXIMUM"),
+            ("CRITICAL", "LOW"), ("CRITICAL", "MEDIUM"),
+            ("CRITICAL", "HIGH"), ("CRITICAL", "MAXIMUM"),
+        })
+
+    def test_phase_local_route_comparison_rejects_sol_medium_for_review(self) -> None:
+        self.assertTrue(train_controller.route_is_covered(
+            train_controller.ANALYSIS_ROUTE_COVERAGE,
+            ("gpt-5.6-sol", "high"),
+            ("gpt-5.6-sol", "medium"),
+        ))
+        with self.assertRaises(train_controller.ControllerError):
+            train_controller.strongest_review_setting([
+                ("gpt-5.6-sol", "medium"),
+                ("gpt-5.6-terra", "high"),
+            ])
+
+    def test_triage_routes_are_profile_bound(self) -> None:
+        self.assertEqual(
+            train_controller.triage_setting({"triage_profile": "standard"}),
+            ("gpt-5.6-terra", "medium", "conformant"),
+        )
+        self.assertEqual(
+            train_controller.triage_setting({
+                "triage_profile": "sensitive",
+                "triage_escalation_reasons": ["low confidence crosses a routing boundary"],
+            }),
+            ("gpt-5.6-terra", "high", "conformant"),
+        )
+        proof = {field: True for field in train_controller.MECHANICAL_FAST_PATH_FIELDS}
+        self.assertEqual(
+            train_controller.triage_setting({
+                "triage_profile": "mechanical",
+                "mechanical_fast_path": proof,
+            }),
+            ("gpt-5.6-luna", "medium", "conformant"),
+        )
+
+    def test_max_authorization_is_scoped_not_a_dispatch_boolean(self) -> None:
+        expected = ("gpt-5.6-sol", "max", "conformant")
+        proc = {"reasoning_authorizations": {}}
+        with self.assertRaises(train_controller.ControllerError):
+            train_controller.validate_reasoning_authorization(
+                proc,
+                {"reasoning_authorized": True},
+                expected,
+                stage="analysis",
+                ticket_id="T-1",
+                head="base-sha",
+            )
+        proc["reasoning_authorizations"]["auth-1"] = {
+            "status": "ACTIVE",
+            "stage": "analysis",
+            "ticket_id": "T-1",
+            "head": "base-sha",
+        }
+        train_controller.validate_reasoning_authorization(
+            proc,
+            {"reasoning_authorization_id": "auth-1"},
+            expected,
+            stage="analysis",
+            ticket_id="T-1",
+            head="base-sha",
+        )
+        with self.assertRaises(train_controller.ControllerError):
+            train_controller.validate_reasoning_authorization(
+                proc,
+                {"reasoning_authorization_id": "auth-1"},
+                expected,
+                stage="implementation",
+                ticket_id="T-1",
+                head="base-sha",
+            )
+
+    def test_under_routed_analysis_gets_one_targeted_validation_action(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="triage",
+                phase_key="run:run:triage:1",
+                base_commit="base-sha",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                triage_profile="standard",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            run.materialize("run:run:triage:1", "thread-triage")
+            run.complete_phase("run:run:triage:1", "gpt-5.6-terra", "medium")
+            self.assertEqual(run.apply(
+                "TICKET_TRIAGED",
+                ticket_id="T-1",
+                phase_key="run:run:triage:1",
+                criticality="LOW",
+                complexity="LOW",
+                confidence="medium",
+                triage_model="gpt-5.6-terra",
+                triage_reasoning_effort="medium",
+                analysis_model="gpt-5.6-terra",
+                analysis_reasoning_effort="medium",
+                analysis_routing_conformance="conformant",
+                analysis_unity_requirement="none",
+            ), 0)
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="analysis",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis:1",
+                base_commit="base-sha",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                unity_requirement="none",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            run.materialize("run:T-1:analysis:1", "thread-analysis")
+            run.complete_phase("run:T-1:analysis:1", "gpt-5.6-terra", "medium")
+            self.assertEqual(run.apply(
+                "ANALYSIS_RECORDED",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis:1",
+                analysis_revision="analysis-1",
+                analysis_base_commit="base-sha",
+                source_revision="source-1",
+                profile_revision="profile-1",
+                criticality="NORMAL",
+                complexity="MEDIUM",
+                criticality_evidence="bounded feature impact",
+                complexity_evidence="several known dependencies",
+                structural_digest="all structural domains assessed",
+                implementation_contract_revision="implementation-1",
+                verification_contract_revision="verification-1",
+                residual_implementation_complexity="MEDIUM",
+                verification_complexity="MEDIUM",
+                complexity_reduction_evidence="bounded design resolved",
+                unresolved_implementation_difficulty=[],
+                report_thread_id="thread-analysis",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+            ), 0)
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "ANALYSIS_ROUTE_VALIDATION_REQUIRED")
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT")
+            self.assertEqual(
+                (action["required_model"], action["required_reasoning_effort"]),
+                ("gpt-5.6-sol", "medium"),
+            )
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="analysis_route_validation",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis-route-validation:1",
+                base_commit="base-sha",
+                model="gpt-5.6-sol",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                unity_requirement="none",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "DISPATCH_VISIBLE_PHASE",
+            )
+            run.materialize("run:T-1:analysis-route-validation:1", "thread-route-validation")
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "WAIT_FOR_PHASE_TRANSITION",
+            )
+            run.complete_phase(
+                "run:T-1:analysis-route-validation:1", "gpt-5.6-sol", "medium"
+            )
+            result_action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(result_action["action"], "RECORD_ANALYSIS_ROUTE_VALIDATION_RESULT")
+            self.assertEqual(result_action["analysis_revision"], "analysis-1")
+
     def harness(self, directory: str) -> Harness:
         return Harness(Path(directory))
 
@@ -470,8 +732,15 @@ class TrainControllerTests(unittest.TestCase):
                 train_criticality="LOW",
                 train_complexity="LOW",
                 model="gpt-5.6-terra",
-                reasoning_effort="high",
+                reasoning_effort="medium",
                 routing_conformance="conformant",
+                ticket_floor_evidence=[{
+                    "ticket_id": "T-1",
+                    "applies": False,
+                    "reviewed_head": "ticket-sha",
+                    "reason": "Exact ticket review remains valid and is outside the integration delta.",
+                    "review_reused": True,
+                }],
                 reasoning_authorized=True,
                 context_packet=run.context_packet("base-sha", "train-sha"),
             ),
@@ -488,12 +757,12 @@ class TrainControllerTests(unittest.TestCase):
                 reviewed_head="train-sha",
                 routing_conformance="conformant",
                 model="gpt-5.6-terra",
-                reasoning_effort="high",
+                reasoning_effort="medium",
                 envelope={
                     "phase_key": "run:run:final-review:1",
                     "phase_status": "completed",
                     "actual_model": "gpt-5.6-terra",
-                    "actual_reasoning_effort": "high",
+                    "actual_reasoning_effort": "medium",
                     "result_summary": "clean final review",
                     "artifacts": {"reviewed_head": "train-sha"},
                     "tests_and_checks": ["exact-head evidence checked"],
@@ -666,7 +935,9 @@ class TrainControllerTests(unittest.TestCase):
                     phase_key="run:run:triage:1",
                     base_commit="base-sha",
                     model="gpt-5.6-terra",
-                    reasoning_effort="high",
+                    reasoning_effort="medium",
+                    routing_conformance="conformant",
+                    triage_profile="standard",
                     context_packet=run.context_packet("base-sha", "base-sha"),
                 ),
                 0,
@@ -683,7 +954,7 @@ class TrainControllerTests(unittest.TestCase):
     def test_verified_event_callback_can_supervise_visible_child_without_polling(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
-            self.assertEqual(run.apply("ORCHESTRATOR_CONFIRMED"), 0)
+            self.assertEqual(run.apply("ORCHESTRATOR_CONFIRMED", **run.orchestrator_confirmation_fields()), 0)
             self.assertEqual(
                 run.apply(
                     "SUPERVISION_CONFIGURED",
@@ -700,7 +971,9 @@ class TrainControllerTests(unittest.TestCase):
                     phase_key="run:run:triage:1",
                     base_commit="base-sha",
                     model="gpt-5.6-terra",
-                    reasoning_effort="high",
+                    reasoning_effort="medium",
+                    routing_conformance="conformant",
+                    triage_profile="standard",
                     context_packet=run.context_packet("base-sha", "base-sha"),
                 ),
                 0,
@@ -760,7 +1033,7 @@ class TrainControllerTests(unittest.TestCase):
     def test_model_waking_recurring_watcher_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
-            self.assertEqual(run.apply("ORCHESTRATOR_CONFIRMED"), 0)
+            self.assertEqual(run.apply("ORCHESTRATOR_CONFIRMED", **run.orchestrator_confirmation_fields()), 0)
             self.assertEqual(
                 run.apply(
                     "SUPERVISION_CONFIGURED",
@@ -1002,7 +1275,9 @@ class TrainControllerTests(unittest.TestCase):
             phase_key=phase_key,
             base_commit="ticket-sha",
             branch="codex/t-1-remediation",
+            criticality="LOW",
             complexity="LOW",
+            change_kind="bounded-behavioral",
             model="gpt-5.6-terra",
             reasoning_effort="medium",
             routing_conformance="conformant",
@@ -1052,19 +1327,22 @@ class TrainControllerTests(unittest.TestCase):
                 phase_key="run:run:triage:1",
                 base_commit="base-sha",
                 model="gpt-5.6-terra",
-                reasoning_effort="high",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                triage_profile="standard",
                 context_packet=run.context_packet("base-sha", "base-sha"),
             ), 0)
             run.materialize("run:run:triage:1", "thread-triage")
-            run.complete_phase("run:run:triage:1", "gpt-5.6-terra", "high")
+            run.complete_phase("run:run:triage:1", "gpt-5.6-terra", "medium")
             self.assertEqual(run.apply(
                 "TICKET_TRIAGED",
                 ticket_id="T-1",
                 phase_key="run:run:triage:1",
                 criticality="LOW",
                 complexity="LOW",
+                confidence="high",
                 triage_model="gpt-5.6-terra",
-                triage_reasoning_effort="high",
+                triage_reasoning_effort="medium",
                 analysis_model=model,
                 analysis_reasoning_effort=effort,
                 analysis_routing_conformance="conformant",
@@ -1106,7 +1384,9 @@ class TrainControllerTests(unittest.TestCase):
                     phase_key="run:run:triage:1",
                     base_commit="base-sha",
                     model="gpt-5.6-terra",
-                    reasoning_effort="high",
+                    reasoning_effort="medium",
+                    routing_conformance="conformant",
+                    triage_profile="standard",
                     context_packet=run.context_packet("base-sha", "base-sha"),
                 ),
                 0,
@@ -1148,7 +1428,9 @@ class TrainControllerTests(unittest.TestCase):
                     phase_key="run:run:triage:1",
                     base_commit="base-sha",
                     model="gpt-5.6-terra",
-                    reasoning_effort="high",
+                    reasoning_effort="medium",
+                    routing_conformance="conformant",
+                    triage_profile="standard",
                     context_packet=run.context_packet("base-sha", "base-sha"),
                 ),
                 0,
@@ -1162,7 +1444,7 @@ class TrainControllerTests(unittest.TestCase):
                         "phase_key": "run:run:triage:1",
                         "phase_status": "completed",
                         "actual_model": "gpt-5.6-terra",
-                        "actual_reasoning_effort": "high",
+                        "actual_reasoning_effort": "medium",
                         "result_summary": "done",
                         "artifacts": {"triage": "triage.json"},
                         "tests_and_checks": ["routing complete"],
@@ -1831,7 +2113,11 @@ class TrainControllerTests(unittest.TestCase):
     def test_same_event_id_is_idempotent_even_with_old_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
-            event = {"event_id": "stable-event", "type": "ORCHESTRATOR_CONFIRMED"}
+            event = {
+                "event_id": "stable-event",
+                "type": "ORCHESTRATOR_CONFIRMED",
+                **run.orchestrator_confirmation_fields(),
+            }
             args = argparse.Namespace(
                 state=run.path, expected_revision=0, event_json=json.dumps(event), event=None
             )
@@ -1998,8 +2284,15 @@ class TrainControllerTests(unittest.TestCase):
                     train_criticality="LOW",
                     train_complexity="LOW",
                     model="gpt-5.6-terra",
-                    reasoning_effort="high",
+                    reasoning_effort="medium",
                     routing_conformance="conformant",
+                    ticket_floor_evidence=[{
+                        "ticket_id": "T-1",
+                        "applies": False,
+                        "reviewed_head": "ticket-sha",
+                        "reason": "Exact ticket review remains valid and is outside the integration delta.",
+                        "review_reused": True,
+                    }],
                     reasoning_authorized=True,
                     context_packet=run.context_packet("base-sha", "train-sha"),
                 ),
@@ -2016,12 +2309,12 @@ class TrainControllerTests(unittest.TestCase):
                     reviewed_head="train-sha",
                     routing_conformance="conformant",
                     model="gpt-5.6-terra",
-                    reasoning_effort="high",
+                    reasoning_effort="medium",
                     envelope={
                         "phase_key": "run:run:final-review:1",
                         "phase_status": "completed",
                         "actual_model": "gpt-5.6-terra",
-                        "actual_reasoning_effort": "high",
+                        "actual_reasoning_effort": "medium",
                         "result_summary": "clean final review",
                         "artifacts": {"reviewed_head": "train-sha"},
                         "tests_and_checks": ["exact-head evidence checked"],

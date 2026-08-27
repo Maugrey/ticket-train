@@ -40,8 +40,8 @@ analysis_policy = parallel-conditional
 usage_reporting = exact-if-available
 orchestration_metrics = executor-share-and-wake-audit
 routing_enforcement = strict
-triage_model = gpt-5.6-terra
-triage_reasoning_effort = high
+triage_model = gpt-5.6-luna | gpt-5.6-terra
+triage_reasoning_effort = medium | high
 coordination_policy = compact-control-plane
 control_plane_runner = deterministic-decision-packets
 decision_packet_max_bytes = 16384
@@ -75,7 +75,7 @@ remediation_cycle_limit = 2
 material_files_per_train_checkpoint = 60
 schema_or_data_transformations_per_train_checkpoint = 2
 structural_domains_per_train_checkpoint = 4
-orchestrator_recommendation = Terra/H | Sol/H
+orchestrator_recommendation = Terra/M | Terra/H | Sol/H
 orchestrator_actual_setting = known combination | unknown
 orchestrator_preflight_confirmation = pending | confirmed | declined
 ```
@@ -121,7 +121,8 @@ editor-backed launch without readiness evidence. Read
 
 After resolving the source, selection, run mode, repository, and train
 configuration, apply the criteria in
-[model-routing.md](model-routing.md) to recommend `Terra/H` or `Sol/H` for the
+[model-routing.md](model-routing.md) to recommend `Terra/M`, `Terra/H`, or
+exceptionally `Sol/H` for the
 main conversation.
 
 Publish the current setting when observable, the recommendation, the concrete
@@ -158,7 +159,7 @@ Use these roles:
 
 - **Orchestrator:** own the queue, configuration, dependency map, gates, thread routing, compact state, and reports.
 - **Triage agent:** classify the selected ticket batch in a dedicated read-only
-  `Terra/H` thread without producing a technical plan.
+  Luna/M, Terra/M, or Terra/H thread without producing a technical plan.
 - **Analyzer:** inspect one ticket and repository state in read-only mode.
 - **Worker:** implement one ticket in its branch and worktree.
 - **Acceptance-test worker:** independently author black-box acceptance,
@@ -194,6 +195,10 @@ triage_intrinsic_criticality
 triage_complexity
 analysis_intrinsic_criticality
 analysis_complexity
+residual_implementation_complexity
+verification_complexity
+complexity_reduction_evidence
+unresolved_implementation_difficulty
 criticality_evidence
 complexity_factor_assessment
 criticality_confidence
@@ -249,7 +254,7 @@ routing_records_by_phase = {
   actual_reasoning_effort,
   conformance
 }
-reasoning_authorization
+reasoning_authorization = {authorization_id, stage, ticket_or_run, head, user_decision_reference, authorized_at}
 orchestrator_usage_baseline
 orchestrator_token_usage
 triage_token_usage
@@ -386,9 +391,10 @@ evidence stale until the next finalization.
 ## Routing triage
 
 Before creating analysis threads, create one dedicated read-only batch triage
-thread at `Terra/H` under [model-routing.md](model-routing.md). Pass explicit
-model and reasoning overrides. Do not perform this pass in the orchestrator
-when the parent conversation uses another setting.
+thread at the exact Luna/M, Terra/M, or Terra/H route selected under
+[model-routing.md](model-routing.md). Pass explicit model and reasoning
+overrides. Do not perform this pass in the orchestrator when the parent
+conversation uses another setting.
 
 For each ticket:
 
@@ -403,13 +409,14 @@ For each ticket:
 
 Do not produce a technical plan, trace the implementation, enumerate detailed files or tests, or run validation. Triage must remain materially smaller and faster than the full analysis.
 
-Treat uncertainty conservatively so the full analysis does not need to be repeated. If routing requests `max` or `ultra`, obtain explicit user authorization before launching that analysis. Group authorization requests across the selected tickets when practical.
+Treat uncertainty conservatively so the full analysis does not need to be repeated. If routing requests `max`, obtain explicit scoped user authorization before launching that analysis. Group authorization requests across the selected tickets when practical.
 
 Use suspected dependencies as analyzer context only. Never use triage dependencies to delay an analysis.
 
 Before launching analysis, the orchestrator performs only a mechanical routing
 check: verify that every classification maps to the exact matrix cell, every
-requested override is supported, and the triage thread reported `Terra/H`.
+requested override is supported, and the triage thread reported the exact
+controller-selected route.
 Do not repeat the ticket classification or technical reasoning.
 
 ## Analysis phase
@@ -972,8 +979,8 @@ Finalize in this order:
 9. Batch compatible accepted findings once. When ticket-specific context is
    material, request a compact targeted handoff; apply accepted fixes from a
    fresh remediation branch and fresh remediation thread based on the current train. Classify
-   each remediation batch from its actual risk and complexity, route it through
-   the implementation matrix, and use a dedicated final-train remediation
+   each remediation batch from current effective criticality and its actual
+   correction complexity, route it through the remediation matrix, and use a dedicated final-train remediation
    worker for cross-ticket findings.
 10. Merge at most one remediation pull request into the train at a time. The
    final train pull request updates automatically with the train head. Apply

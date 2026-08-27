@@ -93,6 +93,21 @@ For complexity, rate all seven factors, cite ticket or repository evidence,
 mark decisive factors, and explain how interacting factors determine the final
 level.
 
+Return the three phase-specific complexity values required by
+[criticality.md](criticality.md):
+
+```text
+analysis_complexity
+residual_implementation_complexity
+verification_complexity
+complexity_reduction_evidence
+unresolved_implementation_difficulty
+```
+
+The residual value may be lower than analysis complexity only when the report
+identifies which uncertainty or implementation factor was eliminated. A good
+analysis is not, by itself, reduction evidence.
+
 Do not classify from a sensitive keyword, ticket priority, code volume, or an
 imagined worst case without a credible causal path. Distinguish a conservative
 provisional triage route from the confirmed evidence-based classification.
@@ -180,6 +195,13 @@ are complete and internally consistent. Route missing evidence or an
 unsupported label to the original analyzer for a targeted amendment in every
 approval mode. Do not repeat the technical analysis in the orchestrator.
 
+When the confirmed classification requires an analysis route not covered by
+the route selected at triage, do not rerun the complete analysis. Dispatch one
+fresh targeted validation at the confirmed route with the completed report,
+the affected risk-sensitive sections, and compact evidence. Consolidation is
+blocked until that validation passes or sends the report to scoped
+reconciliation.
+
 ## Human analysis gates
 
 Apply the human analysis matrix from [criticality.md](criticality.md) to each consolidated ticket analysis.
@@ -251,7 +273,7 @@ Keep one analysis thread per ticket throughout initial analysis, consolidation a
 
 Create a replacement thread only when the original is unavailable. Give the replacement the ticket, original report, dependency graph, upstream diffs, reconciliation evidence, classifications, model-routing history, and human-gate state. Report the substitution.
 
-If revision routing requires `max` or `ultra`, preserve the separate explicit authorization rule from [model-routing.md](model-routing.md).
+If revision routing requires `max`, preserve the separate scoped explicit authorization rule from [model-routing.md](model-routing.md). Ultra is outside standard phase routing.
 
 ## Resume and reuse
 

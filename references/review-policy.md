@@ -339,9 +339,14 @@ train-head update invalidates affected evidence and final readiness, but does
 not force a complete second pass unless a material invalidation trigger from
 [efficiency-policy.md](efficiency-policy.md) applies.
 
-Before dispatch, record the train-level classification, the highest selected
-ticket initial-review setting used as the floor, the matrix result, and the
-final requested setting. After completion, verify the actual setting exactly.
+Before dispatch, record the train-level classification and matrix result. For
+every integrated ticket, record whether its latest trustworthy exact-commit
+full review remains reusable or becomes an applicable floor. A floor applies
+only when integration invalidates that evidence, its protected surface
+participates in a cross-ticket interaction, or unreviewed integration code
+affects it. Select the strongest applicable floor through the review-only
+compatibility table; do not apply the highest ticket setting unconditionally.
+After completion, verify the actual setting exactly.
 Any unexplained mismatch is nonconformant and blocks readiness; a cheaper or
 more expensive setting is not silently acceptable.
 
@@ -380,8 +385,9 @@ For remediation:
 1. Ask an original ticket worker for a compact targeted handoff only when its
    context materially reduces ambiguity.
 2. Create a fresh remediation branch and worktree from the current train.
-3. Reassess intrinsic criticality and complexity from the accepted batch and
-   route one final-train remediation worker through the implementation matrix.
+3. Reassess current effective intrinsic criticality and actual remediation
+   complexity from the accepted batch and route one final-train remediation
+   worker through the remediation matrix.
 4. Have that worker apply the accepted batch, including cross-ticket
    corrections.
 5. Open a remediation pull request into the train, apply any matrix-based

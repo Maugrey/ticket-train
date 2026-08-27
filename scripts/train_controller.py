@@ -32,46 +32,77 @@ UNITY_REQUIREMENTS = ("none", "editor-read", "editor-write", "playmode-ui", "bui
 UNITY_REQUIREMENT_ORDER = {value: index for index, value in enumerate(UNITY_REQUIREMENTS)}
 DEFAULT_MAX_UNITY_EDITORS = 3
 MAX_CONFIGURABLE_UNITY_EDITORS = 16
-SETTING_ORDER = {
-    ("gpt-5.6-terra", "medium"): 1,
-    ("gpt-5.6-terra", "high"): 2,
-    ("gpt-5.6-sol", "high"): 3,
-    ("gpt-5.6-sol", "xhigh"): 4,
-    ("gpt-5.6-sol", "max"): 5,
-    ("gpt-5.6-sol", "ultra"): 6,
-}
+ROUTING_POLICY_VERSION = "2026-08-27-v2"
+MECHANICAL_FAST_PATH_FIELDS = (
+    "fully_specified",
+    "direct_deterministic_oracle",
+    "no_shared_contract",
+    "no_critical_invariant",
+    "no_migration",
+    "no_concurrency",
+    "no_access_boundary",
+    "reversible",
+    "immediately_detectable",
+)
 
 ANALYSIS_MATRIX = {
-    "LOW": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-    "NORMAL": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
+    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+    "NORMAL": ("Terra/H", "Sol/M", "Sol/H", "Sol/XH"),
     "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
     "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
 }
 IMPLEMENTATION_MATRIX = {
+    "LOW": ("Terra/M", "Terra/M", "Sol/H", "Sol/XH"),
+    "NORMAL": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+    "HIGH": ("Sol/M", "Sol/H", "Sol/XH", "Sol/XH"),
+    "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+}
+ACCEPTANCE_MATRIX = {
     "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-    "HIGH": ("Sol/H", "Sol/H", "Sol/H", "Sol/XH"),
-    "CRITICAL": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
+    "NORMAL": ("Terra/H", "Terra/H", "Sol/H", "Sol/XH"),
+    "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
+    "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
 }
 INITIAL_REVIEW_MATRIX = {
-    "LOW": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Sol/H", "Sol/H", "Sol/H", "Sol/XH"),
+    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+    "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
     "HIGH": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/XH"),
     "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
 }
 FOLLOWUP_REVIEW_MATRIX = {
-    "LOW": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Sol/H", "Sol/H", "Sol/H", "Sol/XH"),
+    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
+    "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
     "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
     "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
 }
+REMEDIATION_MATRIX = IMPLEMENTATION_MATRIX
+FINAL_REVIEW_MATRIX = INITIAL_REVIEW_MATRIX
 SETTING_NAMES = {
+    "Luna/M": ("gpt-5.6-luna", "medium"),
     "Terra/M": ("gpt-5.6-terra", "medium"),
     "Terra/H": ("gpt-5.6-terra", "high"),
+    "Sol/M": ("gpt-5.6-sol", "medium"),
     "Sol/H": ("gpt-5.6-sol", "high"),
     "Sol/XH": ("gpt-5.6-sol", "xhigh"),
     "Sol/Max": ("gpt-5.6-sol", "max"),
-    "Sol/Ultra": ("gpt-5.6-sol", "ultra"),
+}
+
+# Capability is phase-specific. These tables intentionally avoid claiming a
+# global order between Luna, Terra/High, and Sol/Medium.
+ANALYSIS_ROUTE_COVERAGE = {
+    "Terra/M": {"Terra/M"},
+    "Terra/H": {"Terra/M", "Terra/H"},
+    "Sol/M": {"Terra/M", "Sol/M"},
+    "Sol/H": {"Terra/M", "Terra/H", "Sol/M", "Sol/H"},
+    "Sol/XH": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Sol/XH"},
+    "Sol/Max": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Sol/XH", "Sol/Max"},
+}
+FOLLOWUP_CEILING_COMPATIBILITY = {
+    "Terra/M": {"Terra/M"},
+    "Terra/H": {"Terra/M", "Terra/H"},
+    "Sol/H": {"Terra/M", "Terra/H", "Sol/H"},
+    "Sol/XH": {"Terra/M", "Terra/H", "Sol/H", "Sol/XH"},
+    "Sol/Max": {"Terra/M", "Terra/H", "Sol/H", "Sol/XH", "Sol/Max"},
 }
 
 
@@ -124,6 +155,12 @@ def setting_from_matrix(
     return SETTING_NAMES[matrix[criticality][COMPLEXITIES.index(complexity)]]
 
 
+def setting_name(setting: tuple[str, str]) -> str:
+    matches = [name for name, value in SETTING_NAMES.items() if value == setting]
+    require(len(matches) == 1, f"unsupported or ambiguous setting: {setting}")
+    return matches[0]
+
+
 def routed_setting(
     matrix: dict[str, tuple[str, str, str, str]],
     criticality: str,
@@ -131,9 +168,153 @@ def routed_setting(
     reasoning_authorized: bool,
 ) -> tuple[str, str, str]:
     model, effort = setting_from_matrix(matrix, criticality, complexity)
-    if effort in {"max", "ultra"} and not reasoning_authorized:
+    if effort == "max" and not reasoning_authorized:
         return "gpt-5.6-sol", "xhigh", "documented-fallback"
     return model, effort, "conformant"
+
+
+def mechanical_fast_path(
+    event: dict[str, Any], *, criticality: str, complexity: str, field: str
+) -> bool:
+    evidence = event.get(field)
+    if evidence is None:
+        return False
+    require(criticality == "LOW" and complexity == "LOW", f"{field} requires LOW/LOW")
+    require(isinstance(evidence, dict), f"{field} must be an object")
+    require(
+        all(evidence.get(key) is True for key in MECHANICAL_FAST_PATH_FIELDS),
+        f"{field} is missing a required mechanical fast-path proof",
+    )
+    return True
+
+
+def routed_phase_setting(
+    matrix: dict[str, tuple[str, str, str, str]],
+    criticality: str,
+    complexity: str,
+    reasoning_authorized: bool,
+    *,
+    event: dict[str, Any] | None = None,
+    fast_path_field: str | None = None,
+) -> tuple[str, str, str]:
+    if event is not None and fast_path_field and mechanical_fast_path(
+        event, criticality=criticality, complexity=complexity, field=fast_path_field
+    ):
+        return "gpt-5.6-luna", "medium", "conformant"
+    return routed_setting(matrix, criticality, complexity, reasoning_authorized)
+
+
+def triage_setting(event: dict[str, Any]) -> tuple[str, str, str]:
+    profile = event.get("triage_profile", "standard")
+    require(profile in {"mechanical", "standard", "sensitive"}, "invalid triage profile")
+    if profile == "mechanical":
+        evidence = event.get("mechanical_fast_path")
+        require(isinstance(evidence, dict), "mechanical triage requires fast-path evidence")
+        require(
+            all(evidence.get(key) is True for key in MECHANICAL_FAST_PATH_FIELDS),
+            "mechanical triage fast-path evidence is incomplete",
+        )
+        return "gpt-5.6-luna", "medium", "conformant"
+    if profile == "sensitive":
+        reasons = event.get("triage_escalation_reasons")
+        require(isinstance(reasons, list) and reasons, "sensitive triage requires escalation reasons")
+        return "gpt-5.6-terra", "high", "conformant"
+    require(not event.get("triage_escalation_reasons"), "standard triage cannot carry escalation reasons")
+    return "gpt-5.6-terra", "medium", "conformant"
+
+
+def plan_contract_setting(event: dict[str, Any]) -> tuple[str, str, str]:
+    profile = event.get("contract_validation_profile", "standard")
+    require(profile in {"standard", "sensitive"}, "invalid contract-validation profile")
+    if profile == "sensitive":
+        reasons = event.get("contract_validation_escalation_reasons")
+        require(isinstance(reasons, list) and reasons, "sensitive contract validation requires reasons")
+        return "gpt-5.6-terra", "high", "conformant"
+    require(
+        not event.get("contract_validation_escalation_reasons"),
+        "standard contract validation cannot carry escalation reasons",
+    )
+    return "gpt-5.6-terra", "medium", "conformant"
+
+
+def validate_reasoning_authorization(
+    proc: dict[str, Any], event: dict[str, Any], expected: tuple[str, str, str],
+    *, stage: str, ticket_id: str | None, head: str | None,
+    authorization_field: str = "reasoning_authorization_id",
+) -> None:
+    if expected[1] != "max":
+        require(not event.get(authorization_field), "reasoning authorization supplied for a non-Max route")
+        return
+    authorization_id = event.get(authorization_field)
+    require(bool(authorization_id), "Sol/Max requires a scoped reasoning authorization")
+    authorizations = proc.get("reasoning_authorizations", {})
+    authorization = authorizations.get(authorization_id) if isinstance(authorizations, dict) else None
+    require(isinstance(authorization, dict), "unknown reasoning authorization")
+    require(authorization.get("status") == "ACTIVE", "reasoning authorization is not active")
+    require(authorization.get("stage") == stage, "reasoning authorization stage mismatch")
+    require(authorization.get("ticket_id") in {ticket_id, "*"}, "reasoning authorization ticket mismatch")
+    require(authorization.get("head") in {None, "*", head}, "reasoning authorization head mismatch")
+
+
+def route_is_covered(
+    coverage: dict[str, set[str]], actual: tuple[str, str], required: tuple[str, str]
+) -> bool:
+    actual_name = setting_name(actual)
+    required_name = setting_name(required)
+    return required_name in coverage.get(actual_name, set())
+
+
+def latest_trustworthy_full_review(item: dict[str, Any]) -> dict[str, Any] | None:
+    for review in reversed(item.get("reviews", [])):
+        if (
+            review.get("review_kind") == "full"
+            and review.get("routing_status", "conformant") in {"conformant", "documented-fallback"}
+            and not review.get("stale_due_to_head_drift")
+        ):
+            return review
+    return None
+
+
+def strongest_review_setting(settings: list[tuple[str, str]]) -> tuple[str, str] | None:
+    strongest: tuple[str, str] | None = None
+    for candidate in settings:
+        candidate_name = setting_name(candidate)
+        require(candidate_name in FOLLOWUP_CEILING_COMPATIBILITY, "setting is not valid for review comparison")
+        if strongest is None:
+            strongest = candidate
+            continue
+        strongest_name = setting_name(strongest)
+        if candidate_name not in FOLLOWUP_CEILING_COMPATIBILITY[strongest_name]:
+            require(
+                strongest_name in FOLLOWUP_CEILING_COMPATIBILITY[candidate_name],
+                "review settings are incomparable",
+            )
+            strongest = candidate
+    return strongest
+
+
+def higher_classification(original: str, candidate: str, levels: tuple[str, ...]) -> str:
+    require(original in levels and candidate in levels, "invalid classification value")
+    return candidate if levels.index(candidate) >= levels.index(original) else original
+
+
+def finalize_analysis_gate(proc: dict[str, Any], item: dict[str, Any]) -> None:
+    analysis = item["analysis"]
+    required = analysis_human_gate(analysis["criticality"], analysis["complexity"], proc["approval_mode"])
+    item["analysis_gate_required"] = required
+    if required:
+        gate_id = f"{analysis['ticket_id']}:analysis:{analysis['analysis_revision']}"
+        create_gate(
+            proc,
+            gate_id=gate_id,
+            kind="analysis",
+            ticket_id=analysis["ticket_id"],
+            revision=analysis["analysis_revision"],
+        )
+        item["analysis_gate_id"] = gate_id
+        item["status"] = "AWAITING_ANALYSIS_APPROVAL"
+    else:
+        item["status"] = "ANALYZED"
 
 
 def analysis_human_gate(criticality: str, complexity: str, approval_mode: str) -> bool:
@@ -582,8 +763,63 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     if unresolved_cost_anomalies(proc) and event_type != "COST_ANOMALY_RESOLVED":
         raise ControllerError("resolve the open cost anomaly checkpoint before another transition")
 
+    if event_type == "REASONING_OVERRIDE_AUTHORIZED":
+        require_fields(
+            event,
+            ("authorization_id", "stage", "ticket_id", "user_decision_reference", "authorized_at"),
+            "reasoning authorization",
+        )
+        require(
+            event["stage"] in {
+                "analysis", "analysis-route-validation", "implementation", "acceptance",
+                "initial-review", "followup-review", "remediation", "final-review",
+                "final-remediation",
+            },
+            "invalid reasoning authorization stage",
+        )
+        parse_iso(str(event["authorized_at"]), "reasoning authorization time")
+        authorizations = proc.setdefault("reasoning_authorizations", {})
+        require(event["authorization_id"] not in authorizations, "reasoning authorization already exists")
+        authorizations[event["authorization_id"]] = {
+            "authorization_id": event["authorization_id"],
+            "stage": event["stage"],
+            "ticket_id": event["ticket_id"],
+            "head": event.get("head"),
+            "user_decision_reference": event["user_decision_reference"],
+            "authorized_at": event["authorized_at"],
+            "status": "ACTIVE",
+        }
+        return
+
     if event_type == "ORCHESTRATOR_CONFIRMED":
         require(proc.get("orchestrator_confirmed") is False, "orchestrator already confirmed")
+        require_fields(
+            event,
+            (
+                "orchestration_profile", "recommended_model", "recommended_reasoning_effort",
+                "current_model", "current_reasoning_effort", "confirmation_reference",
+            ),
+            "orchestrator confirmation",
+        )
+        profile = event["orchestration_profile"]
+        require(profile in {"normal", "complex-recovery", "technical-arbitration"}, "invalid orchestration profile")
+        recommended = {
+            "normal": ("gpt-5.6-terra", "medium"),
+            "complex-recovery": ("gpt-5.6-terra", "high"),
+            "technical-arbitration": ("gpt-5.6-sol", "high"),
+        }[profile]
+        require(
+            (event["recommended_model"], event["recommended_reasoning_effort"]) == recommended,
+            "orchestrator recommendation does not match its profile",
+        )
+        proc["orchestrator_preflight"] = {
+            "profile": profile,
+            "recommended_model": recommended[0],
+            "recommended_reasoning_effort": recommended[1],
+            "current_model": event["current_model"],
+            "current_reasoning_effort": event["current_reasoning_effort"],
+            "confirmation_reference": event["confirmation_reference"],
+        }
         proc["orchestrator_confirmed"] = True
         return
 
@@ -775,14 +1011,21 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
 
     if event_type == "PHASE_DISPATCHED":
         kind = event.get("kind")
-        require(kind in {"triage", "analysis", "analysis_reconciliation", "plan_contract_validation"}, "unsupported generic phase kind")
+        require(
+            kind in {
+                "triage", "analysis", "analysis_route_validation",
+                "analysis_reconciliation", "plan_contract_validation",
+            },
+            "unsupported generic phase kind",
+        )
         require(proc.get("supervision", {}).get("status") == "ACTIVE", "configure supervision first")
         require_fields(event, ("phase_key", "base_commit", "model", "reasoning_effort"), "phase dispatch")
         context_packet = validate_compact_context(event, f"{kind} dispatch")
         ticket_id = event.get("ticket_id")
         if kind == "triage":
             require(ticket_id in (None, "run"), "triage is a run-level batch phase")
-            require(event["model"] == "gpt-5.6-terra" and event["reasoning_effort"] == "high", "triage must use Terra/High")
+            expected = triage_setting(event)
+            validate_routing(event, expected)
             require(not any(p.get("kind") == "triage" for p in proc["phases"].values()), "batch triage already dispatched")
             ticket_id = None
         elif kind == "analysis":
@@ -793,11 +1036,36 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 bool(event.get("reasoning_authorized")),
             )
             validate_routing(event, expected)
+            validate_reasoning_authorization(
+                proc, event, expected, stage="analysis", ticket_id=str(ticket_id), head=event["base_commit"]
+            )
             active_analyses = sum(
                 1 for p in proc["phases"].values()
                 if p.get("kind") == "analysis" and p.get("launch_state") in ACTIVE_PHASE_STATES
             )
             require(active_analyses < int(proc["limits"]["max_active_analyses"]), "analysis concurrency limit reached")
+        elif kind == "analysis_route_validation":
+            require(ticket_id, "analysis route validation requires ticket_id")
+            item = ticket(proc, str(ticket_id))
+            require(item.get("status") == "ANALYSIS_ROUTE_VALIDATION_REQUIRED", "analysis does not require route validation")
+            required = item.get("analysis_route_validation_required")
+            require(isinstance(required, dict), "analysis route validation requirement is missing")
+            expected = routed_setting(
+                ANALYSIS_MATRIX, required["criticality"], required["complexity"],
+                bool(event.get("reasoning_authorized")),
+            )
+            validate_routing(event, expected)
+            validate_reasoning_authorization(
+                proc, event, expected, stage="analysis-route-validation",
+                ticket_id=str(ticket_id), head=event["base_commit"],
+            )
+        elif kind == "plan_contract_validation":
+            require(ticket_id, "plan contract validation requires ticket_id")
+            item = ticket(proc, str(ticket_id))
+            require(item.get("status") == "READY_FOR_IMPLEMENTATION", "ticket is not ready for contract validation")
+            require(item.get("analysis", {}).get("complexity") in {"HIGH", "MAXIMUM"}, "contract validation is required only for HIGH or MAXIMUM complexity")
+            expected = plan_contract_setting(event)
+            validate_routing(event, expected)
         else:
             require(ticket_id, f"{kind} requires ticket_id")
             ticket(proc, str(ticket_id))
@@ -812,6 +1080,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             base=event["base_commit"], scope=event.get("scope"), context_packet=context_packet,
             unity_requirement=unity_requirement,
         )
+        phase(proc, event["phase_key"])["triage_profile"] = event.get("triage_profile") if kind == "triage" else None
+        phase(proc, event["phase_key"])["contract_validation_profile"] = (
+            event.get("contract_validation_profile") if kind == "plan_contract_validation" else None
+        )
         return
 
     if event_type == "TICKET_TRIAGED":
@@ -821,10 +1093,22 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         source_phase = phase(proc, str(event.get("phase_key") or ""))
         require(source_phase.get("kind") == "triage" and source_phase.get("launch_state") == "COMPLETED", "triage result requires a completed visible batch-triage phase")
         criticality, complexity = event.get("criticality"), event.get("complexity")
+        require(event.get("confidence") in {"low", "medium", "high"}, "triage confidence is required")
         expected = routed_setting(ANALYSIS_MATRIX, criticality, complexity, bool(event.get("reasoning_authorized")))
         validate_routing(event, expected, "analysis_")
-        require(event.get("triage_model") == "gpt-5.6-terra", "triage must use gpt-5.6-terra")
-        require(event.get("triage_reasoning_effort") == "high", "triage must use high effort")
+        validate_reasoning_authorization(
+            proc, event, expected, stage="analysis", ticket_id=event["ticket_id"], head=source_phase.get("base")
+        )
+        require(
+            (event.get("triage_model"), event.get("triage_reasoning_effort"))
+            == (source_phase.get("requested_model"), source_phase.get("requested_reasoning_effort")),
+            "triage result routing differs from its completed phase",
+        )
+        if source_phase.get("triage_profile") == "mechanical":
+            require((criticality, complexity) == ("LOW", "LOW"), "Luna triage may return only LOW/LOW")
+            require(event["confidence"] == "high", "Luna triage requires high confidence")
+            require(not event.get("declared_or_suspected_dependencies"), "Luna triage cannot report dependencies")
+            require(not event.get("suspected_collision_domains"), "Luna triage cannot report collision domains")
         if uses_unity_mcp(proc):
             event_unity_requirement(proc, event, "analysis_unity_requirement")
         item["triage"] = dict(event)
@@ -848,29 +1132,86 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 "criticality", "complexity", "criticality_evidence", "complexity_evidence",
                 "structural_digest", "implementation_contract_revision",
                 "verification_contract_revision", "report_thread_id",
+                "residual_implementation_complexity", "verification_complexity",
+                "complexity_reduction_evidence",
             ),
             "analysis",
         )
-        expected = routed_setting(
-            ANALYSIS_MATRIX, event["criticality"], event["complexity"], bool(event.get("reasoning_authorized"))
+        require(event["residual_implementation_complexity"] in COMPLEXITIES, "invalid residual implementation complexity")
+        require(event["verification_complexity"] in COMPLEXITIES, "invalid verification complexity")
+        require("unresolved_implementation_difficulty" in event, "analysis is missing unresolved implementation difficulty")
+        require(
+            isinstance(event["unresolved_implementation_difficulty"], list),
+            "unresolved implementation difficulty must be a list",
         )
-        validate_routing(event, expected)
+        require(
+            (event.get("model"), event.get("reasoning_effort"))
+            == (source_phase.get("requested_model"), source_phase.get("requested_reasoning_effort")),
+            "analysis result routing differs from its completed phase",
+        )
         item["analysis"] = dict(event)
         require(event["report_thread_id"] == source_phase.get("thread_id"), "analysis report thread does not match the visible phase")
-        required = analysis_human_gate(event["criticality"], event["complexity"], proc["approval_mode"])
-        item["analysis_gate_required"] = required
-        if required:
-            gate_id = f"{event['ticket_id']}:analysis:{event['analysis_revision']}"
-            create_gate(proc, gate_id=gate_id, kind="analysis", ticket_id=event["ticket_id"], revision=event["analysis_revision"])
-            item["analysis_gate_id"] = gate_id
-            item["status"] = "AWAITING_ANALYSIS_APPROVAL"
+        confirmed_expected = routed_setting(
+            ANALYSIS_MATRIX, event["criticality"], event["complexity"], bool(event.get("reasoning_authorized"))
+        )
+        if route_is_covered(
+            ANALYSIS_ROUTE_COVERAGE,
+            (source_phase["requested_model"], source_phase["requested_reasoning_effort"]),
+            confirmed_expected[:2],
+        ):
+            item["analysis"]["routing_validation_status"] = "not-required"
+            finalize_analysis_gate(proc, item)
         else:
-            item["status"] = "ANALYZED"
+            item["analysis"]["routing_validation_status"] = "required"
+            item["analysis_route_validation_required"] = {
+                "criticality": event["criticality"],
+                "complexity": event["complexity"],
+                "required_model": confirmed_expected[0],
+                "required_reasoning_effort": confirmed_expected[1],
+                "routing_conformance": confirmed_expected[2],
+                "analysis_revision": event["analysis_revision"],
+            }
+            item["status"] = "ANALYSIS_ROUTE_VALIDATION_REQUIRED"
+        return
+
+    if event_type == "ANALYSIS_ROUTE_VALIDATION_RECORDED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(item.get("status") == "ANALYSIS_ROUTE_VALIDATION_REQUIRED", "analysis route validation is not required")
+        source_phase = phase(proc, str(event.get("phase_key") or ""))
+        require(
+            source_phase.get("kind") == "analysis_route_validation"
+            and source_phase.get("ticket_id") == event.get("ticket_id")
+            and source_phase.get("launch_state") == "COMPLETED",
+            "analysis route validation requires its completed visible phase",
+        )
+        require_fields(
+            event,
+            ("analysis_revision", "status", "validated_sections", "report_reference"),
+            "analysis route validation",
+        )
+        require(event["analysis_revision"] == item["analysis"]["analysis_revision"], "analysis revision mismatch")
+        require(event["status"] in {"passed", "failed"}, "invalid analysis route validation status")
+        require(isinstance(event["validated_sections"], list) and event["validated_sections"], "validated sections are required")
+        item["analysis"]["routing_validation"] = dict(event)
+        item["analysis"]["routing_validation_status"] = event["status"]
+        if event["status"] == "failed":
+            item["status"] = "ANALYSIS_RECONCILIATION_REQUIRED"
+        else:
+            finalize_analysis_gate(proc, item)
         return
 
     if event_type == "DEPENDENCIES_CONSOLIDATED":
         require(not proc.get("dependencies_consolidated"), "dependencies already consolidated")
-        require(all(value.get("analysis") for value in proc["tickets"].values()), "all analyses must finish first")
+        require(
+            all(
+                value.get("analysis")
+                and value.get("status") not in {
+                    "TRIAGED", "ANALYSIS_ROUTE_VALIDATION_REQUIRED", "ANALYSIS_RECONCILIATION_REQUIRED",
+                }
+                for value in proc["tickets"].values()
+            ),
+            "all analyses and targeted route validations must finish first",
+        )
         graph = event.get("graph")
         require(isinstance(graph, dict), "dependency graph must be an object")
         schedule = event.get("schedule")
@@ -1062,6 +1403,42 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         ticket(proc, gate["ticket_id"])["status"] = gate.get("prior_ticket_status") or "EXECUTION_PAIR_RUNNING"
         return
 
+    if event_type == "PLAN_CONTRACT_VALIDATION_RECORDED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(item.get("status") == "READY_FOR_IMPLEMENTATION", "ticket is not ready for contract validation")
+        completed = phase(proc, str(event.get("phase_key") or ""))
+        require(
+            completed.get("kind") == "plan_contract_validation"
+            and completed.get("ticket_id") == event.get("ticket_id")
+            and completed.get("launch_state") == "COMPLETED",
+            "plan contract validation requires its completed visible phase",
+        )
+        require_fields(
+            event,
+            (
+                "status", "analysis_complexity", "residual_implementation_complexity",
+                "verification_complexity", "complexity_reduction_evidence",
+                "validation_reference",
+            ),
+            "plan contract validation",
+        )
+        require("unresolved_implementation_difficulty" in event, "contract validation is missing unresolved implementation difficulty")
+        require(event["status"] in {"passed", "failed"}, "invalid plan contract validation status")
+        analysis = item["analysis"]
+        require(event["analysis_complexity"] == analysis["complexity"], "analysis complexity changed during contract validation")
+        require(event["residual_implementation_complexity"] in COMPLEXITIES, "invalid residual implementation complexity")
+        require(event["verification_complexity"] in COMPLEXITIES, "invalid verification complexity")
+        require(isinstance(event["unresolved_implementation_difficulty"], list), "unresolved implementation difficulty must be a list")
+        item["plan_contract_validation"] = dict(event)
+        if event["status"] == "passed":
+            analysis["residual_implementation_complexity"] = event["residual_implementation_complexity"]
+            analysis["verification_complexity"] = event["verification_complexity"]
+            analysis["complexity_reduction_evidence"] = event["complexity_reduction_evidence"]
+            analysis["unresolved_implementation_difficulty"] = event["unresolved_implementation_difficulty"]
+        else:
+            item["status"] = "NEEDS_CONTRACT_AMENDMENT"
+        return
+
     if event_type == "EXECUTION_PAIR_DISPATCHED":
         require(state.get("execution_mode") == "live", "implementation is forbidden in dry-run mode")
         item = ticket(proc, str(event.get("ticket_id") or ""))
@@ -1087,16 +1464,38 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             {"context_packet": event.get("acceptance_context_packet")}, "acceptance-test dispatch"
         )
         analysis = item["analysis"]
-        implementation_expected = routed_setting(
-            IMPLEMENTATION_MATRIX, analysis["criticality"], analysis["complexity"], bool(event.get("reasoning_authorized"))
+        if analysis["complexity"] in {"HIGH", "MAXIMUM"}:
+            require(
+                item.get("plan_contract_validation", {}).get("status") == "passed",
+                "HIGH or MAXIMUM implementation requires a passed plan contract validation",
+            )
+        implementation_complexity = analysis["residual_implementation_complexity"]
+        require(
+            event["verification_complexity"] == analysis["verification_complexity"],
+            "execution verification complexity differs from the validated contract",
         )
-        acceptance_expected = routed_setting(
-            IMPLEMENTATION_MATRIX, analysis["criticality"], event["verification_complexity"], bool(event.get("reasoning_authorized"))
+        implementation_expected = routed_phase_setting(
+            IMPLEMENTATION_MATRIX, analysis["criticality"], implementation_complexity,
+            bool(event.get("implementation_reasoning_authorized", event.get("reasoning_authorized"))), event=event,
+            fast_path_field="implementation_mechanical_fast_path",
         )
-        if acceptance_expected[:2] == ("gpt-5.6-terra", "medium"):
-            acceptance_expected = ("gpt-5.6-terra", "high", acceptance_expected[2])
+        acceptance_expected = routed_phase_setting(
+            ACCEPTANCE_MATRIX, analysis["criticality"], event["verification_complexity"],
+            bool(event.get("acceptance_reasoning_authorized", event.get("reasoning_authorized"))), event=event,
+            fast_path_field="acceptance_mechanical_fast_path",
+        )
         validate_routing(event, implementation_expected, "implementation_")
         validate_routing(event, acceptance_expected, "acceptance_")
+        validate_reasoning_authorization(
+            proc, event, implementation_expected, stage="implementation",
+            ticket_id=event["ticket_id"], head=event["base_commit"],
+            authorization_field="implementation_reasoning_authorization_id",
+        )
+        validate_reasoning_authorization(
+            proc, event, acceptance_expected, stage="acceptance",
+            ticket_id=event["ticket_id"], head=event["base_commit"],
+            authorization_field="acceptance_reasoning_authorization_id",
+        )
         implementation_unity = event_unity_requirement(proc, event, "implementation_unity_requirement")
         acceptance_unity = event_unity_requirement(proc, event, "acceptance_unity_requirement")
         verification_unity = event_unity_requirement(proc, event, "verification_unity_requirement")
@@ -1120,6 +1519,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "acceptance_phase_key": event["acceptance_phase_key"],
             "implementation_branch": event["implementation_branch"],
             "acceptance_branch": event["acceptance_branch"],
+            "residual_implementation_complexity": implementation_complexity,
+            "verification_complexity": event["verification_complexity"],
             "verification_unity_requirement": verification_unity,
         }
         item["status"] = "EXECUTION_PAIR_RUNNING"
@@ -1371,8 +1772,20 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(context_packet["exact_base"] == event["base_commit"], "review context base mismatch")
         require(context_packet["exact_head"] == event["head_commit"], "review context head mismatch")
         analysis = item.get("analysis") or {}
-        criticality = event.get("criticality") or analysis.get("criticality")
-        complexity = event.get("complexity") or analysis.get("complexity")
+        require_fields(event, ("criticality", "complexity", "classification_evidence"), "review classification")
+        criticality = event["criticality"]
+        complexity = event["complexity"]
+        require(criticality in CRITICALITIES and complexity in COMPLEXITIES, "invalid review classification")
+        baseline_classification = item.get("effective_classification") or analysis
+        require(
+            criticality == higher_classification(baseline_classification["criticality"], criticality, CRITICALITIES),
+            "review criticality cannot downgrade durable classification",
+        )
+        if scope == "initial":
+            require(
+                complexity == higher_classification(baseline_classification["complexity"], complexity, COMPLEXITIES),
+                "initial-review complexity cannot downgrade durable classification",
+            )
         if scope == "initial":
             require(item.get("status") == "FUNCTIONAL_READY", "initial review requires functional readiness")
             require(isinstance(item.get("pull_request"), dict), "initial review requires ticket PR")
@@ -1382,9 +1795,11 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             require(not item.get("reviews"), "initial review already exists")
             require(event.get("review_kind") == "full", "initial review must be exhaustive")
             expected = routed_setting(INITIAL_REVIEW_MATRIX, criticality, complexity, bool(event.get("reasoning_authorized")))
+            review_stage = "initial-review"
         else:
             reviews = item.get("reviews", [])
-            require(reviews and reviews[0].get("scope") == "initial", "followup review requires an initial full review")
+            baseline_review = latest_trustworthy_full_review(item)
+            require(baseline_review is not None, "followup review requires a trustworthy full review")
             require(item.get("status") == "FUNCTIONAL_READY", "followup review requires post-remediation functional readiness")
             require(item.get("remediation_cycles", 0) > 0, "followup review requires remediation")
             material = event.get("material_scope_changed") is True
@@ -1399,12 +1814,23 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             require(isinstance(delta["changed_files"], list), "remediation delta changed_files must be a list")
             require((delta["change_kind"] == "material-scope") == material, "material scope flag conflicts with delta classification")
             complexity = delta["verification_complexity"]
-            expected = routed_setting(FOLLOWUP_REVIEW_MATRIX, criticality, complexity, bool(event.get("reasoning_authorized")))
-            baseline = (reviews[0]["actual_model"], reviews[0]["actual_reasoning_effort"])
-            require(SETTING_ORDER[expected[:2]] <= SETTING_ORDER[baseline], "followup review cannot exceed initial review setting")
+            matrix = INITIAL_REVIEW_MATRIX if material else FOLLOWUP_REVIEW_MATRIX
+            expected = routed_setting(matrix, criticality, complexity, bool(event.get("reasoning_authorized")))
+            baseline_name = setting_name((baseline_review["actual_model"], baseline_review["actual_reasoning_effort"]))
+            expected_name = setting_name(expected[:2])
+            if not material:
+                require(
+                    expected_name in FOLLOWUP_CEILING_COMPATIBILITY.get(baseline_name, set()),
+                    "focused followup route exceeds its latest trustworthy full-review baseline",
+                )
             if material:
-                require(event.get("scope_revision") != reviews[0].get("scope_revision"), "full re-review requires a new scope revision")
+                require(event.get("scope_revision") != baseline_review.get("scope_revision"), "full re-review requires a new scope revision")
+            review_stage = "initial-review" if material else "followup-review"
         validate_routing(event, expected)
+        validate_reasoning_authorization(
+            proc, event, expected, stage=review_stage,
+            ticket_id=event["ticket_id"], head=event["head_commit"],
+        )
         unity_requirement = event_unity_requirement(proc, event)
         add_phase(
             proc, key=event["phase_key"], ticket_id=event["ticket_id"], kind="review",
@@ -1415,6 +1841,12 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         phase(proc, event["phase_key"])["review_kind"] = event["review_kind"]
         phase(proc, event["phase_key"])["scope_revision"] = event.get("scope_revision") or "scope-1"
         phase(proc, event["phase_key"])["remediation_delta"] = event.get("remediation_delta")
+        phase(proc, event["phase_key"])["classification"] = {
+            "criticality": criticality,
+            "complexity": complexity,
+            "evidence": event["classification_evidence"],
+        }
+        phase(proc, event["phase_key"])["routing_status"] = expected[2]
         item["status"] = "AUTO_REVIEW"
         return
 
@@ -1434,11 +1866,25 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "status": event["status"], "findings": event.get("findings", []),
             "actual_model": completed["requested_model"],
             "actual_reasoning_effort": completed["requested_reasoning_effort"],
+            "routing_status": completed.get("routing_status", "conformant"),
         })
         analysis = item["analysis"]
         criticality = event.get("effective_criticality") or analysis["criticality"]
         complexity = event.get("effective_complexity") or analysis["complexity"]
-        item["effective_classification"] = {"criticality": criticality, "complexity": complexity}
+        dispatched_classification = completed.get("classification") or analysis
+        require(
+            criticality == higher_classification(dispatched_classification["criticality"], criticality, CRITICALITIES),
+            "recorded effective criticality cannot downgrade reviewed classification",
+        )
+        require(
+            complexity == higher_classification(dispatched_classification["complexity"], complexity, COMPLEXITIES),
+            "recorded effective complexity cannot downgrade reviewed classification",
+        )
+        previous = item.get("effective_classification") or analysis
+        item["effective_classification"] = {
+            "criticality": higher_classification(previous["criticality"], criticality, CRITICALITIES),
+            "complexity": higher_classification(previous["complexity"], complexity, COMPLEXITIES),
+        }
         item["status"] = "AWAITING_FINDING_RECONCILIATION"
         return
 
@@ -1621,17 +2067,28 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             else AUTOMATIC_REMEDIATION_CYCLE_LIMIT
         )
         require(cycles < cycle_limit, "automatic remediation cycle limit reached")
-        require_fields(event, ("phase_key", "base_commit", "branch", "model", "reasoning_effort"), "remediation dispatch")
+        require_fields(
+            event,
+            ("phase_key", "base_commit", "branch", "criticality", "complexity", "change_kind", "model", "reasoning_effort"),
+            "remediation dispatch",
+        )
+        require(event["change_kind"] in {"mechanical", "bounded-behavioral", "cross-cutting"}, "material-scope remediation must return to analysis reconciliation")
         context_packet = validate_compact_context(event, "remediation dispatch")
         require(context_packet["exact_base"] == event["base_commit"], "remediation context base mismatch")
         remediation_head = item.get("pull_request", {}).get("head_commit") or item.get("verification", {}).get("ticket_head")
         require(context_packet["exact_head"] == remediation_head, "remediation context head mismatch")
-        analysis = item["analysis"]
-        expected = routed_setting(
-            IMPLEMENTATION_MATRIX, analysis["criticality"], event.get("complexity") or analysis["complexity"],
-            bool(event.get("reasoning_authorized")),
+        effective = item.get("effective_classification") or item["analysis"]
+        require(event["criticality"] == effective["criticality"], "remediation must use current effective criticality")
+        expected = routed_phase_setting(
+            REMEDIATION_MATRIX, event["criticality"], event["complexity"],
+            bool(event.get("reasoning_authorized")), event=event,
+            fast_path_field="mechanical_fast_path",
         )
         validate_routing(event, expected)
+        validate_reasoning_authorization(
+            proc, event, expected, stage="remediation",
+            ticket_id=event["ticket_id"], head=remediation_head,
+        )
         unity_requirement = event_unity_requirement(proc, event)
         implementation_phase = phase(proc, item["execution"]["implementation_phase_key"])
         add_phase(
@@ -1641,6 +2098,11 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             unity_requirement=unity_requirement,
         )
         phase(proc, event["phase_key"])["forbidden_thread_id"] = implementation_phase.get("thread_id")
+        phase(proc, event["phase_key"])["remediation_classification"] = {
+            "criticality": event["criticality"],
+            "complexity": event["complexity"],
+            "change_kind": event["change_kind"],
+        }
         if cycles >= AUTOMATIC_REMEDIATION_CYCLE_LIMIT:
             require(exception is not None, "exceptional remediation dispatch requires a granted exception")
             exception["status"] = "CONSUMED"
@@ -1854,7 +2316,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(final.get("verification", {}).get("status") == "passed", "final verification must pass before final review")
         require_fields(
             event,
-            ("phase_key", "train_criticality", "train_complexity", "model", "reasoning_effort", "routing_conformance"),
+            (
+                "phase_key", "train_criticality", "train_complexity", "model",
+                "reasoning_effort", "routing_conformance", "ticket_floor_evidence",
+            ),
             "final review dispatch",
         )
         history = final.get("review_history", [])
@@ -1867,28 +2332,77 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(context_packet["exact_head"] == final["pull_request"]["head_commit"], "final review context head mismatch")
         required_kind = "full" if scope == "initial" or material else "focused"
         require(event.get("review_kind") == required_kind, f"final {scope} review must be {required_kind}")
-        matrix = INITIAL_REVIEW_MATRIX if scope == "initial" or material else FOLLOWUP_REVIEW_MATRIX
+        matrix = FINAL_REVIEW_MATRIX if scope == "initial" or material else FOLLOWUP_REVIEW_MATRIX
         matrix_expected = routed_setting(
             matrix, event["train_criticality"], event["train_complexity"], bool(event.get("reasoning_authorized")),
         )
-        integrated_reviews = [
-            value["reviews"][0]
-            for value in proc["tickets"].values()
-            if value.get("status") == "MERGED_INTO_TRAIN" and value.get("reviews")
-        ]
-        require(integrated_reviews, "final review requires trustworthy integrated ticket reviews")
-        floor = max(
-            ((review["actual_model"], review["actual_reasoning_effort"]) for review in integrated_reviews),
-            key=lambda setting: SETTING_ORDER[setting],
+        integrated = {
+            ticket_id: value
+            for ticket_id, value in proc["tickets"].items()
+            if value.get("status") == "MERGED_INTO_TRAIN"
+        }
+        require(integrated, "final review requires integrated tickets")
+        floor_evidence = event["ticket_floor_evidence"]
+        require(isinstance(floor_evidence, list), "ticket floor evidence must be a list")
+        require(
+            {entry.get("ticket_id") for entry in floor_evidence if isinstance(entry, dict)} == set(integrated),
+            "ticket floor evidence must cover every integrated ticket exactly once",
         )
+        require(
+            len(floor_evidence) == len(integrated),
+            "ticket floor evidence must cover every integrated ticket exactly once",
+        )
+        applicable_settings: list[tuple[str, str]] = []
+        for entry in floor_evidence:
+            require(isinstance(entry, dict), "ticket floor evidence entry must be an object")
+            require_fields(
+                entry,
+                ("ticket_id", "applies", "reviewed_head", "reason", "review_reused"),
+                "ticket floor evidence",
+            )
+            require(isinstance(entry["applies"], bool), "ticket floor applicability must be boolean")
+            full_review = latest_trustworthy_full_review(integrated[entry["ticket_id"]])
+            require(full_review is not None, f"ticket {entry['ticket_id']} lacks a trustworthy full review")
+            require(entry["reviewed_head"] == full_review["reviewed_head"], "ticket floor reviewed head mismatch")
+            triggers = (
+                entry.get("exact_commit_review_invalidated") is True,
+                entry.get("protected_surface_participates") is True,
+                entry.get("unreviewed_integration_change") is True,
+            )
+            if entry["applies"]:
+                require(any(triggers), "applicable ticket floor lacks integration-risk evidence")
+                require(entry["review_reused"] is False, "an applicable ticket floor cannot be marked reused")
+                applicable_settings.append((full_review["actual_model"], full_review["actual_reasoning_effort"]))
+            else:
+                require(not any(triggers), "non-applicable ticket floor contains an applicability trigger")
+                require(entry["review_reused"] is True, "non-applicable ticket review must be explicitly reused")
+        floor = strongest_review_setting(applicable_settings)
         selected = matrix_expected[:2]
-        if (scope == "initial" or material) and SETTING_ORDER[floor] > SETTING_ORDER[selected]:
-            selected = floor
+        final_conformance = matrix_expected[2]
+        if (scope == "initial" or material) and floor is not None:
+            selected_name = setting_name(selected)
+            floor_name = setting_name(floor)
+            if floor_name not in FOLLOWUP_CEILING_COMPATIBILITY[selected_name]:
+                selected = floor
+            if selected[1] == "max" and not bool(event.get("reasoning_authorized")):
+                selected = ("gpt-5.6-sol", "xhigh")
+                final_conformance = "documented-fallback"
         if scope == "followup":
-            baseline = (history[0]["actual_model"], history[0]["actual_reasoning_effort"])
-            require(SETTING_ORDER[selected] <= SETTING_ORDER[baseline], "final followup review cannot exceed its full-review baseline")
+            full_history = [entry for entry in history if entry.get("review_kind") == "full"]
+            require(full_history, "final followup review requires a trustworthy full-review baseline")
+            baseline = (full_history[-1]["actual_model"], full_history[-1]["actual_reasoning_effort"])
+            baseline_name = setting_name(baseline)
+            require(
+                setting_name(selected) in FOLLOWUP_CEILING_COMPATIBILITY.get(baseline_name, set()),
+                "final followup review cannot exceed its full-review baseline",
+            )
         require((event["model"], event["reasoning_effort"]) == selected, "final review setting does not satisfy matrix and applicable floor")
-        require(event["routing_conformance"] == matrix_expected[2], "final review routing conformance mismatch")
+        require(event["routing_conformance"] == final_conformance, "final review routing conformance mismatch")
+        auth_expected = (selected[0], selected[1], final_conformance)
+        validate_reasoning_authorization(
+            proc, event, auth_expected, stage="final-review",
+            ticket_id="run", head=final["pull_request"]["head_commit"],
+        )
         unity_requirement = event_unity_requirement(proc, event)
         add_phase(
             proc, key=event["phase_key"], ticket_id=None, kind="final_review",
@@ -1947,6 +2461,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "reviewed_head": event["reviewed_head"], "status": event["status"],
             "actual_model": completed["requested_model"],
             "actual_reasoning_effort": completed["requested_reasoning_effort"],
+            "routing_status": event["routing_conformance"],
         })
         final["status"] = "AWAITING_FINAL_FEEDBACK_COLLECTION"
         return
@@ -2086,10 +2601,16 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         context_packet = validate_compact_context(event, "final remediation dispatch")
         require(context_packet["exact_base"] == event["base_commit"], "final remediation context base mismatch")
         require(context_packet["exact_head"] == event["base_commit"], "final remediation context head mismatch")
-        expected = routed_setting(
-            IMPLEMENTATION_MATRIX, event["criticality"], event["complexity"], bool(event.get("reasoning_authorized"))
+        expected = routed_phase_setting(
+            REMEDIATION_MATRIX, event["criticality"], event["complexity"],
+            bool(event.get("reasoning_authorized")), event=event,
+            fast_path_field="mechanical_fast_path",
         )
         validate_routing(event, expected)
+        validate_reasoning_authorization(
+            proc, event, expected, stage="final-remediation",
+            ticket_id="run", head=event["base_commit"],
+        )
         unity_requirement = event_unity_requirement(proc, event)
         require(event["base_commit"] == final["pull_request"]["head_commit"], "final remediation base must match final PR head")
         add_phase(
@@ -2516,6 +3037,63 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         if active:
             actions.append({"action": "WAIT_FOR_PHASE_TRANSITION", "phase_keys": [value["phase_key"] for value in active]})
         return actions + gate_actions
+    route_validation_actions: list[dict[str, Any]] = []
+    route_validation_pending = False
+    for ticket_id, value in proc["tickets"].items():
+        if value.get("status") != "ANALYSIS_ROUTE_VALIDATION_REQUIRED":
+            continue
+        route_validation_pending = True
+        validation_phases = [
+            phase_value for phase_value in proc["phases"].values()
+            if phase_value.get("kind") == "analysis_route_validation"
+            and phase_value.get("ticket_id") == ticket_id
+        ]
+        if validation_phases and validation_phases[-1].get("launch_state") == "COMPLETED":
+            route_validation_actions.append({
+                "action": "RECORD_ANALYSIS_ROUTE_VALIDATION_RESULT",
+                "ticket_id": ticket_id,
+                "phase_key": validation_phases[-1]["phase_key"],
+                "analysis_revision": value["analysis"]["analysis_revision"],
+            })
+        elif not validation_phases:
+            route_validation_actions.append({
+                "action": "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT",
+                "ticket_id": ticket_id,
+                "analysis_revision": value["analysis"]["analysis_revision"],
+                "required_model": value["analysis_route_validation_required"]["required_model"],
+                "required_reasoning_effort": value["analysis_route_validation_required"]["required_reasoning_effort"],
+            })
+    if route_validation_pending:
+        if active:
+            route_validation_actions.append({
+                "action": "WAIT_FOR_PHASE_TRANSITION",
+                "phase_keys": [value["phase_key"] for value in active],
+            })
+        if not route_validation_actions:
+            route_validation_actions.append({
+                "action": "BLOCKED_OR_INCONSISTENT_STATE",
+                "reason": "Analysis route validation is pending without an active or completed phase.",
+            })
+        return route_validation_actions + gate_actions
+    reconciliation_required = [
+        {
+            "ticket_id": ticket_id,
+            "status": value.get("status"),
+            "required_transition": (
+                "reconcile the targeted analysis validation"
+                if value.get("status") == "ANALYSIS_RECONCILIATION_REQUIRED"
+                else "amend and revalidate the implementation contract"
+            ),
+        }
+        for ticket_id, value in proc["tickets"].items()
+        if value.get("status") in {"ANALYSIS_RECONCILIATION_REQUIRED", "NEEDS_CONTRACT_AMENDMENT"}
+    ]
+    if reconciliation_required:
+        return [{
+            "action": "BLOCKED_OR_INCONSISTENT_STATE",
+            "reason": "A failed routed validation requires an explicit reconciliation transition.",
+            "tickets": reconciliation_required,
+        }] + gate_actions
     if not proc.get("dependencies_consolidated"):
         return [{"action": "CONSOLIDATE_DEPENDENCIES"}]
 
@@ -2526,9 +3104,39 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
             return [{"action": "RECORD_DRY_RUN_REPORT_AND_USAGE_EVIDENCE"}]
         if proc.get("run_status") != "COMPLETED":
             return [{"action": "COMPLETE_RUN"}]
+    contract_actions: list[dict[str, Any]] = []
+    for ticket_id, value in proc["tickets"].items():
+        if (
+            value.get("status") == "READY_FOR_IMPLEMENTATION"
+            and value.get("analysis", {}).get("complexity") in {"HIGH", "MAXIMUM"}
+            and value.get("plan_contract_validation", {}).get("status") != "passed"
+        ):
+            phases = [
+                phase_value for phase_value in proc["phases"].values()
+                if phase_value.get("kind") == "plan_contract_validation"
+                and phase_value.get("ticket_id") == ticket_id
+            ]
+            if phases and phases[-1].get("launch_state") == "COMPLETED":
+                contract_actions.append({
+                    "action": "RECORD_PLAN_CONTRACT_VALIDATION_RESULT",
+                    "ticket_id": ticket_id,
+                    "phase_key": phases[-1]["phase_key"],
+                })
+            elif not phases:
+                contract_actions.append({
+                    "action": "RECORD_PLAN_CONTRACT_VALIDATION_DISPATCH_INTENT",
+                    "ticket_id": ticket_id,
+                })
+    if contract_actions:
+        return contract_actions + gate_actions
     ready = [
         ticket_id for ticket_id, value in proc["tickets"].items()
-        if value["status"] == "READY_FOR_IMPLEMENTATION" and dependencies_satisfied(proc, value)
+        if value["status"] == "READY_FOR_IMPLEMENTATION"
+        and dependencies_satisfied(proc, value)
+        and (
+            value.get("analysis", {}).get("complexity") not in {"HIGH", "MAXIMUM"}
+            or value.get("plan_contract_validation", {}).get("status") == "passed"
+        )
     ]
     capacity = int(proc["limits"]["max_active_execution_pairs"]) - active_execution_pairs(proc)
     if ready and capacity > 0:
@@ -2757,6 +3365,7 @@ def compact_status(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_status": proc.get("run_status"),
         "revision": proc.get("revision"),
+        "routing_policy_version": proc.get("routing_policy_version"),
         "tickets": {ticket_id: value.get("status") for ticket_id, value in proc["tickets"].items()},
         "active_phases": [
             value["phase_key"] for value in phase_inventory
@@ -2789,8 +3398,11 @@ def compact_status(state: dict[str, Any]) -> dict[str, Any]:
 def migrate_procedure(state: dict[str, Any]) -> bool:
     proc = procedure(state)
     changed = False
-    if int(proc.get("schema_version", 1)) < 6:
-        proc["schema_version"] = 6
+    if int(proc.get("schema_version", 1)) < 7:
+        proc["schema_version"] = 7
+        changed = True
+    if proc.get("routing_policy_version") != ROUTING_POLICY_VERSION:
+        proc["routing_policy_version"] = ROUTING_POLICY_VERSION
         changed = True
     if "environment" not in proc:
         proc["environment"] = {
@@ -2815,6 +3427,9 @@ def migrate_procedure(state: dict[str, Any]) -> bool:
         changed = True
     if "hidden_fallback_authorizations" not in proc:
         proc["hidden_fallback_authorizations"] = {}
+        changed = True
+    if "reasoning_authorizations" not in proc:
+        proc["reasoning_authorizations"] = {}
         changed = True
     if "pending_human_action" not in state:
         state["pending_human_action"] = None
@@ -2906,7 +3521,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             require(unity_repository is not None, "unity-mcp-local requires --unity-repository")
             unity_repository = str(Path(unity_repository).expanduser().resolve())
         timestamp = now_iso()
-        state["schema_version"] = max(int(state.get("schema_version", 0)), 6)
+        state["schema_version"] = max(int(state.get("schema_version", 0)), 7)
         state["pending_orchestrator_handoff"] = None
         state["orchestrator_rotation_policy"] = {
             "mode": "automatic-budgeted-handoff",
@@ -2918,7 +3533,8 @@ def bootstrap(args: argparse.Namespace) -> int:
             "decision_packet_max_bytes": 16_384,
         }
         state["procedure"] = {
-            "schema_version": 6,
+            "schema_version": 7,
+            "routing_policy_version": ROUTING_POLICY_VERSION,
             "revision": 0,
             "run_status": "ACTIVE",
             "base_branch": args.base_branch,
@@ -2949,6 +3565,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             },
             "phases": {},
             "hidden_fallback_authorizations": {},
+            "reasoning_authorizations": {},
             "cost_control": {
                 "status": "CLEAR",
                 "phase_token_limit": 50_000_000,

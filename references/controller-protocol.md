@@ -19,6 +19,8 @@ The deterministic controller owns:
 - ticket and train lifecycle state;
 - human-gate creation, announcement, and exact-revision resolution;
 - model-routing matrix lookup and conformance;
+- routing-policy version, phase-local route comparisons, mechanical fast-path
+  proof, and scoped Max authorizations;
 - bounded hash-addressed context-packet validation;
 - user-visible versus explicitly authorized hidden execution identity;
 - atomic implementation/acceptance-test pair creation;
@@ -216,14 +218,20 @@ The following gates are enforced as code:
 1. The orchestrator preflight is confirmed before supervision or dispatch.
 2. Supervision is active before triage.
 3. Every ticket is triaged before analysis.
-4. Every analysis uses the matrix-selected setting.
-5. Dependencies are consolidated only after all analyses are recorded.
+4. Every analysis uses the matrix-selected setting. A confirmed classification
+   that is not covered by the dispatched route triggers one targeted route
+   validation, never a second complete analysis.
+5. Dependencies are consolidated only after all analyses and any targeted
+   route validations are recorded.
    Consolidation includes file/domain/transformation inventories, an explicit
    schedule, a cumulative size budget, and rejects a parallel group with an
    unproven shared file or collision domain.
 6. A matrix-required analysis approval is announced in the main conversation
    before it can be resolved.
-7. Hard dependencies are merged before an execution pair starts.
+7. Hard dependencies are merged before an execution pair starts. `HIGH` and
+   `MAXIMUM` analysis complexity also require a routed one-turn plan-contract
+   validation. Implementation uses the validated residual implementation
+   complexity; acceptance tests use their dedicated verification matrix.
 8. Implementation and independent tests start as one atomic pair from the
    same base.
 9. Both workers finish before functional verification. The controller then
@@ -252,9 +260,11 @@ The following gates are enforced as code:
     finding is `accepted-deferred`, blocking, listed in `blocking_findings`,
     and has `pending` remediation. This transition enters remediation; it
     never makes the ticket mergeable.
-15. A follow-up review requires an exhaustive baseline, remediation, and a
+15. A follow-up review requires the latest trustworthy exhaustive baseline,
+    remediation, and a
     structured delta classification with its own verification complexity.
-16. A focused follow-up cannot use a setting above the trustworthy initial
+16. A focused follow-up cannot use a setting outside the phase-local
+    compatibility ceiling of the trustworthy full
     review ceiling.
 17. A ticket receives at most two automatic remediation cycles. One third
     cycle requires a completed root-cause checkpoint, an explicit user input
@@ -268,7 +278,9 @@ The following gates are enforced as code:
 19. Finalization freezes active work.
 20. The final train pull request exists and is no longer draft before final
     review.
-21. Final verification and final review cover the same exact PR head.
+21. Final verification and final review cover the same exact PR head. Ticket
+    review settings become final-review floors only with explicit evidence
+    that integration invalidated the review or affected its protected surface.
 22. After the final review, a feedback window of at least ten minutes covers
     Codex, CI, Copilot, and human sources on that same exact head. Every
     collected finding receives exactly one technical disposition. `timed_out`

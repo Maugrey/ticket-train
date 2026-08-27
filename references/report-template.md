@@ -44,7 +44,7 @@ dependency, and residual risk is represented in the compact digest.
 - Train branch:
 - Reasoning cap: xhigh
 - Authorized reasoning overrides:
-- Triage routing: Terra/High
+- Triage routing: Luna/Medium | Terra/Medium | Terra/High
 - Routing enforcement: strict
 - Coordination policy: compact-control-plane
 - Control-plane runner: deterministic-decision-packets
@@ -94,7 +94,7 @@ before triage, child dispatch, or repository mutation:
 ```markdown
 ## Orchestrator preflight
 
-- Recommended model and effort: Terra/High | Sol/High
+- Recommended model and effort: Terra/Medium | Terra/High | Sol/High
 - Current model and effort: <actual value> | Unknown
 - Status: recommended | acceptable-overprovisioned | underprovisioned | unknown
 - Recommendation criteria:
@@ -298,6 +298,10 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Criticality residual uncertainty:
 - Criticality confidence:
 - Complexity:
+- Residual implementation complexity:
+- Verification complexity:
+- Complexity reduction evidence:
+- Unresolved implementation difficulty:
 - Decisive complexity factors:
 - Complexity residual uncertainty:
 - Complexity confidence:
@@ -413,6 +417,10 @@ Use this compact template:
 ### <ticket-id> — Analysis revision <revision>
 
 - Classification: <intrinsic criticality> / <complexity>
+- Residual implementation complexity: <LOW | MEDIUM | HIGH | MAXIMUM>
+- Verification complexity: <LOW | MEDIUM | HIGH | MAXIMUM>
+- Complexity reduction evidence: <brief evidence | no reduction>
+- Unresolved implementation difficulty: <items | none>
 - Proportionality profile: <revision and decisive assumption>
 - Criticality basis: <credible failure, blast radius, containment and recovery>
 - Complexity basis: <decisive factors, interactions and confidence>
@@ -478,6 +486,8 @@ above.
 - Test pull request or durable integration reference:
 - Final effective intrinsic criticality:
 - Final effective complexity:
+- Residual implementation complexity used for routing:
+- Verification complexity used for acceptance-test routing:
 - Pre-implementation reconciliation:
 - Implementation contract revision:
 - Plan-contract validation: not required | passed | failed
@@ -667,7 +677,7 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Complete-review and remediation-cycle budgets:
 - Cost anomalies and root-cause checkpoints:
 - Routing nonconformities and user decisions:
-- Max/ultra authorizations and fallbacks:
+- Scoped Max authorizations and fallbacks:
 - Token measurement coverage: complete | partial | unavailable
 - Full verification results:
 - Independent acceptance coverage:

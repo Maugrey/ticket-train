@@ -131,7 +131,9 @@ If the user did not specify dry-run versus live execution, default to live only 
 
 Keep the resolved configuration fixed for the run. Apply a later change only after an explicit user instruction, then report the change in the main thread.
 
-Treat authorization for `max` or `ultra` as separate from approval mode. Ask only when routing requires it, unless the user already granted an explicit scope.
+Treat authorization for `max` as separate from approval mode. Persist its exact
+ticket/run, phase, and head scope. Ultra is outside standard routing and
+requires a separate explicit user request for delegated execution.
 
 Before triage, publish the orchestrator startup preflight required by
 [model-routing.md](references/model-routing.md). Show the recommended and
@@ -181,7 +183,8 @@ Before delegating work:
 
 Use separate user-visible Codex threads when the thread-management tools are available:
 
-- one read-only batch triage thread with an explicit `Terra/H` override;
+- one read-only batch triage thread at the Luna/M, Terra/M, or Terra/H route
+  selected by the strict triage policy;
 - one analysis thread per ticket;
 - one implementation thread per ticket branch/worktree;
 - one independent acceptance-test thread per active implementation, using a
@@ -356,7 +359,7 @@ At a high level:
    `--max-unity-editors`; execute every emitted slot transition through
    `scripts/unity_slot_adapter.py`. It initializes missing `unity-slot-N`
    worktrees before any MCP-backed phase and never falls back to cloud MCP.
-5. Recommend `Terra/H` or `Sol/H` for the orchestrator, report the current
+5. Recommend `Terra/M`, `Terra/H`, or exceptionally `Sol/H` for the orchestrator, report the current
    setting, and obtain explicit confirmation to continue.
 6. Record that confirmation as an idempotent controller event. Create and
    version the mandatory proportionality profile and transmit it
@@ -364,8 +367,10 @@ At a high level:
 7. Resolve and verify foreground or background deterministic supervision,
    bootstrap the control-plane runner, and stop before child dispatch if no
    transition-aware mechanism is reliable.
-8. Perform a short routing triage in a dedicated read-only thread with an
-   explicit `Terra/H` override, without producing a technical plan.
+8. Perform a short routing triage in a dedicated read-only thread at the exact
+   Luna/M, Terra/M, or Terra/H route selected by
+   [model-routing.md](references/model-routing.md), without producing a
+   technical plan.
    For Unity, triage also classifies the full analysis requirement as `none`,
    `editor-read`, `editor-write`, `playmode-ui`, or `build`; triage itself does
    not reserve an editor.
@@ -397,8 +402,10 @@ At a high level:
 19. Materialize compact implementation and verification contracts. For `HIGH`
     or `MAXIMUM` complexity, run the bounded plan-contract validation.
 20. Schedule only proven-independent ticket execution pairs in parallel.
-21. Route the implementation and independent acceptance-test workers from the
-    confirmed classification and verification complexity.
+21. Route implementation from effective criticality and validated residual
+    implementation complexity. Route independent acceptance tests from
+    effective criticality and verification complexity through their dedicated
+    matrix.
 22. Record one atomic `EXECUTION_PAIR_DISPATCHED` event before either task-tool
     call. Create implementation and acceptance-test branches/worktrees from
     the same exact train commit. There is no permitted standalone
@@ -514,7 +521,7 @@ Pause and report a blocker when:
 - the final pull request still has blocking Codex, Copilot, CI, or human
   findings;
 - an operation would be destructive or exceed granted authority;
-- routing requires `max` or `ultra` and user authorization has not yet been resolved;
+- routing requires `max` and its scoped user authorization has not yet been resolved;
 - a routed phase cannot be dispatched with its exact matrix-selected model and
   effort and no documented fallback applies;
 - post-dispatch verification reports an unexplained routing mismatch;

@@ -195,9 +195,12 @@ The validator checks only:
 - whether the proposed slices remain reviewable and safe.
 
 Use a fresh compact visible thread, one turn, and no repository-wide
-exploration. Route it no higher than the implementation setting and never
-above `Sol/H`; if adequate validation would require broader reasoning, return
-the contract to the original analyzer for a targeted amendment instead.
+exploration. Route it at `Terra/M` by default and at `Terra/H` only when the
+compact contract contains several contradictions or a sensitive surface. If
+adequate validation would require broader exploration or Sol-level reasoning,
+return the contract to the original analyzer for a targeted amendment instead.
+The validator must return analysis, residual implementation, and verification
+complexity plus reduction evidence and unresolved implementation difficulty.
 Record this phase separately as `plan-contract-validation`.
 
 ## Implementation slices and worker self-review

@@ -191,8 +191,13 @@ The user explicitly selects tickets. Ticket Train preserves their wording and
 normalizes identifiers, descriptions, priorities, acceptance criteria,
 dependencies, references, source location, and source revision.
 
-A short `Terra/H` triage assigns provisional criticality and complexity only
-for routing. It does not replace the full analysis.
+A short triage uses Luna/Medium only for a proven mechanical fast path,
+Terra/Medium by default, and Terra/High for sensitive ambiguity or low
+confidence. It assigns provisional criticality and complexity only for
+routing; it does not replace the full analysis.
+
+Active model matrices are versioned with the controller. Superseded values are
+kept in `references/model-routing-history.md` for audit and rollback.
 
 ### 2. Parallel analysis and consolidation
 

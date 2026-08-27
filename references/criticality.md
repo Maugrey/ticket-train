@@ -173,6 +173,21 @@ when containment, detection, rollback, and repair are reliable.
 
 Ask: **How difficult is the work to understand, implement, and verify correctly?**
 
+Record three related but distinct values:
+
+- `analysis_complexity`: difficulty of understanding the current system,
+  resolving ambiguity, choosing a design, and producing a correct contract;
+- `residual_implementation_complexity`: difficulty that remains in the coding
+  work after the contract is reconciled and validated;
+- `verification_complexity`: difficulty of constructing and exercising a
+  trustworthy oracle in the required environment.
+
+Use the matrix below for each value against the factors relevant to that
+phase. Do not lower residual implementation complexity merely because the
+analysis used a stronger model or produced a valid contract. Require
+`complexity_reduction_evidence` naming the factors actually removed and
+`unresolved_implementation_difficulty` naming those that remain.
+
 Evaluate these factors:
 
 | Factor | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
@@ -210,9 +225,9 @@ Apply these matrices to the confirmed analysis classification in `standard` and 
 
 | Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | No | No | No | **Yes** |
-| `NORMAL` | No | No | **Yes** | **Yes** |
-| `HIGH` | **Yes** | **Yes** | **Yes** | **Yes** |
+| `LOW` | No | No | No | No |
+| `NORMAL` | No | No | No | No |
+| `HIGH` | No | No | No | **Yes** |
 | `CRITICAL` | **Yes** | **Yes** | **Yes** | **Yes** |
 
 When required, do not implement until the user approves the analysis and technical plan.
@@ -229,9 +244,9 @@ Apply this matrix to the higher of the analysis classification and the effective
 
 | Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | No | No | No | No |
-| `NORMAL` | No | No | No | No |
-| `HIGH` | No | No | No | **Yes** |
+| `LOW` | No | No | No | **Yes** |
+| `NORMAL` | No | No | **Yes** | **Yes** |
+| `HIGH` | **Yes** | **Yes** | **Yes** | **Yes** |
 | `CRITICAL` | **Yes** | **Yes** | **Yes** | **Yes** |
 
 When required, do not merge into the train until automated gates are clean and the user approves the technical implementation report and required human test evidence. Do not require line-by-line human code review unless project policy or the user explicitly requires it.
