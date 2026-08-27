@@ -174,13 +174,20 @@ def supervision_issues(state: dict[str, Any]) -> list[str]:
         return ["supervision object is required while work remains active"]
     if supervision.get("status") != "ACTIVE":
         issues.append("supervision.status must be ACTIVE while work remains active")
-    if supervision.get("mode") not in {"FOREGROUND_WAIT", "BACKGROUND_WATCHER"}:
-        issues.append("supervision.mode must be FOREGROUND_WAIT or BACKGROUND_WATCHER")
+    if supervision.get("mode") not in {"FOREGROUND_WAIT", "EVENT_CALLBACK", "BACKGROUND_WATCHER"}:
+        issues.append("supervision.mode must be FOREGROUND_WAIT, EVENT_CALLBACK, or BACKGROUND_WATCHER")
     if supervision.get("mode") == "BACKGROUND_WATCHER" and not supervision.get("watcher_id"):
         issues.append("background supervision requires watcher_id")
-    for field in ("last_check_at", "next_check_at"):
-        if not supervision.get(field):
-            issues.append(f"supervision.{field} is required")
+    if supervision.get("mode") == "BACKGROUND_WATCHER" and supervision.get("watcher_consumes_model_tokens") is not False:
+        issues.append("background supervision must be verified as a zero-model process")
+    if supervision.get("mode") == "EVENT_CALLBACK" and supervision.get("callback_verified") is not True:
+        issues.append("event-callback supervision must be verified")
+    if supervision.get("mode") == "EVENT_CALLBACK" and not supervision.get("callback_target_thread_id"):
+        issues.append("event-callback supervision requires callback_target_thread_id")
+    if supervision.get("mode") != "EVENT_CALLBACK":
+        for field in ("last_check_at", "next_check_at"):
+            if not supervision.get(field):
+                issues.append(f"supervision.{field} is required")
     return issues
 
 

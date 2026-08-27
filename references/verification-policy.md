@@ -119,6 +119,14 @@ The resulting ticket pull request into the train must contain production code,
 worker unit tests, and independent acceptance tests. Do not merge the
 acceptance-test branch directly into the train.
 
+For `unity-mcp-local`, an editor-backed implementation or acceptance-test
+phase uses a leased persistent `unity-slot-N` worktree instead of a disposable
+worktree. The branches and independence rules above do not change. Each phase
+declares whether it needs `none`, `editor-read`, `editor-write`, `playmode-ui`,
+or `build`; only editor-backed phases consume the global pool. The default is
+three simultaneously leased editors, including analysis and verification
+leases. See [unity-mcp-local.md](unity-mcp-local.md).
+
 ## Independent acceptance-test worker
 
 Give the worker only:
@@ -165,6 +173,12 @@ Execute red, green, environment, migration, and project-required commands with
 worktree, expected Git head, and argv list for every command. The runner writes
 full stdout/stderr logs outside the repository, verifies that the head did not
 change, and returns a hashed structured result with `model_tokens = 0`.
+
+When a verification plan includes Unity Editor, Play Mode, UI, or build tools,
+first acquire the controller-authorized slot at the exact tested head. Invoke
+the local MCP through that editor only. The slot lease is execution evidence;
+it does not replace `verification_runner.py` results, exact-head checks, or
+captured logs.
 
 The controller accepts both `passed` and `failed` runner results so failure
 evidence is durable. It allows review only after a passing result. A model may

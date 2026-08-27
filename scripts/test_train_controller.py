@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_registry
 import train_controller
+import control_plane_runner
 import merge_pull_request
 
 
@@ -26,6 +27,8 @@ class Harness:
         tickets: str = "T-1",
         approval_mode: str = "full-auto",
         execution_mode: str = "live",
+        environment_profile: str = "generic",
+        max_unity_editors: int = 3,
     ) -> None:
         self.root = root
         init = argparse.Namespace(
@@ -45,7 +48,12 @@ class Harness:
             self.assert_code(run_registry.init_run(init), 0)
         self.path = root / "runs" / "run-test" / "manifest.json"
         bootstrap = argparse.Namespace(
-            state=self.path, base_branch="main", approval_mode=approval_mode
+            state=self.path,
+            base_branch="main",
+            approval_mode=approval_mode,
+            environment_profile=environment_profile,
+            max_unity_editors=max_unity_editors,
+            unity_repository=(root / "unity-project") if environment_profile == "unity-mcp-local" else None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
             self.assert_code(train_controller.bootstrap(bootstrap), 0)
@@ -147,6 +155,7 @@ class Harness:
                 analysis_model=analysis_model,
                 analysis_reasoning_effort=analysis_effort,
                 analysis_routing_conformance="conformant",
+                analysis_unity_requirement="none",
                 reasoning_authorized=True,
             ),
             0,
@@ -162,6 +171,7 @@ class Harness:
                 reasoning_effort=analysis_effort,
                 routing_conformance="conformant",
                 reasoning_authorized=True,
+                unity_requirement="none",
                 context_packet=self.context_packet("base-sha", "base-sha"),
             ),
             0,
@@ -214,7 +224,12 @@ class Harness:
             0,
         )
 
-    def dispatch_pair(self) -> None:
+    def dispatch_pair(
+        self,
+        implementation_unity_requirement: str = "none",
+        acceptance_unity_requirement: str = "none",
+        verification_unity_requirement: str = "none",
+    ) -> None:
         self.assert_code(
             self.apply(
                 "EXECUTION_PAIR_DISPATCHED",
@@ -231,6 +246,9 @@ class Harness:
                 acceptance_model="gpt-5.6-terra",
                 acceptance_reasoning_effort="high",
                 acceptance_routing_conformance="conformant",
+                implementation_unity_requirement=implementation_unity_requirement,
+                acceptance_unity_requirement=acceptance_unity_requirement,
+                verification_unity_requirement=verification_unity_requirement,
                 reasoning_authorized=True,
                 implementation_context_packet=self.context_packet("base-sha", "base-sha"),
                 acceptance_context_packet=self.context_packet("base-sha", "base-sha"),
@@ -282,6 +300,18 @@ class Harness:
         self.materialize("run:T-1:acceptance:1", "thread-tests")
         self.complete_phase("run:T-1:implementation:1", "gpt-5.6-terra", "medium")
         self.complete_phase("run:T-1:acceptance:1", "gpt-5.6-terra", "high")
+        self.assert_code(
+            self.apply(
+                "EXECUTION_PAIR_INTEGRATED",
+                ticket_id="T-1",
+                implementation_branch="codex/t-1",
+                implementation_commit="ticket-sha",
+                acceptance_commit="ticket-sha",
+                combined_head="ticket-sha",
+                integration_evidence_reference="logs/execution-pair-integration.json",
+            ),
+            0,
+        )
         self.assert_code(
             self.apply(
                 "VERIFICATION_RECORDED",
@@ -421,7 +451,6 @@ class TrainControllerTests(unittest.TestCase):
             ),
             0,
         )
-
         self.assertEqual(
             run.apply(
                 "FINAL_VERIFICATION_RECORDED",
@@ -477,6 +506,155 @@ class TrainControllerTests(unittest.TestCase):
             0,
         )
 
+    @staticmethod
+    def configure_unity(run: Harness, slot_count: int = 3) -> None:
+        slots = [
+            {
+                "slot_id": f"unity-slot-{index}",
+                "path": f"C:/unity-slots/unity-slot-{index}",
+                "status": "IDLE",
+                "config_profile_sha256": f"{index}" * 64,
+            }
+            for index in range(1, slot_count + 1)
+        ]
+        run.assert_code(
+            run.apply(
+                "UNITY_ENVIRONMENT_CONFIGURED",
+                registry_reference="C:/state/unity-slots.json",
+                repository=run.state()["procedure"]["environment"]["repository"],
+                slot_root="C:/unity-slots",
+                max_editors=slot_count,
+                mcp_mode="local",
+                cli_package="unity-mcp-cli@0.90.0",
+                plugin_package="com.ivanmurzak.unity.mcp@0.90.0",
+                slots=slots,
+            ),
+            0,
+        )
+
+    def test_unity_profile_defaults_to_three_slots_and_initializes_before_triage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(Path(directory), environment_profile="unity-mcp-local")
+            self.assertEqual(run.state()["procedure"]["limits"]["max_unity_editors"], 3)
+            run.confirm()
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "INITIALIZE_UNITY_SLOTS_DETERMINISTICALLY")
+            self.assertEqual(action["max_editors"], 3)
+            self.assertEqual(action["mcp_mode"], "local")
+
+    def test_unity_editor_limit_can_be_overridden_at_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(
+                Path(directory),
+                environment_profile="unity-mcp-local",
+                max_unity_editors=5,
+            )
+            self.assertEqual(run.state()["procedure"]["limits"]["max_unity_editors"], 5)
+
+    def test_unity_phase_must_acquire_slot_before_visible_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(Path(directory), environment_profile="unity-mcp-local")
+            run.confirm()
+            self.configure_unity(run)
+            self.assertEqual(
+                run.apply(
+                    "PHASE_DISPATCHED",
+                    kind="analysis_reconciliation",
+                    ticket_id="T-1",
+                    phase_key="run:T-1:reconcile:1",
+                    base_commit="base-sha",
+                    model="gpt-5.6-sol",
+                    reasoning_effort="high",
+                    unity_requirement="editor-read",
+                    context_packet=run.context_packet("base-sha", "base-sha"),
+                ),
+                0,
+            )
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY")
+            self.assertEqual(action["requirement"], "editor-read")
+            self.assertEqual(run.apply(
+                "PHASE_LAUNCH_OBSERVED",
+                phase_key="run:T-1:reconcile:1",
+                launch_state="RUNNING",
+                thread_id="thread-reconcile",
+                visibility_verified=True,
+                execution_visibility="user-visible",
+                visibility_evidence_reference="tasks/thread-reconcile.json",
+            ), 2)
+            self.assertEqual(run.apply(
+                "UNITY_SLOT_ACQUIRED",
+                owner_key="run:T-1:reconcile:1",
+                slot_id="unity-slot-1",
+                lease_id="lease-1",
+                requirement="editor-read",
+                path="C:/unity-slots/unity-slot-1",
+                branch=None,
+                expected_head="base-sha",
+                observed_head="base-sha",
+                readiness_evidence_reference="C:/state/readiness-1.json",
+            ), 0)
+            self.assertEqual(train_controller.next_actions(run.state())[0]["action"], "DISPATCH_VISIBLE_PHASE")
+            self.assertEqual(run.apply(
+                "PHASE_LAUNCH_OBSERVED",
+                phase_key="run:T-1:reconcile:1",
+                launch_state="RUNNING",
+                thread_id="thread-reconcile",
+                visibility_verified=True,
+                execution_visibility="user-visible",
+                visibility_evidence_reference="tasks/thread-reconcile.json",
+            ), 0)
+            run.complete_phase("run:T-1:reconcile:1", "gpt-5.6-sol", "high")
+            release = train_controller.next_actions(run.state())[0]
+            self.assertEqual(release["action"], "RELEASE_UNITY_SLOT_DETERMINISTICALLY")
+            self.assertEqual(release["slot_id"], "unity-slot-1")
+
+    def test_unity_configuration_rejects_cloud_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(Path(directory), environment_profile="unity-mcp-local")
+            run.confirm()
+            self.assertEqual(run.apply(
+                "UNITY_ENVIRONMENT_CONFIGURED",
+                registry_reference="C:/state/unity-slots.json",
+                repository=run.state()["procedure"]["environment"]["repository"],
+                slot_root="C:/unity-slots",
+                max_editors=3,
+                mcp_mode="cloud",
+                cli_package="unity-mcp-cli@0.90.0",
+                plugin_package="com.ivanmurzak.unity.mcp@0.90.0",
+                slots=[{
+                    "slot_id": f"unity-slot-{index}",
+                    "path": f"C:/unity-slots/unity-slot-{index}",
+                    "status": "IDLE",
+                    "config_profile_sha256": f"{index}" * 64,
+                } for index in range(1, 4)],
+            ), 2)
+
+    def test_unity_execution_pair_shares_one_global_editor_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(
+                Path(directory),
+                environment_profile="unity-mcp-local",
+                max_unity_editors=1,
+            )
+            run.confirm()
+            self.configure_unity(run, slot_count=1)
+            run.analyze()
+            run.dispatch_pair(
+                implementation_unity_requirement="editor-write",
+                acceptance_unity_requirement="playmode-ui",
+                verification_unity_requirement="playmode-ui",
+            )
+            actions = train_controller.next_actions(run.state())
+            self.assertEqual(
+                [action["action"] for action in actions],
+                ["ACQUIRE_UNITY_SLOT_DETERMINISTICALLY", "WAIT_FOR_UNITY_SLOT"],
+            )
+            self.assertEqual(
+                {action["owner_key"] for action in actions},
+                {"run:T-1:implementation:1", "run:T-1:acceptance:1"},
+            )
+
     def test_foreground_wait_cannot_yield_with_a_running_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
@@ -501,6 +679,107 @@ class TrainControllerTests(unittest.TestCase):
                     2,
                 )
             self.assertIn("foreground supervision cannot survive", output.getvalue())
+
+    def test_verified_event_callback_can_supervise_visible_child_without_polling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.assertEqual(run.apply("ORCHESTRATOR_CONFIRMED"), 0)
+            self.assertEqual(
+                run.apply(
+                    "SUPERVISION_CONFIGURED",
+                    mode="EVENT_CALLBACK",
+                    callback_verified=True,
+                    callback_target_thread_id="thread-main",
+                ),
+                0,
+            )
+            self.assertEqual(
+                run.apply(
+                    "PHASE_DISPATCHED",
+                    kind="triage",
+                    phase_key="run:run:triage:1",
+                    base_commit="base-sha",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="high",
+                    context_packet=run.context_packet("base-sha", "base-sha"),
+                ),
+                0,
+            )
+            dispatch = train_controller.next_actions(run.state())[0]
+            self.assertEqual(dispatch["action"], "DISPATCH_VISIBLE_PHASE")
+            self.assertEqual(dispatch["completion_callback"]["target_thread_id"], "thread-main")
+            self.assertIn("needs_input", dispatch["completion_callback"]["notify_on"])
+            packet_output = io.StringIO()
+            with contextlib.redirect_stdout(packet_output):
+                self.assertEqual(
+                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None)),
+                    0,
+                )
+            packet_result = json.loads(packet_output.getvalue())
+            packet = json.loads(Path(packet_result["packet_reference"]).read_text(encoding="utf-8"))
+            self.assertEqual(packet["next_actions"][0]["executor_kind"], "adapter")
+            self.assertEqual(
+                packet["next_actions"][0]["completion_callback"]["target_thread_id"],
+                "thread-main",
+            )
+            run.materialize("run:run:triage:1", "thread-triage")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    train_controller.check(argparse.Namespace(state=run.path, mode="yield")),
+                    0,
+                )
+            handed_off = run.state()
+            handed_off["orchestrator_lease"]["owner_thread_id"] = "thread-successor"
+            run_registry.save_json(run.path, handed_off)
+            reconfigure = train_controller.next_actions(run.state())[0]
+            self.assertEqual(
+                reconfigure["action"],
+                "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER",
+            )
+            self.assertEqual(reconfigure["target_thread_id"], "thread-successor")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    train_controller.check(argparse.Namespace(state=run.path, mode="yield")),
+                    2,
+                )
+            self.assertEqual(
+                run.apply(
+                    "SUPERVISION_CONFIGURED",
+                    mode="EVENT_CALLBACK",
+                    callback_verified=True,
+                    callback_target_thread_id="thread-successor",
+                ),
+                0,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    train_controller.check(argparse.Namespace(state=run.path, mode="yield")),
+                    0,
+                )
+
+    def test_model_waking_recurring_watcher_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.assertEqual(run.apply("ORCHESTRATOR_CONFIRMED"), 0)
+            self.assertEqual(
+                run.apply(
+                    "SUPERVISION_CONFIGURED",
+                    mode="BACKGROUND_WATCHER",
+                    watcher_id="codex-heartbeat-automation",
+                    watcher_consumes_model_tokens=True,
+                ),
+                2,
+            )
+            legacy = run.state()
+            legacy["procedure"]["supervision"] = {
+                "status": "ACTIVE",
+                "mode": "BACKGROUND_WATCHER",
+                "watcher_id": "legacy-codex-heartbeat",
+            }
+            run_registry.save_json(run.path, legacy)
+            replacement = train_controller.next_actions(run.state())[0]
+            self.assertEqual(replacement["action"], "REPLACE_MODEL_WAKING_WATCHER")
+            self.assertIn("EVENT_CALLBACK", replacement["allowed_replacements"])
 
     def test_ticket_merge_permit_requires_reconciled_ci_and_copilot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -759,6 +1038,62 @@ class TrainControllerTests(unittest.TestCase):
                 run.state()["procedure"]["phases"]["run:T-1:implementation:1"]["launch_state"],
                 "RUNNING",
             )
+
+    def test_blocked_analysis_launch_offers_a_fresh_retry_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            model, effort = train_controller.setting_from_matrix(
+                train_controller.ANALYSIS_MATRIX, "LOW", "LOW"
+            )
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="triage",
+                phase_key="run:run:triage:1",
+                base_commit="base-sha",
+                model="gpt-5.6-terra",
+                reasoning_effort="high",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            run.materialize("run:run:triage:1", "thread-triage")
+            run.complete_phase("run:run:triage:1", "gpt-5.6-terra", "high")
+            self.assertEqual(run.apply(
+                "TICKET_TRIAGED",
+                ticket_id="T-1",
+                phase_key="run:run:triage:1",
+                criticality="LOW",
+                complexity="LOW",
+                triage_model="gpt-5.6-terra",
+                triage_reasoning_effort="high",
+                analysis_model=model,
+                analysis_reasoning_effort=effort,
+                analysis_routing_conformance="conformant",
+                analysis_unity_requirement="none",
+                reasoning_authorized=True,
+            ), 0)
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="analysis",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis:1",
+                base_commit="base-sha",
+                model=model,
+                reasoning_effort=effort,
+                routing_conformance="conformant",
+                reasoning_authorized=True,
+                unity_requirement="none",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            self.assertEqual(run.apply(
+                "PHASE_LAUNCH_OBSERVED",
+                phase_key="run:T-1:analysis:1",
+                launch_state="BLOCKED",
+                reconciliation_evidence_reference="logs/launch-reconciliation.json",
+            ), 0)
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "RECORD_ANALYSIS_DISPATCH_INTENT")
+            self.assertEqual(action["ticket_id"], "T-1")
+            self.assertEqual(action["retry_of_phase_key"], "run:T-1:analysis:1")
 
     def test_hidden_phase_requires_phase_specific_user_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1075,8 +1410,50 @@ class TrainControllerTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(train_controller.heartbeat(heartbeat_args), 0)
             pulse = json.loads(output.getvalue())
-            self.assertEqual(pulse["heartbeat_decision"], "NOTIFY_ACTION_REQUIRED")
-            self.assertFalse(pulse["may_pause_or_delete_watcher"])
+            self.assertEqual(pulse["heartbeat_decision"], "WAIT_FOR_HUMAN_WITHOUT_WATCHER")
+            self.assertEqual(pulse["supervision_projection"]["activity_state"], "AWAITING_HUMAN_ONLY")
+            self.assertEqual(pulse["active_visible_tasks"], [])
+            self.assertTrue(pulse["may_pause_or_delete_watcher"])
+            self.assertFalse(pulse["requires_model_wake"])
+            self.assertEqual(
+                run.apply("SUPERVISION_PAUSED_FOR_HUMAN_GATE"),
+                0,
+            )
+            self.assertEqual(
+                run.state()["procedure"]["supervision"]["status"],
+                "PAUSED_HUMAN_GATE",
+            )
+            self.assertEqual(train_controller.next_actions(run.state())[0]["action"], "AWAIT_HUMAN_GATE")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(train_controller.check(check_args), 0)
+                self.assertEqual(
+                    control_plane_runner.record_activity(argparse.Namespace(
+                        state=run.path,
+                        thread_id="thread-main",
+                        baseline_total_tokens=0,
+                        latest_total_tokens=25_000_000,
+                        model_wakes=50,
+                        tool_calls=500,
+                        context_compactions=1,
+                    )),
+                    0,
+                )
+            first_step = io.StringIO()
+            with contextlib.redirect_stdout(first_step):
+                self.assertEqual(
+                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None)),
+                    0,
+                )
+            self.assertEqual(json.loads(first_step.getvalue())["wake_kind"], "NO_MODEL_WAKE")
+            repeated_step = io.StringIO()
+            with contextlib.redirect_stdout(repeated_step):
+                self.assertEqual(
+                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None)),
+                    0,
+                )
+            repeated = json.loads(repeated_step.getvalue())
+            self.assertEqual(repeated["status"], "unchanged-suppressed")
+            self.assertEqual(repeated["wake_kind"], "NO_MODEL_WAKE")
             self.assertEqual(
                 run.apply(
                     "INPUT_PROVIDED",
@@ -1089,6 +1466,60 @@ class TrainControllerTests(unittest.TestCase):
             )
             self.assertIsNone(run.state()["pending_human_action"])
             self.assertEqual(run.state()["procedure"]["tickets"]["T-1"]["status"], "READY_FOR_IMPLEMENTATION")
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "CONFIGURE_SUPERVISION_BEFORE_DISPATCH",
+            )
+
+    def test_visible_running_children_are_the_primary_progress_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.dispatch_pair()
+            run.materialize("run:T-1:implementation:1", "thread-impl")
+            run.materialize("run:T-1:acceptance:1", "thread-tests")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    train_controller.heartbeat(argparse.Namespace(state=run.path)),
+                    0,
+                )
+            pulse = json.loads(output.getvalue())
+            self.assertEqual(pulse["heartbeat_decision"], "WAIT_FOR_VISIBLE_TASK_TRANSITION")
+            self.assertEqual(pulse["supervision_projection"]["activity_state"], "ACTIVE_VISIBLE_TASKS")
+            self.assertEqual(pulse["supervision_projection"]["user_signal"], "visible-child-tasks")
+            self.assertEqual(len(pulse["active_visible_tasks"]), 2)
+            self.assertFalse(pulse["requires_model_wake"])
+            self.assertFalse(pulse["may_pause_or_delete_watcher"])
+
+    def test_active_phase_without_verified_visible_thread_is_escalated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.dispatch_pair()
+            for phase_key in ("run:T-1:implementation:1", "run:T-1:acceptance:1"):
+                self.assertEqual(
+                    run.apply(
+                        "PHASE_LAUNCH_OBSERVED",
+                        phase_key=phase_key,
+                        launch_state="QUEUED",
+                        client_thread_id=f"client-{phase_key}",
+                    ),
+                    0,
+                )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    train_controller.heartbeat(argparse.Namespace(state=run.path)),
+                    0,
+                )
+            pulse = json.loads(output.getvalue())
+            self.assertEqual(pulse["heartbeat_decision"], "ESCALATE_VISIBILITY_GAP")
+            self.assertTrue(pulse["requires_model_wake"])
+            self.assertEqual(pulse["active_visible_tasks"], [])
+            self.assertEqual(len(pulse["active_unverified_or_hidden_phases"]), 2)
 
     def test_phase_needing_input_cannot_become_a_silent_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1500,6 +1931,10 @@ class TrainControllerTests(unittest.TestCase):
                     analysis_reports_ready=True,
                     task_inventory_ready=True,
                     completion_report_ready=True,
+                    orchestration_metrics_ready=True,
+                    orchestration_metrics_status="complete",
+                    orchestration_metrics_reference="reports/dry-run-orchestration-metrics.json",
+                    orchestration_metrics_sha256="e" * 64,
                     ledger_reference="reports/dry-run-token-ledger.json",
                     ledger_sha256="d" * 64,
                     authoritative_phase_count=2,
@@ -1652,6 +2087,10 @@ class TrainControllerTests(unittest.TestCase):
                     attention_points_summary_ready=True,
                     task_inventory_ready=True,
                     completion_report_ready=True,
+                    orchestration_metrics_ready=True,
+                    orchestration_metrics_status="complete",
+                    orchestration_metrics_reference="reports/orchestration-metrics.json",
+                    orchestration_metrics_sha256="e" * 64,
                     ledger_reference="reports/token-ledger.json",
                     ledger_sha256="c" * 64,
                     authoritative_phase_count=5,

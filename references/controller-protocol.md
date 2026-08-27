@@ -30,7 +30,10 @@ The deterministic controller owns:
 - deterministic zero-token command evidence and token-cost circuit breakers;
 - explicit information requests, their main-thread announcement, and
   same-thread phase resumption after a user answer;
-- the list of allowed next actions.
+- the list of allowed next actions;
+- for the `unity-mcp-local` profile, the global editor limit, environment
+  readiness, exclusive phase/operation leases, and refusal to launch an
+  editor-backed phase without a matching ready slot.
 
 Models retain judgment for:
 
@@ -53,6 +56,12 @@ conversation. The runner emits a maximum 16 KiB decision packet, suppresses
 unchanged waits, and requires a controlled orchestrator handoff at its context
 budget. Read [control-plane-runner.md](control-plane-runner.md).
 
+Every emitted next action includes one authoritative `executor_kind`:
+`deterministic`, `adapter`, or `technical-model`. The adapter must wrap the
+action with `orchestration_metrics.py start-action` and `finish-action`, and
+record every actual wake. The classifier fails closed when an action is absent
+from or duplicated in the taxonomy; prompts must not override it.
+
 ## Bootstrap
 
 Create or adopt the canonical run with `run_registry.py`, then bootstrap the
@@ -64,6 +73,17 @@ python scripts/train_controller.py bootstrap `
   --base-branch <main-or-master> `
   --approval-mode <standard|auto-analysis|auto-merge|full-auto>
 ```
+
+For a Unity project using local AI Game Dev MCP, also pass:
+
+```powershell
+  --environment-profile unity-mcp-local `
+  --unity-repository <absolute-unity-git-root> `
+  --max-unity-editors <count>
+```
+
+The editor count defaults to three and may be overridden by the user's launch
+prompt. The controller supports only `mcp_mode = local` for this profile.
 
 Bootstrap is idempotent. It upgrades the canonical manifest with a versioned
 `procedure` object and does not replay technical work.
@@ -127,6 +147,16 @@ launch, supervision, or progress reporting. Resolve and verify the real
 `threadId` before treating the phase as running. Under `FOREGROUND_WAIT`, the
 orchestrator must remain in the same turn and wait for transitions; the yield
 guard rejects every queued, running, or launch-unknown phase in that mode.
+`EVENT_CALLBACK` requires a verified callback target equal to the current
+orchestrator owner and injects that callback contract into each visible child
+dispatch. `BACKGROUND_WATCHER` requires both a watcher ID and deterministic
+evidence that it consumes zero model tokens. A recurring Codex automation that
+opens a model turn cannot satisfy this requirement.
+Legacy or resumed supervision without that evidence yields
+`REPLACE_MODEL_WAKING_WATCHER` before any technical action.
+An orchestrator handoff invalidates the old callback target; the controller
+blocks other actions until every active visible child and the supervision
+record target the new owner.
 
 Silence is not an event and never changes a phase to blocked. Only an
 authoritative task transition or completion envelope changes phase state.
@@ -135,6 +165,17 @@ Every dispatch also carries a descriptor produced by `context_packet.py`.
 The packet uses `fresh-compact-v1`, includes no inherited turns, names the
 exact base/head and proportionality-profile revision, is SHA-256 addressed,
 and is no larger than 64 KiB.
+
+Under `unity-mcp-local`, every technical dispatch event also records one
+`unity_requirement`: `none`, `editor-read`, `editor-write`, `playmode-ui`, or
+`build`. `TICKET_TRIAGED` records the requirement for full analysis;
+`EXECUTION_PAIR_DISPATCHED` records independent implementation, acceptance,
+and deterministic-verification requirements. The controller emits
+initialization, acquisition, wait, and release actions and rejects `QUEUED`,
+`RUNNING`, or resumed editor-backed phases without an active matching lease.
+Execute these resource transitions with `unity_slot_adapter.py`, never by
+prompt-authored editor lifecycle logic. See
+[unity-mcp-local.md](unity-mcp-local.md).
 
 ## Completion envelopes
 
@@ -185,7 +226,9 @@ The following gates are enforced as code:
 7. Hard dependencies are merged before an execution pair starts.
 8. Implementation and independent tests start as one atomic pair from the
    same base.
-9. Both workers finish before functional verification.
+9. Both workers finish before functional verification. The controller then
+   requires `EXECUTION_PAIR_INTEGRATED`, with exact implementation/test commits,
+   combined implementation-branch head, and deterministic integration evidence.
 10. Verification commands run through `verification_runner.py`, preserve the
     exact Git head, store complete logs outside the repository, and record
     `model_tokens = 0`. A failed run is recorded before technical failure
@@ -313,11 +356,25 @@ python scripts/train_controller.py heartbeat --state <run-manifest.json>
 ```
 
 The watcher may pause or delete itself only when
-`may_pause_or_delete_watcher` is true. `NOTIFY_ACTION_REQUIRED` must be
-published as an ordinary main-conversation message. `CONTINUE_AUTOMATICALLY`
-means the listed transition must execute before yielding. This prevents a
-watcher from deciding conversationally that a train is finished while the
-controller still requires verification, review, integration, or finalization.
+`may_pause_or_delete_watcher` is true. The projection distinguishes:
+
+- `WAIT_FOR_VISIBLE_TASK_TRANSITION`: verified visible child tasks are active;
+  keep deterministic supervision and emit no periodic model status;
+- `WAIT_FOR_HUMAN_WITHOUT_WATCHER`: the complete gate was already announced,
+  no technical phase or automatic action remains, and the watcher must pause
+  or delete itself before the orchestrator yields;
+- `ESCALATE_VISIBILITY_GAP`: controller state claims active work but no
+  verified user-visible task identifies it;
+- `CONTINUE_AUTOMATICALLY`: execute the listed transition before yielding.
+
+After successfully pausing or deleting the watcher for a pure human wait,
+apply `SUPERVISION_PAUSED_FOR_HUMAN_GATE`. While that state is active the only
+allowed action is `AWAIT_HUMAN_GATE`. Resolving the gate makes
+`CONFIGURE_SUPERVISION_BEFORE_DISPATCH` mandatory before work resumes. Never
+schedule a recurring model heartbeat whose only purpose is to repeat an
+approval request. This prevents a watcher from deciding conversationally that
+a train is finished while the controller still requires verification, review,
+integration, or finalization.
 
 ## Final checks
 

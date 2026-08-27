@@ -38,6 +38,7 @@ reasoning_cap = xhigh
 authorized_reasoning_overrides = none | explicit scopes
 analysis_policy = parallel-conditional
 usage_reporting = exact-if-available
+orchestration_metrics = executor-share-and-wake-audit
 routing_enforcement = strict
 triage_model = gpt-5.6-terra
 triage_reasoning_effort = high
@@ -53,8 +54,8 @@ orchestrator_context_compaction_limit = 1
 supervision_policy = event-driven-deterministic
 child_thread_visibility = user-visible
 launch_reconciliation = required
-supervision_mode = active-until-terminal
-liveness_reporting = transitions-plus-deterministic-host-notifications | explicit user override
+supervision_mode = active-while-technical-or-automatic-work-exists
+liveness_reporting = transitions-plus-visible-child-tasks | explicit user reminder override
 run_registry = canonical-required
 orchestrator_lease = single-owner
 proportionality_profile_revision = required
@@ -65,6 +66,10 @@ context_compaction_checkpoint = 1
 context_packet_max_bytes = 65536
 verification_policy = parallel-independent-red-green
 max_active_execution_pairs = 2
+environment_profile = generic | unity-mcp-local
+unity_mcp_mode = local
+max_unity_editors = 3 | explicit user override
+unity_repository = absolute local Git root when Unity profile is selected
 complete_review_limit_per_stable_scope = 1
 remediation_cycle_limit = 2
 material_files_per_train_checkpoint = 60
@@ -104,6 +109,13 @@ never bypass it conversationally.
 The model remains responsible for technical analysis, implementation, tests,
 review, and decisions. The controller is responsible for when those judgments
 may be requested or accepted.
+
+For `unity-mcp-local`, initialize missing persistent editor slots through
+`scripts/unity_slot_adapter.py` after supervision is configured. Every phase
+declares its own MCP requirement, including analysis, independent tests, and
+verification. The controller owns the global lease cap and refuses an
+editor-backed launch without readiness evidence. Read
+[unity-mcp-local.md](unity-mcp-local.md).
 
 ## Orchestrator startup preflight
 
@@ -159,6 +171,9 @@ Use these roles:
 - **Remediator:** use a fresh compact execution context while retaining the
   original ticket branch and worktree ownership.
 - **Human approver:** approve analysis plans or train integration when required by the applicable matrix and mode.
+- **Unity slot manager:** deterministically initialize, position, open, verify,
+  lease, recover, and release persistent local-editor worktrees. It makes no
+  technical product decision and consumes no model tokens.
 
 Track at least:
 
@@ -200,6 +215,11 @@ execution_pair_base
 acceptance_test_thread_id
 acceptance_test_branch
 acceptance_test_worktree
+unity_environment_profile
+max_unity_editors
+unity_requirement_by_phase
+unity_slot_id_by_active_owner
+unity_slot_registry_reference
 acceptance_test_commit
 acceptance_test_pull_request
 acceptance_coverage_status
@@ -574,10 +594,12 @@ Record that fallback through `HIDDEN_FALLBACK_AUTHORIZED` before launch. It is
 valid for one phase only. Store the actual hidden agent session ID and
 `visibility_verified = false`; never disguise hidden work as a visible task.
 
-Before the first child launch, verify either foreground transition waits or a
-run-scoped background watcher and persist its ID. If neither is reliable,
-stop before dispatch. The user must not need to add a scheduled task to make
-the train progress.
+Before the first child launch, verify a foreground transition wait, a
+child-to-orchestrator `EVENT_CALLBACK`, or a run-scoped zero-model background
+watcher. Include the callback contract in every visible child launch. A
+recurring Codex heartbeat automation is not a valid watcher. If no option is
+reliable, stop before dispatch. The user must not need to add a scheduled task
+to make the train progress.
 
 For every implementation, record one atomic execution-pair event before
 calling the task tool for either worker. Never launch implementation first and
@@ -604,6 +626,12 @@ only a newly written packet. An unchanged result returns directly to waiting
 without model narration. Do not require the user to notice a child completion
 or send a message that wakes the orchestrator.
 
+Use `supervision_projection.active_visible_tasks` as the primary progress
+signal. When verified visible children are running, the user can inspect them
+directly and the orchestrator must not publish periodic "still running"
+messages. When active phases exist without verified visible task IDs, treat it
+as a visibility anomaly and wake the adapter once to repair or report it.
+
 End the orchestrator turn only for `SUPERVISED_ACTIVE`,
 `AWAITING_REQUIRED_USER_INPUT`, `BLOCKED`, `COMPLETED`, or `CHECKPOINT`.
 `SUPERVISED_ACTIVE` requires a verified watcher or foreground wait, a current
@@ -614,7 +642,12 @@ host requires it.
 
 Every human gate uses the main-thread `ACTION REQUIRED` report and durable
 pending-action object from [run-continuity.md](run-continuity.md). Never hide a
-gate only inside heartbeat output or suppress every reminder.
+gate only inside heartbeat output. Announce it once. If unrelated visible work
+continues, keep that work supervised. If no technical phase or automatic
+action remains, the heartbeat must return
+`WAIT_FOR_HUMAN_WITHOUT_WATCHER`: pause or delete the watcher, apply
+`SUPERVISION_PAUSED_FOR_HUMAN_GATE`, and wait silently for the user. Default
+recurring approval reminders are prohibited.
 
 Treat missing information the same way: record `HUMAN_INPUT_REQUESTED` or a
 child `PHASE_TERMINATED` with `needs_input`, announce the exact question in the
@@ -623,6 +656,9 @@ after `INPUT_PROVIDED`. A generic "waiting for information" status is invalid.
 At each changed background wake, run `train_controller.py heartbeat` and
 `control_plane_runner.py step`; do not pause or delete supervision unless the
 deterministic output permits it. An unchanged wake never opens the model.
+After the user resolves a gate that paused supervision, the controller returns
+`CONFIGURE_SUPERVISION_BEFORE_DISPATCH`; restore deterministic supervision
+before any successor task starts.
 
 Use [efficiency-policy.md](efficiency-policy.md) as the pass and cost budget.
 A model turn must correspond to a transition, failure, blocker, dispatch,
@@ -695,6 +731,20 @@ An accepted controlled handoff is a sequential orchestration segment, not a
 duplicate.
 Tokens are not a weekly-credit counter; report
 that limitation and the observable cost drivers without inventing a conversion.
+
+Measure orchestration execution separately from session token accounting.
+Wrap every controller-authorized action with
+`orchestration_metrics.py start-action` and `finish-action`, using the
+`executor_kind` emitted by the control-plane packet. Record every actual model
+wake and every explicitly avoided deterministic wake. Do not create a model
+turn solely for telemetry.
+
+At checkpoints, dry-run completion, and live completion, generate the metrics
+artifact and report action-count, duration, and exact action-token shares
+separately for deterministic scripts, adapter work, and technical-model work.
+Include wake quality and measurement coverage. Persist the artifact path,
+SHA-256, and `complete`, `partial`, or `unavailable` status in the controller
+evidence before completion.
 
 ## Planning and scheduling
 

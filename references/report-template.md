@@ -10,6 +10,7 @@
 - Routing triage report
 - Dependency consolidation report
 - Token usage block
+- Orchestration execution metrics block
 - Ticket analysis report
 - Structural-impact approval digest
 - Ticket implementation report
@@ -52,8 +53,8 @@ dependency, and residual risk is represented in the compact digest.
 - Supervision policy: event-driven-deterministic
 - Child-thread visibility: user-visible
 - Launch reconciliation: required
-- Supervision mode: active-until-terminal
-- Liveness reporting: transitions plus deterministic host notifications | user override
+- Supervision mode: active while technical or automatic work exists; paused for a pure human wait
+- Liveness reporting: transitions plus visible child tasks | explicit user reminder override
 - Canonical run ID and fingerprint:
 - Orchestrator lease owner:
 - Supervisor mode and watcher ID:
@@ -70,9 +71,14 @@ dependency, and residual risk is represented in the compact digest.
 - Orchestrator startup confirmation: pending | confirmed | declined
 - Analysis policy: parallel-conditional
 - Token usage reporting: exact-if-available
+- Orchestration metrics: executor-share-and-wake-audit
 - Maximum active analyses: 5
 - Maximum active implementations: 2
 - Maximum active implementation/test pairs: 2
+- Environment profile: generic | unity-mcp-local
+- Unity MCP mode: local | not applicable
+- Maximum Unity editors: 3 | explicit user override | not applicable
+- Unity slot registry: <durable reference> | pending initialization | not applicable
 - Maximum integrated tickets: 5
 - Automated tests: mandatory
 - Independent automated review: mandatory
@@ -117,6 +123,7 @@ when the host or user requires liveness.
 - Last transition:
 - Canonical run and owner:
 - Active visible tasks: <title, ticket/phase, thread ID, state>
+- Background processing: active in visible tasks | none
 - Launch anomalies: none | <phase key, state, reconciliation progress>
 - Current gates: none | <ticket, revision, gate>
 - Next automatic action:
@@ -130,6 +137,7 @@ when the host or user requires liveness.
 - Controlled handoff: none | prepared | accepted <old -> new>
 - Context packet: <reference, bytes, SHA-256> | not yet dispatched
 - Functional verification gates: <ticket and status>
+- Unity slots: not applicable | <leased>/<limit>, <owner -> slot and requirement>
 ```
 
 Report `User action required: none` explicitly when the train should continue
@@ -188,14 +196,18 @@ leave it only in a heartbeat, child report, automation output, or status table.
 - Pull request or durable diff: not applicable | <link>
 - Blocked until your answer:
 - Work continuing independently:
+- Active visible tasks: none | <title, ticket/phase, thread ID, state>
+- Wait state: technical work continues | waiting only for your response
 - Accepted replies: `<exact reply 1>` | `<exact reply 2>` | `<feedback format>`
 ```
 
 Use explicit `No impact identified` statements. Persist the corresponding
 `pending_human_action` with `notification_status = ANNOUNCED` before yielding.
-While it remains unresolved, each liveness message repeats the heading, gate
-ID, revision, exact question, accepted replies, blocked scope, and continuing
-scope. Never reduce it to "waiting for information".
+If `Active visible tasks: none`, pause or delete supervision and do not send a
+default reminder or another model message until the user responds. If work is
+active, its visible task is the progress signal; repeat the gate only through
+an explicitly requested deterministic product reminder. Never reduce the
+request to "waiting for information".
 
 ## Routing triage report
 
@@ -214,6 +226,7 @@ Report triage as a compact batch table:
 - Triage routing actually used:
 - Triage routing conformance: conformant | documented-fallback | nonconformant
 - Triage token usage:
+- Unity full-analysis requirement by ticket: none | editor-read | editor-write | playmode-ui | build
 ```
 
 Do not include an implementation plan in the triage report.
@@ -679,6 +692,7 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Copilot/comments dispositioned | complete \| pending \| unavailable \| not configured | | |
 | GitHub feedback snapshot covers final head | complete \| stale \| missing | | |
 | Token accounting reported | complete \| partial \| unavailable | | |
+| Orchestration execution metrics reported | complete \| partial \| unavailable | | |
 | Orchestrator segments included | <measured>/<known> | | |
 | Hidden sessions reconciled | yes \| no | | |
 | Authoritative phases measured | <measured>/<authoritative> | | |
@@ -751,6 +765,28 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 - Unmeasured phases:
 - Session diagnostics: <assistant messages, tool calls, token counter events, context compactions>
 - Credit limitation: token counters do not expose weekly subscription-credit consumption
+
+### Orchestration execution metrics
+
+- Measurement status: complete | partial | unavailable
+- Durable artifact and SHA-256:
+- Completed action spans / total action spans:
+- Running action spans:
+- Action spans missing exact token deltas:
+
+| Basis | Scripted | AI total | Adapter | Technical model |
+|---|---:|---:|---:|---:|
+| Completed actions | | | | |
+| Measured duration | | | | |
+| Exact measured action tokens | | | | |
+
+- Justified model wakes:
+- Confirmed unjustified model wakes:
+- Unattributed model wakes:
+- Explicitly avoided model wakes:
+- Suppressed unchanged observations:
+- Interpretation: each percentage is reported on its own basis; no blended
+  scripted-versus-AI score is inferred.
 
 When this is the five-ticket checkpoint:
 

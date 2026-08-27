@@ -175,12 +175,15 @@ child task. Select one mode:
 
 1. `FOREGROUND_WAIT`: the orchestrator remains active and uses transition-aware
    task waits.
-2. `BACKGROUND_WATCHER`: a run-scoped recurring wake-up or monitor is created,
-   its ID is verified, and it uses the canonical manifest.
+2. `EVENT_CALLBACK`: every visible child sends its terminal or input-required
+   envelope to the verified current orchestrator task.
+3. `BACKGROUND_WATCHER`: an external run-scoped process consumes zero model
+   tokens, observes real task transitions, and uses the canonical manifest.
 
 Do not launch a child while supervision is `INACTIVE`, `UNRESOLVED`, or has no
-verified watcher in background mode. The user must never need to create a
-scheduled task to make the train advance.
+verified callback or zero-model watcher in background mode. A recurring Codex
+heartbeat automation does not qualify because each run wakes a model. The user
+must never need to create a scheduled task to make the train advance.
 
 The deterministic watcher:
 
@@ -200,13 +203,18 @@ child" into completion while verification, integration, final pull-request,
 final review, GitHub feedback collection, reporting, or another automatic
 controller action remains.
 
+Verified visible child tasks are the normal proof that processing is active.
+The watcher does not wake the orchestrator to repeat their running status. If
+an active controller phase lacks a verified visible task ID, the projection is
+`ACTIVE_WITH_VISIBILITY_GAP` and the adapter must repair or report it once.
+
 Defaults:
 
 ```text
 maximum internal supervision interval = 5 minutes
 model-authored unchanged liveness = prohibited
 unchanged liveness = deterministic product notification when required
-human-action reminders = deterministic from persisted gate
+human-action reminders = disabled unless the user explicitly opts in
 ```
 
 Any required unchanged liveness update is derived from the manifest and costs
@@ -227,9 +235,10 @@ using it. Also require `control_plane_runner.py step` to return
 action first.
 
 The procedural `train_controller.py check --mode yield` is authoritative for
-new runs and rejects active work under `FOREGROUND_WAIT`. Only a verified
-`BACKGROUND_WATCHER` with a persisted watcher ID can make
-`SUPERVISED_ACTIVE` survive the end of the current turn.
+new runs and rejects active work under `FOREGROUND_WAIT`. Only verified
+`EVENT_CALLBACK` supervision or a zero-model `BACKGROUND_WATCHER` with a
+persisted watcher ID can make `SUPERVISED_ACTIVE` survive the end of the
+current turn.
 
 ## Human actions are first-class state
 
@@ -248,8 +257,11 @@ Before yielding for a human decision:
 1. Finish safe unrelated automatic work.
 2. Publish a normal main-conversation message headed `ACTION REQUIRED`.
 3. Persist the exact gate with `notification_status = ANNOUNCED`.
-4. Run the yield guard.
-5. Keep the supervisor active for unrelated work and reminders.
+4. State explicitly whether verified visible tasks remain active.
+5. If unrelated work remains, keep its supervisor active and run the yield
+   guard.
+6. If the gate is the only remaining action, pause or delete the watcher,
+   apply `SUPERVISION_PAUSED_FOR_HUMAN_GATE`, run the yield guard, and stop.
 
 The message must include:
 
@@ -286,11 +298,14 @@ announced_at
 last_reminder_at
 ```
 
-While it remains pending, every deterministic reminder begins with `ACTION
-REQUIRED` and repeats the exact decision in compact form. Never wake the full
-orchestrator merely to reproduce unchanged gate text. When the user responds,
-resolve the exact gate revision, record the decision, clear pending state, and
-continue automatically.
+When no technical work remains, the one `ACTION REQUIRED` message must say
+`Active visible tasks: none` and `Waiting only for your response`; no recurring
+watcher or reminder runs by default. If the user explicitly requests a
+reminder, it begins with `ACTION REQUIRED`, repeats the compact decision, and
+uses a deterministic product notification. Never wake the full orchestrator
+merely to reproduce unchanged gate text. When the user responds, resolve the
+exact gate revision, clear pending state, reconfigure supervision, and continue
+automatically.
 
 For an information request, also repeat the exact question and accepted answer
 formats. Record the answer through `INPUT_PROVIDED`. If the request came from

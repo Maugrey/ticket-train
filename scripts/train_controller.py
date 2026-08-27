@@ -27,6 +27,11 @@ MAX_COMPACT_CONTEXT_BYTES = 65_536
 SHA256_HEX_LENGTH = 64
 AUTOMATIC_REMEDIATION_CYCLE_LIMIT = 2
 EXCEPTIONAL_REMEDIATION_CYCLE_INCREMENT = 1
+ENVIRONMENT_PROFILES = ("generic", "unity-mcp-local")
+UNITY_REQUIREMENTS = ("none", "editor-read", "editor-write", "playmode-ui", "build")
+UNITY_REQUIREMENT_ORDER = {value: index for index, value in enumerate(UNITY_REQUIREMENTS)}
+DEFAULT_MAX_UNITY_EDITORS = 3
+MAX_CONFIGURABLE_UNITY_EDITORS = 16
 SETTING_ORDER = {
     ("gpt-5.6-terra", "medium"): 1,
     ("gpt-5.6-terra", "high"): 2,
@@ -253,10 +258,118 @@ def phase(proc: dict[str, Any], phase_key: str) -> dict[str, Any]:
     return value
 
 
+def environment(proc: dict[str, Any]) -> dict[str, Any]:
+    value = proc.get("environment")
+    if value is None:
+        return {"profile": "generic", "status": "NOT_APPLICABLE", "mcp_mode": None, "slots": {}}
+    require(isinstance(value, dict), "procedure.environment must be an object")
+    return value
+
+
+def uses_unity_mcp(proc: dict[str, Any]) -> bool:
+    return environment(proc).get("profile") == "unity-mcp-local"
+
+
+def validate_unity_requirement(value: Any, label: str) -> str:
+    require(value in UNITY_REQUIREMENTS, f"{label} must be one of: {', '.join(UNITY_REQUIREMENTS)}")
+    return str(value)
+
+
+def event_unity_requirement(
+    proc: dict[str, Any], event: dict[str, Any], field: str = "unity_requirement"
+) -> str:
+    if not uses_unity_mcp(proc):
+        requirement = validate_unity_requirement(event.get(field, "none"), field)
+        require(requirement == "none", f"{field} requires the unity-mcp-local environment profile")
+        return requirement
+    require(field in event, f"{field} is required by the unity-mcp-local environment profile")
+    return validate_unity_requirement(event[field], field)
+
+
+def unity_slots(proc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    slots = environment(proc).get("slots", {})
+    require(isinstance(slots, dict), "Unity environment slots must be an object")
+    return slots
+
+
+def unity_lease_for_owner(proc: dict[str, Any], owner_key: str) -> tuple[str, dict[str, Any]] | None:
+    if not uses_unity_mcp(proc):
+        return None
+    for slot_id, slot in unity_slots(proc).items():
+        lease = slot.get("lease") if isinstance(slot, dict) else None
+        if isinstance(lease, dict) and lease.get("owner_key") == owner_key:
+            return slot_id, lease
+    return None
+
+
+def active_unity_leases(proc: dict[str, Any]) -> int:
+    if not uses_unity_mcp(proc):
+        return 0
+    return sum(
+        1
+        for slot in unity_slots(proc).values()
+        if isinstance(slot, dict) and isinstance(slot.get("lease"), dict)
+    )
+
+
+def strongest_unity_requirement(values: list[str]) -> str:
+    normalized = [validate_unity_requirement(value, "Unity requirement") for value in values]
+    return max(normalized or ["none"], key=lambda value: UNITY_REQUIREMENT_ORDER[value])
+
+
+def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str, str | None, str]:
+    if owner_key.startswith("ticket:") and owner_key.endswith(":verification"):
+        ticket_id = owner_key[len("ticket:") : -len(":verification")]
+        item = ticket(proc, ticket_id)
+        require(
+            item.get("status") in {"AWAITING_VERIFICATION", "AWAITING_REMEDIATION_VERIFICATION"},
+            "ticket verification is not ready for a Unity slot",
+        )
+        execution = item.get("execution") or {}
+        requirement = validate_unity_requirement(
+            execution.get("verification_unity_requirement", "none"),
+            "ticket verification Unity requirement",
+        )
+        head = None
+        branch = execution.get("implementation_branch")
+        if item.get("status") == "AWAITING_REMEDIATION_VERIFICATION":
+            remediations = [
+                value for value in proc.get("phases", {}).values()
+                if value.get("ticket_id") == ticket_id
+                and value.get("kind") == "remediation"
+                and value.get("launch_state") == "COMPLETED"
+            ]
+            if remediations:
+                latest = remediations[-1]
+                head = ((latest.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
+                branch = latest.get("branch")
+        if not head and item.get("status") == "AWAITING_VERIFICATION":
+            head = execution.get("integrated_head")
+        if not head:
+            implementation = phase(proc, execution["implementation_phase_key"])
+            envelope = implementation.get("completion_envelope") or {}
+            head = (envelope.get("artifacts") or {}).get("commit")
+        require(bool(head), "ticket verification Unity slot requires an exact expected head")
+        return requirement, branch, str(head)
+    if owner_key == "run:final-verification":
+        final = proc.get("finalization", {})
+        pull_request = final.get("pull_request") or {}
+        require(bool(pull_request.get("head_commit")), "final verification Unity slot requires a final PR head")
+        requirement = final.get("verification_unity_requirement")
+        if requirement is None:
+            requirement = strongest_unity_requirement([
+                (item.get("execution") or {}).get("verification_unity_requirement", "none")
+                for item in proc.get("tickets", {}).values()
+                if isinstance(item, dict) and item.get("status") == "MERGED_INTO_TRAIN"
+            ])
+        return validate_unity_requirement(requirement, "final verification Unity requirement"), None, str(pull_request["head_commit"])
+    raise ControllerError(f"unknown Unity slot owner: {owner_key}")
+
+
 def add_phase(
     proc: dict[str, Any], *, key: str, ticket_id: str | None, kind: str,
     model: str, effort: str, branch: str | None, base: str, scope: str | None = None,
-    context_packet: dict[str, Any] | None = None,
+    context_packet: dict[str, Any] | None = None, unity_requirement: str = "none",
 ) -> None:
     phases = proc.setdefault("phases", {})
     require(isinstance(phases, dict), "procedure.phases must be an object")
@@ -276,6 +389,8 @@ def add_phase(
         "visibility_verified": False,
         "execution_visibility": None,
         "context_packet": context_packet,
+        "unity_requirement": validate_unity_requirement(unity_requirement, "phase Unity requirement"),
+        "unity_slot_lease": None,
         "completion_envelope": None,
         "created_at": now_iso(),
     }
@@ -387,6 +502,8 @@ def complete_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, Any
     item["completion_envelope"] = envelope
     item["usage_captured"] = True
     item["completed_at"] = now_iso()
+    artifacts = envelope.get("artifacts") if isinstance(envelope.get("artifacts"), dict) else {}
+    item["resume_head"] = artifacts.get("commit") or item.get("base")
     return item
 
 
@@ -425,8 +542,12 @@ def terminate_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, An
     item["completion_envelope"] = envelope
     item["usage_captured"] = True
     item["completed_at"] = now_iso()
+    artifacts = envelope.get("artifacts") if isinstance(envelope.get("artifacts"), dict) else {}
+    item["resume_head"] = artifacts.get("commit") or item.get("base")
     ticket_id = item.get("ticket_id")
     if outcome == "needs_input":
+        if uses_unity_mcp(proc) and item.get("unity_requirement") != "none" and item.get("branch"):
+            require(bool(artifacts.get("commit")), "editor-backed write phase must persist a clean resume commit before requesting input")
         require(ticket_id, "a run-level phase cannot request ticket input")
         request = envelope.get("input_request")
         require(isinstance(request, dict), "needs_input requires input_request")
@@ -469,14 +590,187 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     if event_type == "SUPERVISION_CONFIGURED":
         require(proc.get("orchestrator_confirmed") is True, "confirm orchestrator first")
         mode = event.get("mode")
-        require(mode in {"FOREGROUND_WAIT", "BACKGROUND_WATCHER"}, "invalid supervision mode")
+        require(
+            mode in {"FOREGROUND_WAIT", "EVENT_CALLBACK", "BACKGROUND_WATCHER"},
+            "invalid supervision mode",
+        )
         if mode == "BACKGROUND_WATCHER":
             require(bool(event.get("watcher_id")), "background supervision requires watcher_id")
+            require(
+                event.get("watcher_consumes_model_tokens") is False,
+                "background watcher must be a verified zero-model process",
+            )
+        if mode == "EVENT_CALLBACK":
+            owner_thread_id = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+            require(event.get("callback_verified") is True, "event callback must be verified")
+            require(
+                event.get("callback_target_thread_id") == owner_thread_id,
+                "event callback must target the current orchestrator owner",
+            )
         proc["supervision"] = {
             "status": "ACTIVE", "mode": mode, "watcher_id": event.get("watcher_id"),
             "last_check_at": event.get("last_check_at") or now_iso(),
             "next_check_at": event.get("next_check_at"),
+            "callback_verified": event.get("callback_verified") is True,
+            "callback_target_thread_id": event.get("callback_target_thread_id"),
+            "watcher_consumes_model_tokens": event.get("watcher_consumes_model_tokens"),
         }
+        state["supervision"] = dict(proc["supervision"])
+        return
+
+    if event_type == "SUPERVISION_PAUSED_FOR_HUMAN_GATE":
+        supervision = proc.get("supervision", {})
+        require(supervision.get("status") == "ACTIVE", "supervision is not active")
+        pending_action = state.get("pending_human_action")
+        require(
+            isinstance(pending_action, dict)
+            and pending_action.get("notification_status") == "ANNOUNCED",
+            "human action must be announced before supervision can pause",
+        )
+        active = [
+            value for value in proc.get("phases", {}).values()
+            if isinstance(value, dict) and value.get("launch_state") in ACTIVE_PHASE_STATES
+        ]
+        require(not active, "cannot pause supervision while a technical phase is active")
+        current_actions = next_actions(state)
+        require(
+            current_actions
+            and all(action.get("action") == "AWAIT_HUMAN_GATE" for action in current_actions),
+            "automatic or technical work remains while the human gate is pending",
+        )
+        prior_watcher_id = supervision.get("watcher_id")
+        if supervision.get("mode") == "BACKGROUND_WATCHER":
+            require(
+                event.get("watcher_id") == prior_watcher_id,
+                "paused watcher ID differs from configured supervision",
+            )
+        proc["supervision"] = {
+            "status": "PAUSED_HUMAN_GATE",
+            "mode": None,
+            "watcher_id": None,
+            "previous_watcher_id": prior_watcher_id,
+            "paused_at": event.get("paused_at") or now_iso(),
+            "pause_reason": "human-gate-only",
+        }
+        state["supervision"] = dict(proc["supervision"])
+        return
+
+    if event_type == "UNITY_ENVIRONMENT_CONFIGURED":
+        unity = environment(proc)
+        require(unity.get("profile") == "unity-mcp-local", "run does not use the unity-mcp-local profile")
+        require(unity.get("status") in {"UNINITIALIZED", "CONFIGURING"}, "Unity environment is already configured")
+        require_fields(
+            event,
+            (
+                "registry_reference", "repository", "slot_root", "max_editors",
+                "cli_package", "plugin_package", "slots",
+            ),
+            "Unity environment configuration",
+        )
+        require(event.get("mcp_mode") == "local", "ticket-train supports only local Unity MCP mode")
+        require(event["repository"] == unity.get("repository"), "Unity slot registry belongs to another local repository")
+        require(
+            event["max_editors"] == proc["limits"]["max_unity_editors"],
+            "Unity slot registry editor limit differs from the run limit",
+        )
+        require(isinstance(event["slots"], list), "Unity slots must be a list")
+        require(len(event["slots"]) >= event["max_editors"], "Unity slot registry has insufficient slots")
+        slots: dict[str, dict[str, Any]] = {}
+        for raw_slot in event["slots"]:
+            require(isinstance(raw_slot, dict), "Unity slot must be an object")
+            require_fields(raw_slot, ("slot_id", "path", "status", "config_profile_sha256"), "Unity slot")
+            require(raw_slot["slot_id"] not in slots, "duplicate Unity slot ID")
+            require(raw_slot["status"] in {"IDLE", "READY"}, "new Unity slot must be idle or ready")
+            require_sha256(raw_slot["config_profile_sha256"], "Unity slot config profile")
+            slots[raw_slot["slot_id"]] = {
+                "slot_id": raw_slot["slot_id"],
+                "path": raw_slot["path"],
+                "status": raw_slot["status"],
+                "config_profile_sha256": raw_slot["config_profile_sha256"],
+                "lease": None,
+            }
+        unity.update(
+            {
+                "status": "READY",
+                "mcp_mode": "local",
+                "registry_reference": event["registry_reference"],
+                "repository": event["repository"],
+                "slot_root": event["slot_root"],
+                "cli_package": event["cli_package"],
+                "plugin_package": event["plugin_package"],
+                "slots": slots,
+                "configured_at": now_iso(),
+            }
+        )
+        return
+
+    if event_type == "UNITY_SLOT_ACQUIRED":
+        unity = environment(proc)
+        require(unity.get("profile") == "unity-mcp-local" and unity.get("status") == "READY", "Unity environment is not ready")
+        require_fields(
+            event,
+            (
+                "owner_key", "slot_id", "lease_id", "requirement", "path",
+                "expected_head", "observed_head", "readiness_evidence_reference",
+            ),
+            "Unity slot acquisition",
+        )
+        owner_key = str(event["owner_key"])
+        requirement = validate_unity_requirement(event["requirement"], "Unity slot requirement")
+        require(requirement != "none", "a no-MCP operation cannot acquire a Unity slot")
+        if owner_key in proc["phases"]:
+            owner_phase = phase(proc, owner_key)
+            require(owner_phase.get("launch_state") in {"INTENT_RECORDED", "INPUT_READY"}, "Unity phase must acquire its slot before launch or resume")
+            require(owner_phase.get("unity_requirement") == requirement, "Unity slot requirement differs from phase requirement")
+            expected_branch = owner_phase.get("branch")
+            expected_head = (
+                owner_phase.get("resume_head")
+                if owner_phase.get("launch_state") == "INPUT_READY"
+                else owner_phase.get("base")
+            )
+        else:
+            expected_requirement, expected_branch, expected_head = expected_unity_operation(proc, owner_key)
+            require(expected_requirement == requirement, "Unity slot requirement differs from operation requirement")
+        require(event["expected_head"] == expected_head, "Unity slot expected head differs from owner head")
+        require(event["observed_head"] == expected_head, "Unity slot observed head differs from owner head")
+        require(event.get("branch") == expected_branch, "Unity slot branch differs from owner branch")
+        require(active_unity_leases(proc) < int(proc["limits"]["max_unity_editors"]), "Unity editor concurrency limit reached")
+        slots = unity_slots(proc)
+        slot = slots.get(str(event["slot_id"]))
+        require(isinstance(slot, dict), "unknown Unity slot")
+        require(slot.get("path") == event["path"], "Unity slot path differs from configured path")
+        require(not slot.get("lease"), "Unity slot is already leased")
+        lease = {
+            "lease_id": event["lease_id"],
+            "owner_key": owner_key,
+            "requirement": requirement,
+            "expected_head": expected_head,
+            "branch": expected_branch,
+            "readiness_evidence_reference": event["readiness_evidence_reference"],
+            "acquired_at": event.get("acquired_at") or now_iso(),
+        }
+        slot["lease"] = lease
+        slot["status"] = "LEASED"
+        if owner_key in proc["phases"]:
+            phase(proc, owner_key)["unity_slot_lease"] = {"slot_id": event["slot_id"], **lease}
+        return
+
+    if event_type == "UNITY_SLOT_RELEASED":
+        require_fields(event, ("owner_key", "slot_id", "lease_id", "release_evidence_reference"), "Unity slot release")
+        slots = unity_slots(proc)
+        slot = slots.get(str(event["slot_id"]))
+        require(isinstance(slot, dict) and isinstance(slot.get("lease"), dict), "Unity slot is not leased")
+        lease = slot["lease"]
+        require(lease.get("owner_key") == event["owner_key"], "Unity slot is owned by another operation")
+        require(lease.get("lease_id") == event["lease_id"], "Unity slot lease ID mismatch")
+        if event["owner_key"] in proc["phases"]:
+            owner_phase = phase(proc, event["owner_key"])
+            require(owner_phase.get("launch_state") not in ACTIVE_PHASE_STATES, "cannot release Unity slot while phase is active")
+            owner_phase["unity_slot_released_at"] = event.get("released_at") or now_iso()
+        slot["lease"] = None
+        slot["status"] = event.get("slot_status", "READY")
+        require(slot["status"] in {"READY", "IDLE"}, "released Unity slot status must be ready or idle")
+        slot["release_evidence_reference"] = event["release_evidence_reference"]
         return
 
     if event_type == "PHASE_DISPATCHED":
@@ -507,10 +801,16 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         else:
             require(ticket_id, f"{kind} requires ticket_id")
             ticket(proc, str(ticket_id))
+        unity_requirement = event_unity_requirement(
+            proc,
+            event,
+        ) if kind != "triage" else validate_unity_requirement(event.get("unity_requirement", "none"), "triage Unity requirement")
+        require(kind != "triage" or unity_requirement == "none", "batch triage cannot reserve a Unity editor")
         add_phase(
             proc, key=event["phase_key"], ticket_id=ticket_id, kind=kind,
             model=event["model"], effort=event["reasoning_effort"], branch=None,
             base=event["base_commit"], scope=event.get("scope"), context_packet=context_packet,
+            unity_requirement=unity_requirement,
         )
         return
 
@@ -525,6 +825,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         validate_routing(event, expected, "analysis_")
         require(event.get("triage_model") == "gpt-5.6-terra", "triage must use gpt-5.6-terra")
         require(event.get("triage_reasoning_effort") == "high", "triage must use high effort")
+        if uses_unity_mcp(proc):
+            event_unity_requirement(proc, event, "analysis_unity_requirement")
         item["triage"] = dict(event)
         item["status"] = "TRIAGED"
         return
@@ -746,6 +1048,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     if event_type == "PHASE_RESUMED":
         value = phase(proc, str(event.get("phase_key") or ""))
         require(value.get("launch_state") == "INPUT_READY", "phase has no provided input to resume")
+        if value.get("unity_requirement") != "none":
+            require(unity_lease_for_owner(proc, value["phase_key"]) is not None, "Unity phase must reacquire a slot before resume")
         require(event.get("thread_id") == value.get("thread_id"), "resume must continue the same visible phase thread")
         require(event.get("visibility_verified") is True, "resumed phase visibility must be verified")
         value["launch_state"] = "RUNNING"
@@ -793,22 +1097,30 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             acceptance_expected = ("gpt-5.6-terra", "high", acceptance_expected[2])
         validate_routing(event, implementation_expected, "implementation_")
         validate_routing(event, acceptance_expected, "acceptance_")
+        implementation_unity = event_unity_requirement(proc, event, "implementation_unity_requirement")
+        acceptance_unity = event_unity_requirement(proc, event, "acceptance_unity_requirement")
+        verification_unity = event_unity_requirement(proc, event, "verification_unity_requirement")
         add_phase(
             proc, key=event["implementation_phase_key"], ticket_id=event["ticket_id"], kind="implementation",
             model=event["implementation_model"], effort=event["implementation_reasoning_effort"],
             branch=event["implementation_branch"], base=event["base_commit"],
             context_packet=implementation_context,
+            unity_requirement=implementation_unity,
         )
         add_phase(
             proc, key=event["acceptance_phase_key"], ticket_id=event["ticket_id"], kind="acceptance_tests",
             model=event["acceptance_model"], effort=event["acceptance_reasoning_effort"],
             branch=event["acceptance_branch"], base=event["base_commit"],
             context_packet=acceptance_context,
+            unity_requirement=acceptance_unity,
         )
         item["execution"] = {
             "base_commit": event["base_commit"],
             "implementation_phase_key": event["implementation_phase_key"],
             "acceptance_phase_key": event["acceptance_phase_key"],
+            "implementation_branch": event["implementation_branch"],
+            "acceptance_branch": event["acceptance_branch"],
+            "verification_unity_requirement": verification_unity,
         }
         item["status"] = "EXECUTION_PAIR_RUNNING"
         return
@@ -836,6 +1148,14 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         value = phase(proc, str(event.get("phase_key") or ""))
         launch_state = event.get("launch_state")
         require(launch_state in {"QUEUED", "RUNNING", "LAUNCH_UNKNOWN", "BLOCKED"}, "invalid launch state")
+        if launch_state in {"QUEUED", "RUNNING"} and value.get("unity_requirement") != "none":
+            lease = value.get("unity_slot_lease")
+            require(isinstance(lease, dict), "editor-backed Unity phase requires an acquired slot before launch")
+            configured_lease = unity_lease_for_owner(proc, value["phase_key"])
+            require(configured_lease is not None, "Unity phase slot lease is not active")
+            slot_id, active_lease = configured_lease
+            require(slot_id == lease.get("slot_id"), "Unity phase slot ID differs from active lease")
+            require(active_lease.get("lease_id") == lease.get("lease_id"), "Unity phase lease ID mismatch")
         if launch_state == "QUEUED":
             require(bool(event.get("client_thread_id")), "queued phase requires client_thread_id")
         if launch_state == "RUNNING":
@@ -875,7 +1195,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             if all(phase(proc, execution[key])["launch_state"] == "COMPLETED" for key in (
                 "implementation_phase_key", "acceptance_phase_key"
             )):
-                item["status"] = "AWAITING_VERIFICATION"
+                item["status"] = "AWAITING_EXECUTION_INTEGRATION"
         elif completed["kind"] == "remediation":
             ticket(proc, completed["ticket_id"])["status"] = "AWAITING_REMEDIATION_VERIFICATION"
         elif completed["kind"] == "final_remediation":
@@ -886,9 +1206,40 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         terminate_phase(event, proc)
         return
 
+    if event_type == "EXECUTION_PAIR_INTEGRATED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(item.get("status") == "AWAITING_EXECUTION_INTEGRATION", "execution pair is not ready for integration")
+        require_fields(
+            event,
+            (
+                "implementation_branch", "implementation_commit", "acceptance_commit",
+                "combined_head", "integration_evidence_reference",
+            ),
+            "execution-pair integration",
+        )
+        execution = item["execution"]
+        require(event["implementation_branch"] == execution["implementation_branch"], "combined head must stay on the implementation branch")
+        implementation = phase(proc, execution["implementation_phase_key"])
+        acceptance = phase(proc, execution["acceptance_phase_key"])
+        implementation_commit = ((implementation.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
+        acceptance_commit = ((acceptance.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
+        require(event["implementation_commit"] == implementation_commit, "implementation integration commit mismatch")
+        require(event["acceptance_commit"] == acceptance_commit, "acceptance-test integration commit mismatch")
+        execution["implementation_commit"] = event["implementation_commit"]
+        execution["acceptance_commit"] = event["acceptance_commit"]
+        execution["integrated_head"] = event["combined_head"]
+        execution["integration_evidence_reference"] = event["integration_evidence_reference"]
+        item["status"] = "AWAITING_VERIFICATION"
+        return
+
     if event_type == "VERIFICATION_RECORDED":
         item = ticket(proc, str(event.get("ticket_id") or ""))
         require(item.get("status") in {"AWAITING_VERIFICATION", "AWAITING_REMEDIATION_VERIFICATION"}, "execution or remediation must complete before verification")
+        if uses_unity_mcp(proc):
+            owner_key = f"ticket:{event.get('ticket_id')}:verification"
+            requirement, _, _ = expected_unity_operation(proc, owner_key)
+            if requirement != "none":
+                require(unity_lease_for_owner(proc, owner_key) is not None, "Unity-backed ticket verification requires an active slot lease")
         require_fields(
             event,
             (
@@ -1054,10 +1405,12 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             if material:
                 require(event.get("scope_revision") != reviews[0].get("scope_revision"), "full re-review requires a new scope revision")
         validate_routing(event, expected)
+        unity_requirement = event_unity_requirement(proc, event)
         add_phase(
             proc, key=event["phase_key"], ticket_id=event["ticket_id"], kind="review",
             model=event["model"], effort=event["reasoning_effort"], branch=None,
             base=event["base_commit"], scope=scope, context_packet=context_packet,
+            unity_requirement=unity_requirement,
         )
         phase(proc, event["phase_key"])["review_kind"] = event["review_kind"]
         phase(proc, event["phase_key"])["scope_revision"] = event.get("scope_revision") or "scope-1"
@@ -1098,11 +1451,16 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 "head_commit", "ledger_status", "sources_dispositioned",
                 "feedback_collection_started_at", "feedback_collection_deadline_at",
                 "feedback_collected_at", "ci_status", "copilot_status",
-                "source_counts", "source_findings", "finding_dispositions",
-                "feedback_evidence_reference",
+                "source_counts", "feedback_evidence_reference",
             ),
             "ticket finding ledger",
         )
+        # An exact-head clean review legitimately has no source findings and
+        # therefore no dispositions.  Presence, rather than truthiness, is
+        # required for these two list fields so their empty inventories remain
+        # distinguishable from missing evidence.
+        require("source_findings" in event, "ticket finding ledger is missing: source_findings")
+        require("finding_dispositions" in event, "ticket finding ledger is missing: finding_dispositions")
         require(event["ledger_status"] == "complete", "ticket finding ledger is incomplete")
         require(isinstance(event["sources_dispositioned"], list), "sources_dispositioned must be a list")
         require(
@@ -1274,11 +1632,13 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             bool(event.get("reasoning_authorized")),
         )
         validate_routing(event, expected)
+        unity_requirement = event_unity_requirement(proc, event)
         implementation_phase = phase(proc, item["execution"]["implementation_phase_key"])
         add_phase(
             proc, key=event["phase_key"], ticket_id=event["ticket_id"], kind="remediation",
             model=event["model"], effort=event["reasoning_effort"], branch=event["branch"], base=event["base_commit"],
             context_packet=context_packet,
+            unity_requirement=unity_requirement,
         )
         phase(proc, event["phase_key"])["forbidden_thread_id"] = implementation_phase.get("thread_id")
         if cycles >= AUTOMATIC_REMEDIATION_CYCLE_LIMIT:
@@ -1349,12 +1709,19 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             (
                 "token_reporting_status", "session_usage_ledger_ready", "analysis_reports_ready",
                 "task_inventory_ready", "completion_report_ready", "ledger_reference", "ledger_sha256",
+                "orchestration_metrics_ready", "orchestration_metrics_status",
+                "orchestration_metrics_reference", "orchestration_metrics_sha256",
                 "authoritative_phase_count", "measured_phase_count", "task_inventory_requested_count",
                 "task_inventory_terminal_count",
             ),
             "dry-run evidence",
         )
         require_sha256(event["ledger_sha256"], "dry-run token ledger sha256")
+        require_sha256(event["orchestration_metrics_sha256"], "dry-run orchestration metrics sha256")
+        require(
+            event["orchestration_metrics_status"] in {"complete", "partial", "unavailable"},
+            "invalid dry-run orchestration metrics status",
+        )
         require(isinstance(event.get("orchestrator_session_included"), bool), "dry-run token evidence must state orchestrator coverage")
         require(isinstance(event.get("hidden_sessions_reconciled"), bool), "dry-run token evidence must state hidden-session reconciliation")
         require("unmeasured_phase_keys" in event and isinstance(event["unmeasured_phase_keys"], list), "dry-run evidence requires unmeasured_phase_keys")
@@ -1367,7 +1734,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             require(not event["unmeasured_phase_keys"] and not event["unmeasured_session_ids"], "complete dry-run token report has missing measurements")
         require(event["task_inventory_requested_count"] == len(proc["tickets"]), "dry-run task inventory requested count mismatch")
         require(event["task_inventory_terminal_count"] == len(proc["tickets"]), "dry-run task inventory terminal count mismatch")
-        for field in ("session_usage_ledger_ready", "analysis_reports_ready", "task_inventory_ready", "completion_report_ready"):
+        for field in (
+            "session_usage_ledger_ready", "analysis_reports_ready", "task_inventory_ready",
+            "completion_report_ready", "orchestration_metrics_ready",
+        ):
             require(event[field] is True, f"{field} must be true")
         for value in proc["tickets"].values():
             require(value.get("analysis"), "every dry-run ticket requires analysis")
@@ -1379,6 +1749,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(not any(p.get("launch_state") in ACTIVE_PHASE_STATES for p in proc["phases"].values()), "active phases remain")
         require(all(value.get("status") in TERMINAL_TICKET_STATES for value in proc["tickets"].values()), "requested tickets are not terminal")
         require(any(value.get("status") == "MERGED_INTO_TRAIN" for value in proc["tickets"].values()), "no ticket was integrated")
+        if uses_unity_mcp(proc):
+            proc["finalization"]["verification_unity_requirement"] = event_unity_requirement(
+                proc, event, "final_verification_unity_requirement"
+            )
         proc["finalization"]["status"] = "STARTED"
         proc["run_status"] = "TRAIN_FINALIZING"
         return
@@ -1450,6 +1824,13 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     if event_type == "FINAL_VERIFICATION_RECORDED":
         final = proc["finalization"]
         require(isinstance(final.get("pull_request"), dict), "final PR must exist before final verification")
+        if uses_unity_mcp(proc):
+            requirement, _, _ = expected_unity_operation(proc, "run:final-verification")
+            if requirement != "none":
+                require(
+                    unity_lease_for_owner(proc, "run:final-verification") is not None,
+                    "Unity-backed final verification requires an active slot lease",
+                )
         validate_deterministic_verification(event, "final verification")
         require(isinstance(event.get("operational_change_applicable"), bool), "final verification must classify operational-change applicability")
         if event["operational_change_applicable"]:
@@ -1508,10 +1889,12 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             require(SETTING_ORDER[selected] <= SETTING_ORDER[baseline], "final followup review cannot exceed its full-review baseline")
         require((event["model"], event["reasoning_effort"]) == selected, "final review setting does not satisfy matrix and applicable floor")
         require(event["routing_conformance"] == matrix_expected[2], "final review routing conformance mismatch")
+        unity_requirement = event_unity_requirement(proc, event)
         add_phase(
             proc, key=event["phase_key"], ticket_id=None, kind="final_review",
             model=event["model"], effort=event["reasoning_effort"], branch=None,
             base=final["pull_request"]["head_commit"], scope=scope, context_packet=context_packet,
+            unity_requirement=unity_requirement,
         )
         phase(proc, event["phase_key"])["review_kind"] = required_kind
         final["review_phase_key"] = event["phase_key"]
@@ -1707,11 +2090,13 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             IMPLEMENTATION_MATRIX, event["criticality"], event["complexity"], bool(event.get("reasoning_authorized"))
         )
         validate_routing(event, expected)
+        unity_requirement = event_unity_requirement(proc, event)
         require(event["base_commit"] == final["pull_request"]["head_commit"], "final remediation base must match final PR head")
         add_phase(
             proc, key=event["phase_key"], ticket_id=None, kind="final_remediation",
             model=event["model"], effort=event["reasoning_effort"], branch=event["branch"],
             base=event["base_commit"], scope="final", context_packet=context_packet,
+            unity_requirement=unity_requirement,
         )
         # Pull-request and merge evidence is scoped to one remediation cycle.
         # Keeping the previous cycle here makes the controller skip recording
@@ -1733,11 +2118,18 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 "session_usage_ledger_ready", "verification_summary_ready", "manual_validation_summary_ready",
                 "attention_points_summary_ready", "task_inventory_ready", "completion_report_ready",
                 "ledger_reference", "ledger_sha256", "authoritative_phase_count", "measured_phase_count",
+                "orchestration_metrics_ready", "orchestration_metrics_status",
+                "orchestration_metrics_reference", "orchestration_metrics_sha256",
                 "task_inventory_requested_count", "task_inventory_terminal_count",
             ),
             "final evidence",
         )
         require_sha256(event["ledger_sha256"], "token ledger sha256")
+        require_sha256(event["orchestration_metrics_sha256"], "orchestration metrics sha256")
+        require(
+            event["orchestration_metrics_status"] in {"complete", "partial", "unavailable"},
+            "invalid orchestration metrics status",
+        )
         require(isinstance(event.get("orchestrator_session_included"), bool), "token evidence must state orchestrator coverage")
         require(isinstance(event.get("hidden_sessions_reconciled"), bool), "token evidence must state hidden-session reconciliation")
         require("unmeasured_phase_keys" in event and isinstance(event["unmeasured_phase_keys"], list), "token evidence requires unmeasured_phase_keys")
@@ -1766,6 +2158,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         for field in (
             "session_usage_ledger_ready", "verification_summary_ready", "manual_validation_summary_ready",
             "attention_points_summary_ready", "task_inventory_ready", "completion_report_ready",
+            "orchestration_metrics_ready",
         ):
             require(event[field] is True, f"{field} must be true")
         final["evidence"] = dict(event)
@@ -1797,6 +2190,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         proc["run_status"] = "COMPLETED"
         proc["finalization"]["status"] = "COMPLETED"
         proc["supervision"]["status"] = "INACTIVE"
+        state["supervision"] = dict(proc["supervision"])
         state["run_status"] = "COMPLETED"
         return
 
@@ -1818,7 +2212,10 @@ def completion_issues(state: dict[str, Any]) -> list[str]:
     if unresolved_cost_anomalies(proc):
         issues.append("unresolved cost anomaly checkpoint remains")
     final = proc.get("finalization", {})
-    if final.get("status") != "READY_FOR_COMPLETION":
+    # RUN_COMPLETED transitions the state from READY_FOR_COMPLETION to COMPLETED.
+    # A post-transition audit must therefore accept both values; otherwise the
+    # controller reports its own successfully completed run as incomplete.
+    if final.get("status") not in {"READY_FOR_COMPLETION", "COMPLETED"}:
         issues.append("finalization evidence is incomplete")
     if state.get("execution_mode") == "dry-run":
         evidence = final.get("dry_run_evidence") or {}
@@ -1852,7 +2249,77 @@ def completion_issues(state: dict[str, Any]) -> list[str]:
             issues.append("complete token ledger omits hidden-session reconciliation")
         if evidence.get("measured_phase_count") != evidence.get("authoritative_phase_count"):
             issues.append("complete token ledger has unmeasured authoritative phases")
+    if uses_unity_mcp(proc) and active_unity_leases(proc):
+        issues.append("Unity editor slot leases remain active")
     return issues
+
+
+def unity_release_actions(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    if not uses_unity_mcp(proc) or environment(proc).get("status") != "READY":
+        return []
+    releases: list[dict[str, Any]] = []
+    for slot_id, slot in unity_slots(proc).items():
+        lease = slot.get("lease") if isinstance(slot, dict) else None
+        if not isinstance(lease, dict):
+            continue
+        owner_key = str(lease.get("owner_key") or "")
+        keep = False
+        if owner_key in proc.get("phases", {}):
+            keep = phase(proc, owner_key).get("launch_state") in ACTIVE_PHASE_STATES | {"INPUT_READY"}
+        elif owner_key.startswith("ticket:") and owner_key.endswith(":verification"):
+            ticket_id = owner_key[len("ticket:") : -len(":verification")]
+            keep = ticket(proc, ticket_id).get("status") in {
+                "AWAITING_VERIFICATION", "AWAITING_REMEDIATION_VERIFICATION",
+            }
+        elif owner_key == "run:final-verification":
+            final = proc.get("finalization", {})
+            keep = isinstance(final.get("pull_request"), dict) and not final.get("verification")
+        if not keep:
+            releases.append(
+                {
+                    "action": "RELEASE_UNITY_SLOT_DETERMINISTICALLY",
+                    "owner_key": owner_key,
+                    "slot_id": slot_id,
+                    "lease_id": lease.get("lease_id"),
+                    "registry_reference": environment(proc).get("registry_reference"),
+                    "close_editor": False,
+                    "model_tokens": 0,
+                }
+            )
+    return releases
+
+
+def unity_slot_payload(proc: dict[str, Any], owner_key: str) -> dict[str, Any] | None:
+    found = unity_lease_for_owner(proc, owner_key)
+    if found is None:
+        return None
+    slot_id, lease = found
+    slot = unity_slots(proc)[slot_id]
+    return {
+        "slot_id": slot_id,
+        "path": slot.get("path"),
+        "lease_id": lease.get("lease_id"),
+        "requirement": lease.get("requirement"),
+        "registry_reference": environment(proc).get("registry_reference"),
+        "mcp_mode": "local",
+    }
+
+
+def unity_acquire_action(
+    proc: dict[str, Any], *, owner_key: str, requirement: str, branch: str | None,
+    expected_head: str,
+) -> dict[str, Any]:
+    return {
+        "action": "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY",
+        "owner_key": owner_key,
+        "requirement": validate_unity_requirement(requirement, "Unity slot requirement"),
+        "branch": branch,
+        "expected_head": expected_head,
+        "registry_reference": environment(proc).get("registry_reference"),
+        "mcp_mode": "local",
+        "recovery_attempts": 2,
+        "model_tokens": 0,
+    }
 
 
 def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1869,11 +2336,58 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         }]
     if not proc.get("orchestrator_confirmed"):
         return [{"action": "REQUEST_ORCHESTRATOR_CONFIRMATION"}]
-    if proc.get("supervision", {}).get("status") != "ACTIVE":
+    supervision = proc.get("supervision", {})
+    current_owner_thread_id = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+    if (
+        supervision.get("status") == "ACTIVE"
+        and supervision.get("mode") == "BACKGROUND_WATCHER"
+        and supervision.get("watcher_consumes_model_tokens") is not False
+    ):
+        return [{
+            "action": "REPLACE_MODEL_WAKING_WATCHER",
+            "watcher_id": supervision.get("watcher_id"),
+            "allowed_replacements": ["FOREGROUND_WAIT", "EVENT_CALLBACK", "ZERO_MODEL_BACKGROUND_WATCHER"],
+        }]
+    if (
+        supervision.get("status") == "ACTIVE"
+        and supervision.get("mode") == "EVENT_CALLBACK"
+        and supervision.get("callback_target_thread_id") != current_owner_thread_id
+    ):
+        return [{
+            "action": "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER",
+            "target_thread_id": current_owner_thread_id,
+            "phase_keys": [
+                value.get("phase_key") for value in proc.get("phases", {}).values()
+                if isinstance(value, dict) and value.get("launch_state") in ACTIVE_PHASE_STATES
+            ],
+        }]
+    if supervision.get("status") == "PAUSED_HUMAN_GATE":
+        waiting_gates = [
+            gate for gate in proc["human_gates"].values()
+            if gate.get("status") == "PENDING_ANNOUNCED"
+        ]
+        pending_action = state.get("pending_human_action")
+        if waiting_gates and isinstance(pending_action, dict):
+            return [{"action": "AWAIT_HUMAN_GATE", "gate": gate} for gate in waiting_gates]
+    if supervision.get("status") != "ACTIVE":
         return [{"action": "CONFIGURE_SUPERVISION_BEFORE_DISPATCH"}]
     anomalies = unresolved_cost_anomalies(proc)
     if anomalies:
         return [{"action": "RESOLVE_COST_ANOMALY_CHECKPOINT", "anomalies": anomalies}]
+    if uses_unity_mcp(proc) and environment(proc).get("status") != "READY":
+        return [{
+            "action": "INITIALIZE_UNITY_SLOTS_DETERMINISTICALLY",
+            "repository": environment(proc).get("repository"),
+            "base_ref": proc.get("train_head") or proc.get("base_branch"),
+            "max_editors": proc["limits"]["max_unity_editors"],
+            "mcp_mode": "local",
+            "script": "scripts/unity_slot_manager.py",
+            "model_tokens": 0,
+        }]
+
+    releases = unity_release_actions(proc)
+    if releases:
+        return releases
 
     unannounced = [gate for gate in proc["human_gates"].values() if gate["status"] == "PENDING_UNANNOUNCED"]
     if unannounced and not state.get("pending_human_action"):
@@ -1883,8 +2397,29 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
 
     intents = [value for value in proc["phases"].values() if value.get("launch_state") == "INTENT_RECORDED"]
     if intents:
-        return [
-            {
+        actions: list[dict[str, Any]] = []
+        available_unity = max(0, int(proc["limits"].get("max_unity_editors", 0)) - active_unity_leases(proc))
+        for value in intents:
+            requirement = value.get("unity_requirement", "none")
+            slot_payload = unity_slot_payload(proc, value["phase_key"])
+            if requirement != "none" and slot_payload is None:
+                if available_unity > 0:
+                    actions.append(unity_acquire_action(
+                        proc,
+                        owner_key=value["phase_key"],
+                        requirement=requirement,
+                        branch=value.get("branch"),
+                        expected_head=value.get("resume_head") or value["base"],
+                    ))
+                    available_unity -= 1
+                else:
+                    actions.append({
+                        "action": "WAIT_FOR_UNITY_SLOT",
+                        "owner_key": value["phase_key"],
+                        "requirement": requirement,
+                    })
+                continue
+            action = {
                 "action": "DISPATCH_VISIBLE_PHASE",
                 "phase_key": value["phase_key"],
                 "kind": value["kind"],
@@ -1895,20 +2430,46 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "branch": value.get("branch"),
                 "context_packet": value.get("context_packet"),
                 "required_visibility": "user-visible",
+                "completion_callback": {
+                    "target_thread_id": (state.get("orchestrator_lease") or {}).get("owner_thread_id"),
+                    "notify_on": ["completed", "failed", "blocked", "needs_input"],
+                    "message_contract": "ticket-train-phase-envelope-v1",
+                },
             }
-            for value in intents
-        ] + gate_actions
+            if slot_payload:
+                action["unity_slot"] = slot_payload
+            actions.append(action)
+        return actions + gate_actions
     input_ready = [value for value in proc["phases"].values() if value.get("launch_state") == "INPUT_READY"]
     if input_ready:
-        return [
-            {
+        actions = []
+        available_unity = max(0, int(proc["limits"].get("max_unity_editors", 0)) - active_unity_leases(proc))
+        for value in input_ready:
+            requirement = value.get("unity_requirement", "none")
+            slot_payload = unity_slot_payload(proc, value["phase_key"])
+            if requirement != "none" and slot_payload is None:
+                if available_unity > 0:
+                    actions.append(unity_acquire_action(
+                        proc,
+                        owner_key=value["phase_key"],
+                        requirement=requirement,
+                        branch=value.get("branch"),
+                        expected_head=value.get("resume_head") or value["base"],
+                    ))
+                    available_unity -= 1
+                else:
+                    actions.append({"action": "WAIT_FOR_UNITY_SLOT", "owner_key": value["phase_key"], "requirement": requirement})
+                continue
+            action = {
                 "action": "RESUME_VISIBLE_PHASE_WITH_INPUT",
                 "phase_key": value["phase_key"],
                 "thread_id": value.get("thread_id"),
                 "provided_input": value.get("provided_input"),
             }
-            for value in input_ready
-        ] + gate_actions
+            if slot_payload:
+                action["unity_slot"] = slot_payload
+            actions.append(action)
+        return actions + gate_actions
     unknown = [value for value in proc["phases"].values() if value.get("launch_state") == "LAUNCH_UNKNOWN"]
     if unknown:
         return [{"action": "RECONCILE_AMBIGUOUS_LAUNCH", "phase_keys": [value["phase_key"] for value in unknown]}] + gate_actions
@@ -1937,8 +2498,20 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
             ]
             if analysis_phases and analysis_phases[-1].get("launch_state") == "COMPLETED":
                 actions.append({"action": "RECORD_ANALYSIS_RESULT", "ticket_id": ticket_id})
+            elif analysis_phases and analysis_phases[-1].get("launch_state") == "BLOCKED" and capacity > 0:
+                actions.append({
+                    "action": "RECORD_ANALYSIS_DISPATCH_INTENT",
+                    "ticket_id": ticket_id,
+                    "unity_requirement": proc["tickets"][ticket_id].get("triage", {}).get("analysis_unity_requirement", "none"),
+                    "retry_of_phase_key": analysis_phases[-1]["phase_key"],
+                })
+                capacity -= 1
             elif not analysis_phases and capacity > 0:
-                actions.append({"action": "RECORD_ANALYSIS_DISPATCH_INTENT", "ticket_id": ticket_id})
+                actions.append({
+                    "action": "RECORD_ANALYSIS_DISPATCH_INTENT",
+                    "ticket_id": ticket_id,
+                    "unity_requirement": proc["tickets"][ticket_id].get("triage", {}).get("analysis_unity_requirement", "none"),
+                })
                 capacity -= 1
         if active:
             actions.append({"action": "WAIT_FOR_PHASE_TRANSITION", "phase_keys": [value["phase_key"] for value in active]})
@@ -1972,10 +2545,35 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         return [{"action": "AWAIT_HUMAN_GATE", "gate": gate} for gate in waiting_gates]
 
     actions: list[dict[str, Any]] = []
+    available_unity = max(0, int(proc["limits"].get("max_unity_editors", 0)) - active_unity_leases(proc))
     for ticket_id, value in proc["tickets"].items():
         status = value["status"]
-        if status in {"AWAITING_VERIFICATION", "AWAITING_REMEDIATION_VERIFICATION"}:
-            actions.append({"action": "RUN_DETERMINISTIC_TICKET_VERIFICATION", "ticket_id": ticket_id, "model_tokens": 0})
+        if status == "AWAITING_EXECUTION_INTEGRATION":
+            actions.append({
+                "action": "INTEGRATE_EXECUTION_PAIR_DETERMINISTICALLY",
+                "ticket_id": ticket_id,
+                "implementation_branch": value.get("execution", {}).get("implementation_branch"),
+                "acceptance_branch": value.get("execution", {}).get("acceptance_branch"),
+                "model_tokens": 0,
+            })
+        elif status in {"AWAITING_VERIFICATION", "AWAITING_REMEDIATION_VERIFICATION"}:
+            owner_key = f"ticket:{ticket_id}:verification"
+            requirement, branch, expected_head = expected_unity_operation(proc, owner_key) if uses_unity_mcp(proc) else ("none", None, "")
+            slot_payload = unity_slot_payload(proc, owner_key)
+            if requirement != "none" and slot_payload is None:
+                if available_unity > 0:
+                    actions.append(unity_acquire_action(
+                        proc, owner_key=owner_key, requirement=requirement,
+                        branch=branch, expected_head=expected_head,
+                    ))
+                    available_unity -= 1
+                else:
+                    actions.append({"action": "WAIT_FOR_UNITY_SLOT", "owner_key": owner_key, "requirement": requirement})
+            else:
+                action = {"action": "RUN_DETERMINISTIC_TICKET_VERIFICATION", "ticket_id": ticket_id, "model_tokens": 0}
+                if slot_payload:
+                    action["unity_slot"] = slot_payload
+                actions.append(action)
         elif status == "VERIFICATION_FAILED":
             actions.append({"action": "CLASSIFY_VERIFICATION_FAILURE", "ticket_id": ticket_id})
         elif status == "FUNCTIONAL_READY" and (
@@ -2009,7 +2607,10 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     if all(value["status"] in TERMINAL_TICKET_STATES for value in proc["tickets"].values()):
         final = proc["finalization"]
         if final.get("status") == "NOT_STARTED":
-            return [{"action": "START_FINALIZATION"}]
+            return [{
+                "action": "START_FINALIZATION",
+                "classify_final_verification_unity_requirement": uses_unity_mcp(proc),
+            }]
         if final.get("status") == "NEEDS_FINAL_REMEDIATION":
             return [{"action": "RECORD_FINAL_REMEDIATION_DISPATCH_INTENT"}]
         if final.get("status") == "FINAL_VERIFICATION_FAILED":
@@ -2041,7 +2642,20 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         if final.get("pull_request", {}).get("is_draft") is True:
             return [{"action": "MARK_FINAL_TRAIN_PR_READY"}]
         if not final.get("verification"):
-            return [{"action": "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY", "model_tokens": 0}]
+            owner_key = "run:final-verification"
+            requirement, branch, expected_head = expected_unity_operation(proc, owner_key) if uses_unity_mcp(proc) else ("none", None, "")
+            slot_payload = unity_slot_payload(proc, owner_key)
+            if requirement != "none" and slot_payload is None:
+                if active_unity_leases(proc) < int(proc["limits"]["max_unity_editors"]):
+                    return [unity_acquire_action(
+                        proc, owner_key=owner_key, requirement=requirement,
+                        branch=branch, expected_head=expected_head,
+                    )]
+                return [{"action": "WAIT_FOR_UNITY_SLOT", "owner_key": owner_key, "requirement": requirement}]
+            action = {"action": "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY", "model_tokens": 0}
+            if slot_payload:
+                action["unity_slot"] = slot_payload
+            return [action]
         if not final.get("review"):
             if not final.get("review_phase_key"):
                 return [{"action": "RECORD_FINAL_REVIEW_DISPATCH_INTENT"}]
@@ -2053,32 +2667,142 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"action": "BLOCKED_OR_INCONSISTENT_STATE", "status": compact_status(state)}]
 
 
+def active_phase_inventory(state: dict[str, Any]) -> list[dict[str, Any]]:
+    proc = procedure(state)
+    inventory: list[dict[str, Any]] = []
+    for value in proc.get("phases", {}).values():
+        if not isinstance(value, dict) or value.get("launch_state") not in ACTIVE_PHASE_STATES:
+            continue
+        thread_id = value.get("thread_id")
+        user_visible = (
+            value.get("execution_visibility") == "user-visible"
+            and value.get("visibility_verified") is True
+            and bool(thread_id)
+        )
+        ticket_id = value.get("ticket_id") or "train"
+        kind = value.get("kind") or "phase"
+        inventory.append({
+            "phase_key": value.get("phase_key"),
+            "ticket_id": value.get("ticket_id"),
+            "kind": value.get("kind"),
+            "display_label": f"{ticket_id} · {kind}",
+            "state": value.get("launch_state"),
+            "thread_id": thread_id,
+            "client_thread_id": value.get("client_thread_id"),
+            "execution_visibility": value.get("execution_visibility"),
+            "visibility_verified": value.get("visibility_verified") is True,
+            "user_visible": user_visible,
+        })
+    return inventory
+
+
+def supervision_projection(
+    state: dict[str, Any], actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    proc = procedure(state)
+    resolved_actions = actions if actions is not None else next_actions(state)
+    inventory = active_phase_inventory(state)
+    visible = [item for item in inventory if item["user_visible"]]
+    invisible = [item for item in inventory if not item["user_visible"]]
+    pending = state.get("pending_human_action")
+    automatic = [
+        action for action in resolved_actions
+        if action.get("action") not in {
+            "WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"
+        }
+    ]
+    completed = proc.get("run_status") == "COMPLETED"
+    human_only = (
+        bool(pending)
+        and not inventory
+        and bool(resolved_actions)
+        and all(action.get("action") == "AWAIT_HUMAN_GATE" for action in resolved_actions)
+    )
+    if completed:
+        activity_state = "COMPLETED"
+    elif human_only:
+        activity_state = "AWAITING_HUMAN_ONLY"
+    elif invisible:
+        activity_state = "ACTIVE_WITH_VISIBILITY_GAP"
+    elif visible:
+        activity_state = "ACTIVE_VISIBLE_TASKS"
+    elif automatic:
+        activity_state = "AUTOMATIC_ACTION_READY"
+    else:
+        activity_state = "IDLE_OR_INCONSISTENT"
+    return {
+        "activity_state": activity_state,
+        "active_visible_tasks": visible,
+        "active_unverified_or_hidden_phases": invisible,
+        "active_phase_count": len(inventory),
+        "visible_task_count": len(visible),
+        "pending_human_action": bool(pending),
+        "automatic_action_count": len(automatic),
+        "orchestrator_status_required": bool(invisible),
+        "periodic_model_liveness_allowed": False,
+        "may_pause_or_delete_watcher": completed or human_only,
+        "watcher_action": "PAUSE_OR_DELETE" if human_only else ("DELETE" if completed else "KEEP"),
+        "user_signal": (
+            "visible-child-tasks" if visible
+            else "single-action-required-message" if human_only
+            else "orchestrator-transition"
+        ),
+    }
+
+
 def compact_status(state: dict[str, Any]) -> dict[str, Any]:
     proc = procedure(state)
+    runtime = environment(proc)
+    phase_inventory = active_phase_inventory(state)
     return {
         "run_status": proc.get("run_status"),
         "revision": proc.get("revision"),
         "tickets": {ticket_id: value.get("status") for ticket_id, value in proc["tickets"].items()},
         "active_phases": [
-            value["phase_key"] for value in proc["phases"].values()
-            if value.get("launch_state") in ACTIVE_PHASE_STATES
+            value["phase_key"] for value in phase_inventory
+        ],
+        "active_visible_tasks": [value for value in phase_inventory if value["user_visible"]],
+        "active_unverified_or_hidden_phases": [
+            value for value in phase_inventory if not value["user_visible"]
         ],
         "pending_human_gates": [
             gate["gate_id"] for gate in proc["human_gates"].values()
             if gate.get("status", "").startswith("PENDING")
         ],
         "pending_human_action": state.get("pending_human_action"),
+        "supervision": proc.get("supervision"),
         "orchestrator_owner": (state.get("orchestrator_lease") or {}).get("owner_thread_id"),
         "pending_orchestrator_handoff": state.get("pending_orchestrator_handoff"),
         "finalization": proc.get("finalization", {}).get("status"),
+        "environment": {
+            "profile": runtime.get("profile"),
+            "status": runtime.get("status"),
+            "mcp_mode": runtime.get("mcp_mode"),
+            "unity_editors": {
+                "limit": proc.get("limits", {}).get("max_unity_editors"),
+                "leased": active_unity_leases(proc),
+            } if runtime.get("profile") == "unity-mcp-local" else None,
+        },
     }
 
 
 def migrate_procedure(state: dict[str, Any]) -> bool:
     proc = procedure(state)
     changed = False
-    if int(proc.get("schema_version", 1)) < 4:
-        proc["schema_version"] = 4
+    if int(proc.get("schema_version", 1)) < 6:
+        proc["schema_version"] = 6
+        changed = True
+    if "environment" not in proc:
+        proc["environment"] = {
+            "profile": "generic",
+            "status": "NOT_APPLICABLE",
+            "mcp_mode": None,
+            "slots": {},
+        }
+        changed = True
+    limits = proc.setdefault("limits", {})
+    if "max_unity_editors" not in limits:
+        limits["max_unity_editors"] = DEFAULT_MAX_UNITY_EDITORS
         changed = True
     if "cost_control" not in proc:
         proc["cost_control"] = {
@@ -2098,6 +2822,12 @@ def migrate_procedure(state: dict[str, Any]) -> bool:
     if "pending_orchestrator_handoff" not in state:
         state["pending_orchestrator_handoff"] = None
         changed = True
+    supervision_projection = dict(proc.get("supervision") or {
+        "status": "INACTIVE", "mode": None, "watcher_id": None,
+    })
+    if state.get("supervision") != supervision_projection:
+        state["supervision"] = supervision_projection
+        changed = True
     if "orchestrator_rotation_policy" not in state:
         state["orchestrator_rotation_policy"] = {
             "mode": "automatic-budgeted-handoff",
@@ -2116,23 +2846,30 @@ def heartbeat(args: argparse.Namespace) -> int:
     state = run_registry.load_json(args.state)
     status = compact_status(state)
     actions = next_actions(state)
-    pending = state.get("pending_human_action")
+    projection = supervision_projection(state, actions)
     if procedure(state).get("run_status") == "COMPLETED":
         decision = "STOP_COMPLETED"
-    elif pending:
-        decision = "NOTIFY_ACTION_REQUIRED"
     elif any(action["action"] == "BLOCKED_OR_INCONSISTENT_STATE" for action in actions):
         decision = "ESCALATE_CONTROLLER_INCONSISTENCY"
-    elif any(action["action"] not in {"WAIT_FOR_PHASE_TRANSITION", "AWAIT_HUMAN_GATE"} for action in actions):
+    elif any(action["action"] not in {"WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"} for action in actions):
         decision = "CONTINUE_AUTOMATICALLY"
+    elif projection["activity_state"] == "ACTIVE_WITH_VISIBILITY_GAP":
+        decision = "ESCALATE_VISIBILITY_GAP"
     elif status["active_phases"]:
-        decision = "WAIT_FOR_TRANSITION"
+        decision = "WAIT_FOR_VISIBLE_TASK_TRANSITION"
+    elif projection["activity_state"] == "AWAITING_HUMAN_ONLY":
+        decision = "WAIT_FOR_HUMAN_WITHOUT_WATCHER"
     else:
-        decision = "WAIT_FOR_USER_GATE"
+        decision = "ESCALATE_CONTROLLER_INCONSISTENCY"
     output = {
         **status,
+        "supervision_projection": projection,
         "heartbeat_decision": decision,
-        "may_pause_or_delete_watcher": decision == "STOP_COMPLETED",
+        "requires_model_wake": decision in {
+            "CONTINUE_AUTOMATICALLY", "ESCALATE_VISIBILITY_GAP", "ESCALATE_CONTROLLER_INCONSISTENCY"
+        },
+        "may_pause_or_delete_watcher": projection["may_pause_or_delete_watcher"],
+        "watcher_action": projection["watcher_action"],
         "next_actions": actions,
         "controller_revision": procedure(state).get("revision"),
         "controller_updated_at": procedure(state).get("updated_at"),
@@ -2155,8 +2892,21 @@ def bootstrap(args: argparse.Namespace) -> int:
             return 0
         identity = state.get("run_identity")
         require(isinstance(identity, dict) and isinstance(identity.get("tickets"), list), "run_identity.tickets is required")
+        environment_profile = getattr(args, "environment_profile", "generic")
+        require(environment_profile in ENVIRONMENT_PROFILES, "invalid environment profile")
+        max_unity_editors = getattr(args, "max_unity_editors", DEFAULT_MAX_UNITY_EDITORS)
+        require(
+            isinstance(max_unity_editors, int)
+            and not isinstance(max_unity_editors, bool)
+            and 1 <= max_unity_editors <= MAX_CONFIGURABLE_UNITY_EDITORS,
+            f"max Unity editors must be between 1 and {MAX_CONFIGURABLE_UNITY_EDITORS}",
+        )
+        unity_repository = getattr(args, "unity_repository", None)
+        if environment_profile == "unity-mcp-local":
+            require(unity_repository is not None, "unity-mcp-local requires --unity-repository")
+            unity_repository = str(Path(unity_repository).expanduser().resolve())
         timestamp = now_iso()
-        state["schema_version"] = max(int(state.get("schema_version", 0)), 4)
+        state["schema_version"] = max(int(state.get("schema_version", 0)), 6)
         state["pending_orchestrator_handoff"] = None
         state["orchestrator_rotation_policy"] = {
             "mode": "automatic-budgeted-handoff",
@@ -2168,14 +2918,27 @@ def bootstrap(args: argparse.Namespace) -> int:
             "decision_packet_max_bytes": 16_384,
         }
         state["procedure"] = {
-            "schema_version": 4,
+            "schema_version": 6,
             "revision": 0,
             "run_status": "ACTIVE",
             "base_branch": args.base_branch,
             "approval_mode": args.approval_mode,
             "orchestrator_confirmed": False,
             "supervision": {"status": "INACTIVE", "mode": None, "watcher_id": None},
-            "limits": {"max_active_analyses": 5, "max_active_execution_pairs": 2, "max_integrated_tickets": 5},
+            "limits": {
+                "max_active_analyses": 5,
+                "max_active_execution_pairs": 2,
+                "max_integrated_tickets": 5,
+                "max_unity_editors": max_unity_editors,
+            },
+            "environment": {
+                "profile": environment_profile,
+                "status": "UNINITIALIZED" if environment_profile == "unity-mcp-local" else "NOT_APPLICABLE",
+                "mcp_mode": "local" if environment_profile == "unity-mcp-local" else None,
+                "repository": unity_repository if environment_profile == "unity-mcp-local" else None,
+                "registry_reference": None,
+                "slots": {},
+            },
             "tickets": {
                 ticket_id: {
                     "status": "DISCOVERED", "triage": None, "analysis": None,
@@ -2251,7 +3014,10 @@ def check(args: argparse.Namespace) -> int:
     issues = completion_issues(state) if args.mode == "completion" else []
     if args.mode == "yield":
         actions = next_actions(state)
-        automatic = [action for action in actions if action["action"] not in {"WAIT_FOR_PHASE_TRANSITION", "AWAIT_HUMAN_GATE"}]
+        automatic = [
+            action for action in actions
+            if action["action"] not in {"WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"}
+        ]
         if automatic:
             issues.append("automatic actions remain: " + ", ".join(action["action"] for action in automatic))
         active = compact_status(state)["active_phases"]
@@ -2262,6 +3028,17 @@ def check(args: argparse.Namespace) -> int:
             issues.append("foreground supervision cannot survive a yielded orchestrator turn")
         if active and supervision.get("mode") == "BACKGROUND_WATCHER" and not supervision.get("watcher_id"):
             issues.append("background supervision has no verified watcher ID")
+        if active and supervision.get("mode") == "BACKGROUND_WATCHER" and supervision.get("watcher_consumes_model_tokens") is not False:
+            issues.append("background supervision is not verified as a zero-model process")
+        if active and supervision.get("mode") == "EVENT_CALLBACK" and supervision.get("callback_verified") is not True:
+            issues.append("event-callback supervision is not verified")
+        if (
+            active
+            and supervision.get("mode") == "EVENT_CALLBACK"
+            and supervision.get("callback_target_thread_id")
+            != (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+        ):
+            issues.append("event-callback supervision targets a previous orchestrator owner")
         pending_handoff = state.get("pending_orchestrator_handoff")
         if isinstance(pending_handoff, dict) and pending_handoff.get("status") == "PREPARED":
             issues.append("controlled orchestrator handoff is prepared but not accepted")
@@ -2365,6 +3142,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--state", type=Path, required=True)
     start.add_argument("--base-branch", required=True)
     start.add_argument("--approval-mode", choices=("standard", "auto-analysis", "auto-merge", "full-auto"), required=True)
+    start.add_argument("--environment-profile", choices=ENVIRONMENT_PROFILES, default="generic")
+    start.add_argument("--max-unity-editors", type=int, default=DEFAULT_MAX_UNITY_EDITORS)
+    start.add_argument("--unity-repository", type=Path)
     start.set_defaults(handler=bootstrap)
 
     event = commands.add_parser("apply")

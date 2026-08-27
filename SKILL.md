@@ -1,6 +1,6 @@
 ---
 name: ticket-train
-description: Explicitly orchestrate bounded, cost-controlled trains of implementation tickets from a user-provided source. Use when the user invokes $ticket-train to triage tickets in visible threads, apply a product proportionality profile, reconcile plans, run implementation and independent acceptance-test authoring in parallel branches and worktrees, enforce red/green functional and environment gates including Supabase/Auth/RLS when applicable, route model effort strictly, run one exhaustive review plus grouped remediation and targeted re-review, validate the final train pull request, report manual tests and attention points, measure per-session and per-phase token usage, enforce human gates, and stop at ticket-count or review-surface checkpoints. Do not use for ordinary one-off coding tasks or without explicit invocation.
+description: Explicitly orchestrate bounded, cost-controlled trains of implementation tickets from a user-provided source. Use when the user invokes $ticket-train to triage tickets in visible threads, apply a product proportionality profile, reconcile plans, run implementation and independent acceptance-test authoring in parallel branches and worktrees, manage a bounded persistent local Unity MCP editor pool when applicable, enforce red/green functional and environment gates including Supabase/Auth/RLS when applicable, route model effort strictly, run one exhaustive review plus grouped remediation and targeted re-review, validate the final train pull request, report manual tests and attention points, measure per-session and per-phase token usage, audit scripted-versus-AI orchestration and model-wake quality, enforce human gates, and stop at ticket-count or review-surface checkpoints. Do not use for ordinary one-off coding tasks or without explicit invocation.
 ---
 
 # Ticket Train
@@ -26,7 +26,7 @@ Read these references before starting:
 - [criticality.md](references/criticality.md) for intrinsic criticality, complexity, and human validation matrices.
 - [analysis-policy.md](references/analysis-policy.md) for parallel conditional analysis, dependency consolidation, and reconciliation.
 - [model-routing.md](references/model-routing.md) for fast triage and model/reasoning matrices.
-- [usage-reporting.md](references/usage-reporting.md) for exact-if-available token accounting.
+- [usage-reporting.md](references/usage-reporting.md) for exact-if-available token accounting and orchestration execution-share metrics.
 - [report-template.md](references/report-template.md) for required main-thread reports.
 - [efficiency-policy.md](references/efficiency-policy.md) for proportionality,
   scope budgets, compact contracts, review-pass limits, deterministic
@@ -34,6 +34,10 @@ Read these references before starting:
 - [verification-policy.md](references/verification-policy.md) for independent
   parallel acceptance-test authoring, red/green evidence, functional readiness,
   environment parity, Supabase/Auth/RLS validation, and manual-test boundaries.
+- [unity-mcp-local.md](references/unity-mcp-local.md) when the selected
+  repository is a Unity project or the user requests local Unity MCP. It
+  defines persistent editor slots, per-phase MCP requirements, deterministic
+  lifecycle scripts, and bounded recovery.
 
 Before any write-enabled implementation or pull-request review, also read:
 
@@ -66,21 +70,25 @@ Before triage, resolve and echo:
 7. Reasoning cap, defaulting to `xhigh`.
 8. Analysis policy, defaulting to `parallel-conditional`.
 9. Token usage reporting, fixed to `exact-if-available` unless the user explicitly disables it.
-10. Routing enforcement, fixed to `strict`.
-11. Coordination policy, fixed to `compact-control-plane`.
-12. Control-plane runner, fixed to `deterministic-decision-packets`.
-13. Orchestrator rotation, fixed to `automatic-budgeted-handoff` with a 10M
+10. Orchestration metrics, fixed to `executor-share-and-wake-audit` and never disabled by token-reporting preferences.
+11. Routing enforcement, fixed to `strict`.
+12. Coordination policy, fixed to `compact-control-plane`.
+13. Control-plane runner, fixed to `deterministic-decision-packets`.
+14. Orchestrator rotation, fixed to `automatic-budgeted-handoff` with a 10M
     soft warning, 25M hard token limit, 50 model wakes, 500 tool calls, one
     context compaction, and 16 KiB decision packets.
-14. Actual orchestrator model and reasoning effort, when observable.
-15. Recommended orchestrator model and effort under the startup preflight.
-16. Proportionality profile revision and its material assumptions.
-17. Train size budget and current estimated review surface.
-18. Review-pass budget, fixed to one complete pass and at most two grouped
+15. Actual orchestrator model and reasoning effort, when observable.
+16. Recommended orchestrator model and effort under the startup preflight.
+17. Proportionality profile revision and its material assumptions.
+18. Train size budget and current estimated review surface.
+19. Review-pass budget, fixed to one complete pass and at most two grouped
     remediation/follow-up cycles per stable scope.
-19. Cost-control policy, fixed to `strict-quality-preserving`.
-20. Verification policy, fixed to `parallel-independent-red-green`.
-21. Environment tiers required by the selected tickets.
+20. Cost-control policy, fixed to `strict-quality-preserving`.
+21. Verification policy, fixed to `parallel-independent-red-green`.
+22. Environment tiers required by the selected tickets.
+23. Environment profile: `generic` or `unity-mcp-local`.
+24. For `unity-mcp-local`, the absolute local Unity Git root, MCP mode fixed
+    to `local`, and the maximum editor count: user override or `3` by default.
 
 Before publishing the startup preflight, use
 [run_registry.py](scripts/run_registry.py) to discover or create the canonical
@@ -146,7 +154,16 @@ In dry-run mode:
 - report exact-if-available token usage for orchestration and analysis;
 - simulate branch, pull-request, and train ordering.
 
-Do not modify files, create or switch branches or worktrees, commit, push, create pull requests, post review comments, merge, update ticket sources, or start implementation workers. There is no implementation diff to review.
+For `unity-mcp-local`, a dry run may initialize the persistent slot pool and
+lease an exact detached base to an `editor-read` analysis. This is local
+environment provisioning only; tracked project files and Git history remain
+read-only.
+
+Do not modify tracked project files, create or switch ticket branches or
+disposable ticket worktrees, commit, push, create pull requests, post review
+comments, merge, update ticket sources, or start implementation workers. The
+Unity environment-provisioning exception below may create persistent slot
+worktrees. There is no implementation diff to review.
 
 In live mode, execute the complete workflow subject to all gates and permissions.
 
@@ -176,6 +193,11 @@ Use separate user-visible Codex threads when the thread-management tools are ava
 - one independent read-only final-train review thread at live finalization;
 - one final-train remediation thread only when integrated findings require it.
 
+For the Unity profile, do not equate a thread with an editor. Keep the normal
+visible phase threads, but bind only phases that declare an editor-backed
+requirement to the bounded persistent slot pool. The leased slot worktree is
+that phase's execution worktree.
+
 Keep the main thread as a compact control plane. Persist the run mapping and
 usage snapshots outside the repository, and retain only decisions, gates,
 state transitions, compact reports, and durable references in the main
@@ -196,15 +218,35 @@ the routed visible phase threads and procedural judgment in the controller.
 Include the controller revision and update time in material status reports;
 reconcile immediately if tasks, Git, or GitHub advanced beyond that state.
 
-Maintain exactly one orchestrator lease and one canonical manifest. Resolve
-and verify foreground transition waiting or a run-scoped deterministic
-background watcher before the first child dispatch. A background watcher is
-part of the workflow, not a recovery action the user must request. Do not wake
-a model for periodic liveness. Publish transitions immediately; when the host
-requires unchanged liveness, emit it from a deterministic product notification
-without replaying the orchestrator context. At every changed watcher
-observation, run `control_plane_runner.py step` and wake a model only when its
-packet requires one.
+Maintain exactly one orchestrator lease and one canonical manifest. Prefer a
+long event-driven foreground wait over all visible tasks. When the product can
+deliver child completion messages to the main task, verify and record
+`EVENT_CALLBACK` supervision and include the controller-provided callback in
+every child prompt. A background watcher is valid only when it is a real
+zero-model process connected to task transitions. A recurring Codex heartbeat
+automation is not a deterministic watcher and is prohibited for polling.
+Publish transitions immediately and run `control_plane_runner.py step` only
+after changed observations.
+
+For an adopted run whose existing watcher has no zero-model proof, obey
+`REPLACE_MODEL_WAKING_WATCHER`: remove that automation and replace it with the
+foreground wait, verified event callbacks, or a genuine zero-model watcher
+before continuing.
+
+Treat verified user-visible child tasks as the primary progress signal. While
+one or more are running, do not add periodic orchestrator commentary merely to
+say that work continues. If the controller reports active work but cannot list
+a verified visible task ID, publish one visibility anomaly immediately; silent
+or hidden activity is not an acceptable progress state.
+
+When the only remaining action is an already announced human gate, stop all
+background supervision. Delete or pause the run watcher, apply
+`SUPERVISION_PAUSED_FOR_HUMAN_GATE`, end the turn, and wait for the user's
+reply. Do not create a recurring automation, heartbeat, reminder, or model wake
+whose only purpose is to request the same approval again. The single `ACTION
+REQUIRED` message must explicitly say that no technical task is active and the
+train is waiting only for the user's response. Reconfigure supervision after
+the gate is resolved and before dispatching the next automatic action.
 
 `FOREGROUND_WAIT` is valid only inside the current orchestrator turn. It never
 survives a final response. When any phase is queued, running, or launch-unknown
@@ -212,6 +254,11 @@ under this mode, keep calling transition-aware task waits and advancing the
 controller until the phase is captured or an actual gate/blocker exists. A
 nonzero foreground yield check is a hard stop, not a status that may be
 explained away in prose.
+
+`EVENT_CALLBACK` may survive a final response only after the current
+orchestrator task ID is verified and the callback contract is present in every
+active visible child. `BACKGROUND_WATCHER` may survive only with a persisted
+watcher ID and `watcher_consumes_model_tokens = false`.
 
 Follow [orchestration-control.md](references/orchestration-control.md) for
 every phase dispatch. Record a unique phase key and launch intent before
@@ -248,7 +295,7 @@ reached. Prepare and accept that single-owner transfer through
 decision packet and single-use token. Never fork or replay the old
 conversation. Count every segment in orchestration usage.
 
-Keep a mapping from ticket to source locator, analysis base commit, intrinsic criticality, complexity, conditional assumptions, validity conditions, reconciliation state, routing decisions, routing conformance, dependencies, worker thread, reviewer thread, branch, worktree, pull request, usage snapshots, gate state, and train commit. Also track the final train pull request, reviewed head, CI and Copilot state, final finding ledger, manual validation plan, and code/application attention points.
+Keep a mapping from ticket to source locator, analysis base commit, intrinsic criticality, complexity, conditional assumptions, validity conditions, reconciliation state, routing decisions, routing conformance, dependencies, worker thread, reviewer thread, branch, worktree, pull request, usage snapshots, gate state, and train commit. Also track the final train pull request, reviewed head, CI and Copilot state, final finding ledger, manual validation plan, code/application attention points, classified orchestration action spans, and wake records.
 
 Also track the proportionality profile revision, ticket and cumulative train
 size budgets, compact implementation contract, plan-contract validation,
@@ -279,6 +326,10 @@ Limit active work:
 - maximum two simultaneous implementation/test execution pairs;
 - maximum one integration into the train at a time;
 - maximum five tickets integrated into a train before a mandatory checkpoint.
+- for `unity-mcp-local`, maximum three simultaneously leased/open Unity
+  editors by default, or the explicit run-level override from the launch
+  prompt. This one pool covers analysis, implementation, acceptance tests,
+  review, remediation, UI/Play Mode tests, builds, and final verification.
 
 The five-ticket limit is not the only checkpoint. Apply the cumulative file,
 migration/data-transformation, structural-domain, and epic thresholds from
@@ -301,6 +352,10 @@ At a high level:
 3. Discover or create the canonical run, claim its orchestrator lease, and
    reconcile prior state before any technical phase.
 4. Bootstrap the procedural controller and obtain its first allowed action.
+   For `unity-mcp-local`, pass `--unity-repository` and
+   `--max-unity-editors`; execute every emitted slot transition through
+   `scripts/unity_slot_adapter.py`. It initializes missing `unity-slot-N`
+   worktrees before any MCP-backed phase and never falls back to cloud MCP.
 5. Recommend `Terra/H` or `Sol/H` for the orchestrator, report the current
    setting, and obtain explicit confirmation to continue.
 6. Record that confirmation as an idempotent controller event. Create and
@@ -311,6 +366,9 @@ At a high level:
    transition-aware mechanism is reliable.
 8. Perform a short routing triage in a dedicated read-only thread with an
    explicit `Terra/H` override, without producing a technical plan.
+   For Unity, triage also classifies the full analysis requirement as `none`,
+   `editor-read`, `editor-write`, `playmode-ui`, or `build`; triage itself does
+   not reserve an editor.
 9. Record one common analysis base commit and queue every selected ticket for analysis immediately.
 10. Resolve every routed matrix cell mechanically, dispatch every phase with
    explicit model and reasoning settings, and record requested, actual, and
@@ -492,9 +550,12 @@ Publish every required decision in the main conversation using the `ACTION
 REQUIRED` report from [report-template.md](references/report-template.md), then
 persist the complete `pending_human_action`. Never rely on a child thread,
 automation transcript, or silent status field to tell the user that approval
-is waiting. Keep verified supervision active. When reminders are configured,
-emit them through deterministic product notifications from the persisted gate;
-do not wake the full orchestrator merely to repeat unchanged text.
+is waiting. If unrelated technical work remains active, keep its verified
+supervision and use its visible child tasks as the progress signal. If no work
+remains, pause or delete the watcher and wait silently after the one complete
+message. Reminders are disabled by default; an explicit user opt-in may create
+a deterministic product reminder, but it must never wake or replay the full
+orchestrator.
 
 After five integrated tickets, do not start a sixth ticket. Create or update
 the final train pull request, complete its validation and feedback loop, and
@@ -572,6 +633,31 @@ phase whose counter or baseline is unavailable. A report may be `complete`
 only when every orchestrator segment is present, every authoritative procedural
 phase is measured, and every hidden session discovered from orchestrator
 activity is mapped or explicitly reconciled.
+
+Wrap every executed controller `next_action` with
+`scripts/orchestration_metrics.py start-action` and `finish-action`. Use the
+`executor_kind` supplied by the decision packet; never reclassify it from
+prose. Record every actual orchestrator wake with `record-wake`, including
+unchanged polling or repeated gates when they occur. Do not create a model turn
+solely to write telemetry; record the metric inside the transition turn or the
+deterministic executor.
+
+At every checkpoint and completion, run `orchestration_metrics.py report` and
+include:
+
+- action count, elapsed duration, measured tokens, and percentage by
+  `deterministic`, `adapter`, and `technical-model`;
+- the combined scripted-versus-AI share using action count, duration, and
+  measured-token bases separately;
+- justified, confirmed unjustified, unattributed, and avoided model wakes;
+- running spans and missing token measurements;
+- the report status and durable SHA-256 reference.
+
+Never present one blended percentage without its basis. Token allocation uses
+only captured non-overlapping action deltas; the session ledger remains the
+authoritative token total. `FINAL_EVIDENCE_RECORDED` and dry-run completion
+must include the orchestration-metrics artifact, even when its status is
+`partial` or `unavailable`.
 
 Reuse trustworthy CI evidence only when it is tied to the exact reviewed head
 commit and all required checks are available. Reviewers still run independent

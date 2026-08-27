@@ -231,15 +231,17 @@ routing attestation and must not trigger a rerun or human approval request.
 
 ## Active supervision loop
 
-Resolve supervision before dispatch. Use foreground transition waits or create
-and verify a run-scoped background watcher. Persist the mode, watcher ID,
-`last_check_at`, and `next_check_at`. If neither is reliable, block before
-launching children. The user is never responsible for creating this watcher.
+Resolve supervision before dispatch. Prefer foreground transition waits. If
+children can notify the current orchestrator task, verify `EVENT_CALLBACK` and
+include the callback contract in every child launch. Otherwise create a
+run-scoped external watcher only when it is verified to consume zero model
+tokens. Persist the selected evidence. A recurring Codex heartbeat automation
+is not valid polling. If none is reliable, block before launching children.
 
 After dispatch, keep the run supervised while any phase is queued, running,
 launch-unknown, or ready for an automatic successor. The same model
-conversation need not stay active when a verified deterministic background
-watcher can preserve and signal changed state.
+conversation need not stay active when verified completion callbacks or a
+deterministic zero-model watcher can signal changed state.
 
 Use one event-driven `wait_threads` call for all active user-visible threads
 with their latest host IDs and cursors. Prefer the longest product-approved
@@ -275,9 +277,11 @@ At every changed background observation, run `train_controller.py heartbeat`
 and `control_plane_runner.py step`. Follow the packet; do not derive lifecycle
 state from the automation prompt. An unchanged heartbeat does not wake the
 model. Never pause or delete the watcher unless the heartbeat returns
-`may_pause_or_delete_watcher = true`. An announced information request keeps
-deterministic reminders active, and merged tickets without a final pull
-request remain automatically runnable.
+`may_pause_or_delete_watcher = true`. If it returns
+`WAIT_FOR_HUMAN_WITHOUT_WATCHER`, pause or delete the watcher immediately,
+record `SUPERVISION_PAUSED_FOR_HUMAN_GATE`, and wait without further model
+wakes. Merged tickets without a final pull request remain automatically
+runnable and therefore cannot enter this state.
 
 If normal thread waits are temporarily unavailable, use a bounded monitor or
 product-supported wake-up mechanism while continuing to reconcile the same
@@ -290,6 +294,12 @@ The watcher checks at its configured bounded interval and emits a cheap
 product-level liveness signal only when the host requires one. It does not
 wake the model for unchanged state. It wakes the model immediately for
 transitions, blockers, successor dispatch, or human decisions.
+
+While verified user-visible child tasks are active, their presence in the task
+list is the primary user-facing progress signal. Do not publish periodic
+orchestrator messages solely to say they are still running. If no verified
+visible task corresponds to an active phase, report the visibility anomaly
+instead of remaining silent.
 
 `FOREGROUND_WAIT` cannot protect work after the main turn ends. The
 authoritative yield check therefore fails while any phase is queued, running,
@@ -565,7 +575,9 @@ requiring a model-authored status.
 For `AWAITING_REQUIRED_USER_INPUT`, identify the exact ticket, revision, gate,
 and decision needed. Continue unrelated safe work before yielding. Publish the
 complete `ACTION REQUIRED` decision packet in the main conversation and
-persist it with `notification_status = ANNOUNCED` before running the guard.
+persist it with `notification_status = ANNOUNCED` before running the guard. If
+no visible task or automatic action remains, state that explicitly, stop the
+watcher, and wait only for the user's reply.
 
 For `BLOCKED`, state the blocking condition, completed reconciliation attempts,
 preserved uncertain outcome, and precise resume action. A transient or

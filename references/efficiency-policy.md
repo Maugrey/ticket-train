@@ -314,13 +314,15 @@ Use [controller-protocol.md](controller-protocol.md) for lifecycle transitions.
 The controller's unchanged `WAIT_FOR_PHASE_TRANSITION` result must be handled
 without an LLM turn. Model-written heartbeat loops are prohibited: a
 non-LLM watcher or foreground task wait observes state, and the model wakes
-only when an event changes controller revision or a liveness message is due.
+only when an event changes controller revision and requires a model action.
 
 Resolve supervision before launching any child. Prefer foreground
-transition-aware waits. When a long phase may outlive the main turn, create
-and verify one run-scoped background watcher up front and store its ID in the
-canonical manifest. Installing supervision only after the user notices a
-stall is a control failure.
+transition-aware waits. A verified child completion callback is the preferred
+way to survive the main turn without polling. Create a run-scoped background
+watcher only when it is an actual zero-model process; a recurring Codex
+heartbeat automation is prohibited. Store the selected evidence in the
+canonical manifest before dispatch. Installing supervision only after the user
+notices a stall is a control failure.
 
 The model is active only to:
 
@@ -347,8 +349,12 @@ a failed result that is not mechanically classifiable.
 Use an internal deterministic check interval appropriate to the host. Do not
 generate periodic liveness through a model. When the host requires unchanged
 liveness, emit one deterministic product notification from the manifest.
-Report transitions immediately. A pending human action is always visible and
-may be reminded deterministically; never hide it as unchanged noise.
+Report transitions immediately. Verified visible child tasks are sufficient
+evidence that work is continuing. A pending human action is announced once in
+the main conversation. If it is the only remaining action, pause or delete the
+watcher and produce no further model wake or default reminder until the user
+responds. An explicitly requested reminder is deterministic and never reloads
+the orchestrator context.
 
 Treat every orchestrator conversation as one replaceable activity segment.
 Warn at 10 million segment tokens and rotate before another ordinary model

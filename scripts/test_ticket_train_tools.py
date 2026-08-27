@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_guard
 import control_plane_runner
 import context_packet
+import orchestration_metrics
 import run_registry
 import token_usage
 import train_controller
@@ -154,6 +156,7 @@ class ControlGuardTests(unittest.TestCase):
             "mode": "BACKGROUND_WATCHER",
             "status": "ACTIVE",
             "watcher_id": "watcher-1",
+            "watcher_consumes_model_tokens": False,
             "last_check_at": "2026-07-30T12:00:00+00:00",
             "next_check_at": "2026-07-30T12:05:00+00:00",
         }
@@ -204,6 +207,7 @@ class ControlGuardTests(unittest.TestCase):
             "mode": "BACKGROUND_WATCHER",
             "status": "ACTIVE",
             "watcher_id": "watcher-1",
+            "watcher_consumes_model_tokens": False,
             "last_check_at": "2026-07-30T12:00:00+00:00",
             "next_check_at": "2026-07-30T12:05:00+00:00",
         }
@@ -397,6 +401,85 @@ class ControlPlaneRunnerTests(unittest.TestCase):
             self.assertEqual(result["wake_kind"], "ROTATE_ORCHESTRATOR")
             packet = json.loads(Path(result["packet_reference"]).read_text(encoding="utf-8"))
             self.assertEqual(packet["orchestrator_budget"]["status"], "REQUIRED")
+
+
+class OrchestrationMetricsTests(unittest.TestCase):
+    def test_every_controller_action_has_exactly_one_executor_class(self) -> None:
+        source = (Path(__file__).parent / "train_controller.py").read_text(encoding="utf-8")
+        action_names = set(re.findall(r'"action": "([A-Z0-9_]+)"', source))
+        audit = orchestration_metrics.validate_taxonomy(action_names)
+        self.assertEqual(audit["unclassified"], [])
+        self.assertEqual(audit["stale_classifications"], [])
+        self.assertEqual(audit["duplicate_classifications"], [])
+
+    def test_report_separates_executor_share_and_wake_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({
+                "control_plane": {
+                    "suppressed_unchanged_observations": 3,
+                    "segments": [{"model_wakes": 3}],
+                }
+            }), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                orchestration_metrics.start_action(argparse.Namespace(
+                    state=manifest,
+                    action_id="action-1",
+                    action_name="WAIT_FOR_PHASE_TRANSITION",
+                    ticket_id="T-1",
+                    phase_key="run:T-1:implementation:1",
+                    controller_revision=10,
+                    started_at="2026-08-01T10:00:00+00:00",
+                    baseline_total_tokens=100,
+                ))
+                orchestration_metrics.finish_action(argparse.Namespace(
+                    state=manifest,
+                    action_id="action-1",
+                    actual_executor_kind=None,
+                    ended_at="2026-08-01T10:00:05+00:00",
+                    final_total_tokens=100,
+                    model_wake=True,
+                    outcome="completed",
+                ))
+                orchestration_metrics.record_wake(argparse.Namespace(
+                    state=manifest,
+                    wake_id="wake-1",
+                    reason="liveness-only",
+                    model_woken=True,
+                    controller_revision=10,
+                    total_tokens=20,
+                    recorded_at="2026-08-01T10:00:05+00:00",
+                ))
+                orchestration_metrics.record_wake(argparse.Namespace(
+                    state=manifest,
+                    wake_id="wake-2",
+                    reason="transition",
+                    model_woken=True,
+                    controller_revision=11,
+                    total_tokens=40,
+                    recorded_at="2026-08-01T10:00:06+00:00",
+                ))
+                orchestration_metrics.record_wake(argparse.Namespace(
+                    state=manifest,
+                    wake_id="wake-3",
+                    reason="callback",
+                    model_woken=False,
+                    controller_revision=12,
+                    total_tokens=0,
+                    recorded_at="2026-08-01T10:00:07+00:00",
+                ))
+            report = orchestration_metrics.build_report(run_registry.load_json(manifest))
+            self.assertEqual(report["status"], "complete")
+            deterministic = report["by_expected_executor"]["deterministic"]
+            self.assertEqual(deterministic["action_count"], 1)
+            self.assertEqual(deterministic["duration_seconds"], 5.0)
+            self.assertEqual(deterministic["token_total"], 0)
+            wakes = report["wake_analysis"]
+            self.assertEqual(wakes["confirmed_unjustified_model_wakes"], 1)
+            self.assertEqual(wakes["minimum_unjustified_model_wakes"], 1)
+            self.assertEqual(wakes["minimum_total_avoided_wakes"], 4)
+            self.assertEqual(wakes["unattributed_model_wakes"], 1)
 
 
 class TokenUsageTests(unittest.TestCase):

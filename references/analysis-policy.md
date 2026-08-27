@@ -22,6 +22,13 @@ analysis_policy = parallel-conditional
 
 Queue every selected ticket for full analysis immediately after triage. Keep at most five analysis threads active and use a rolling window until every selected ticket has been analyzed.
 
+For the `unity-mcp-local` profile, triage also classifies the full analysis
+requirement as `none`, `editor-read`, `editor-write`, `playmode-ui`, or
+`build`. This is resource routing, not a technical plan or duplicate analysis.
+Prefer `none` when repository files and ordinary commands suffice. An analysis
+that genuinely needs editor evidence waits for a local persistent slot; other
+analyses continue within the normal rolling window.
+
 Never delay an analysis because:
 
 - another ticket analysis is unfinished;

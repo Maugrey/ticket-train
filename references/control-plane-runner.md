@@ -53,6 +53,13 @@ It contains only:
 - compact cost and rotation status;
 - bounded controller-authorized next actions.
 
+Each next action also carries its fail-closed `executor_kind` classification.
+The runner increments durable decision-packet counters only when it writes a
+new packet; an unchanged suppressed observation does not count as a model wake.
+The adapter records action spans and wake reasons through
+`orchestration_metrics.py` around execution, without starting a telemetry-only
+model turn.
+
 It never contains a transcript, private reasoning, raw logs, full analysis, or
 source-code diff. The hard packet limit is 16 KiB.
 
@@ -62,7 +69,7 @@ Interpret `wake_kind` mechanically:
 
 | Wake kind | Behavior |
 |---|---|
-| `NO_MODEL_WAKE` | Keep waiting through the transition-aware task connector or deterministic watcher. Do not write a status message. |
+| `NO_MODEL_WAKE` | Keep waiting through the transition-aware task connector, or stop the watcher for a pure human gate. Do not write a status message. |
 | `RUN_DETERMINISTIC` | Execute the named guarded script or structured Git/GitHub operation without technical narration. |
 | `WAKE_ADAPTER` | Use the active Codex adapter only to create, resume, reconcile, or announce the named visible task/gate. |
 | `WAKE_TECHNICAL_DECISION` | Route the bounded evidence to the appropriate technical phase or perform the explicitly named consolidation/disposition. |
@@ -71,9 +78,10 @@ Interpret `wake_kind` mechanically:
 
 An unchanged wait must not create a new controller event, packet, model turn,
 thread read, or user-facing heartbeat. Pending human actions remain visible
-through their already published `ACTION REQUIRED` message; reminders must use
-a deterministic product notification when available rather than replaying the
-orchestrator context.
+through their already published `ACTION REQUIRED` message. When no technical
+work is active, reminders are disabled by default and supervision stops. A
+user may explicitly opt into a deterministic product reminder, but it never
+wakes the orchestrator.
 
 ## Orchestrator activity budget
 
@@ -148,6 +156,11 @@ python scripts/run_registry.py accept-handoff `
    orchestrator becomes read-only and must not dispatch, apply events, or
    answer later wake-ups for that run.
 
+When supervision uses `EVENT_CALLBACK`, the successor then executes
+`RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER`: it sends the new compact
+callback target to every active visible child and records the verified target
+before any other dispatch or yield.
+
 If visible successor creation conclusively fails, cancel the prepared transfer
 with the same single-use token and report the platform blocker:
 
@@ -182,6 +195,12 @@ use one long `wait_threads` call over all active visible tasks and feed only a
 changed snapshot back to the deterministic supervisor. A timeout with no
 change returns directly to `control_plane_runner.py step`; if that result is
 `unchanged-suppressed`, do not narrate it or reread any task.
+
+The decision packet contains `supervision_projection.active_visible_tasks`.
+Those verified child tasks are the user-facing progress signal. If the
+projection is `ACTIVE_WITH_VISIBILITY_GAP`, wake the adapter exactly once to
+repair or report the missing visible task identity; do not silently poll an
+unidentified activity.
 
 When a stable non-LLM task connector becomes available, attach it to the same
 manifest and packet protocol. Do not redesign the lifecycle or move technical

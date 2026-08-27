@@ -6,6 +6,7 @@
 - Counters
 - Measurement lifecycle
 - Phase and ticket accounting
+- Orchestration execution-share metrics
 - Commands
 - Availability and limitations
 
@@ -162,6 +163,88 @@ passes and is not by itself a duplicate. Mark duplication only when one exact
 phase key maps to several sessions or the manifest explicitly records a
 duplicate. Report attempt families separately for cost analysis.
 
+## Orchestration execution-share metrics
+
+Measure how much of the orchestration control plane is executed by scripts and
+how much requires a model. This is an execution audit, not an estimate based on
+prompt length.
+
+Every controller action belongs to exactly one fail-closed class maintained by
+[`orchestration_metrics.py`](../scripts/orchestration_metrics.py):
+
+- `deterministic`: a guarded script or state transition that needs no model;
+- `adapter`: a Codex tool operation needed to create, resume, reconcile, or
+  report a visible task or human gate;
+- `technical-model`: analysis, consolidation, review, remediation, or another
+  decision requiring technical judgment.
+
+The taxonomy must cover every action emitted by `train_controller.py`. An
+unclassified action is an error and must not be guessed from its name.
+
+Before executing an authorized action, open a durable span:
+
+```powershell
+python scripts/orchestration_metrics.py start-action `
+  --state <run-manifest.json> `
+  --action-id <unique-action-span-id> `
+  --action-name <controller-action> `
+  --ticket-id <ticket-id-or-run> `
+  --phase-key <phase-key> `
+  --controller-revision <revision> `
+  --baseline-total-tokens <exact-counter-if-available>
+```
+
+Close the same span after the observation has been recorded:
+
+```powershell
+python scripts/orchestration_metrics.py finish-action `
+  --state <run-manifest.json> `
+  --action-id <returned-action-id> `
+  --final-total-tokens <exact-counter-if-available> `
+  --model-wake `
+  --outcome <completed|blocked|failed|cancelled>
+```
+
+Use `--no-model-wake` for script-only execution. Never wake a model merely to
+open or close a metrics span.
+
+Record each actual orchestration wake separately so wake quality remains
+auditable even when it is not associated with a completed controller action:
+
+```powershell
+python scripts/orchestration_metrics.py record-wake `
+  --state <run-manifest.json> `
+  --wake-id <unique-wake-id> `
+  --reason <callback|dispatch|failure|blocker|gate-announcement|report|technical-decision|transition|user-message|unchanged-poll|liveness-only|repeated-gate> `
+  --model-woken
+```
+
+`unchanged-poll`, `liveness-only`, and `repeated-gate` are confirmed
+unjustified model wakes. Record deterministic callbacks and suppressed
+unchanged observations with `--no-model-woken`; these count as explicitly
+avoided wakes. A model wake found in an action span but absent from the wake
+ledger is `unattributed`, not silently justified.
+
+At every checkpoint and completion, generate the durable report:
+
+```powershell
+python scripts/orchestration_metrics.py report `
+  --state <run-manifest.json> `
+  --output <orchestration-metrics.json>
+```
+
+Report three separate bases; never manufacture one blended percentage:
+
+- completed action count;
+- measured action duration;
+- exact measured action-token deltas.
+
+For each basis, expose the scripted share, total AI share, adapter share, and
+technical-model share. Also report justified, confirmed unjustified,
+unattributed, explicitly avoided, and suppressed-unchanged wakes, plus running
+spans and missing token measurements. Duration and token shares may be
+`unavailable` or partial without invalidating exact action-count evidence.
+
 ## Commands
 
 Capture the current orchestrator:
@@ -221,6 +304,11 @@ It also emits per-phase and per-ticket usage aggregates, orchestration usage,
 authoritative/measured phase counts, unmapped hidden sessions, and whether the
 known orchestrator segments were included. The controller accepts `complete` only when
 those inventories reconcile exactly.
+
+The completion or dry-run evidence must also reference the orchestration
+metrics artifact, its SHA-256, and its status (`complete`, `partial`, or
+`unavailable`). Missing orchestration metrics block completion; missing exact
+duration or token counters lower coverage instead of being estimated.
 
 Use the skill's absolute script path when the current working directory is not the skill directory.
 

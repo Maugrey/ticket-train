@@ -101,6 +101,17 @@ Use $ticket-train in live mode for issues 42, 43, and 47 from the current
 GitHub repository using auto-analysis approvals.
 ```
 
+Example Unity run using the local AI Game Dev MCP server and the default pool
+of three editors:
+
+```text
+Use $ticket-train in live mode for features 25, 26, and 35 from this Unity
+repository using local Unity MCP and auto-analysis approvals.
+```
+
+The launch prompt may override the pool in ordinary language, for example:
+`with at most 2 Unity editors open`.
+
 The orchestrator resolves and reports the source, ticket order, approval mode,
 run mode, repository, base and train branches, reasoning cap, model routing,
 verification requirements, proportionality profile, size budget, and token
@@ -122,6 +133,10 @@ full read-only analyses, dependency consolidation, scheduling, validation-gate
 assessment, model routing, and simulated implementation/review planning. It
 does not modify files, create branches or pull requests, commit, push, merge,
 or start implementation workers.
+
+For Unity, a dry run may provision the persistent editor-slot pool and use an
+exact detached base for a read-only editor-backed analysis. It still cannot
+modify tracked project content or Git history.
 
 In `live` mode, it executes the complete branch, test, review, remediation, and
 train workflow subject to project rules and all required gates.
@@ -225,6 +240,13 @@ The implementation worker owns production code and implementation-proximate
 unit tests. The independent test worker owns behavior-level, integration,
 environment, migration, access-control, and end-to-end acceptance evidence.
 
+For Unity projects, these branches are checked out in persistent
+`unity-slot-N` worktrees only when a phase needs the local editor or MCP.
+Threads do not each receive their own editor. Analysis, implementation, tests,
+review, Play Mode/UI verification, builds, and remediation share one exclusive
+pool capped at three editors by default. See
+[unity-mcp-local.md](references/unity-mcp-local.md).
+
 ### 5. Functional-readiness gate
 
 Review begins only after the integrated ticket head proves:
@@ -308,6 +330,8 @@ uncontrolled parallel merges into the train.
 - At most one acceptance-test worker per implementation.
 - At most two active implementation/test pairs.
 - At most one merge into the train at a time.
+- For Unity local MCP, at most three leased/open editor slots by default, or
+  the explicit launch-prompt override.
 - One exhaustive review per stable scope.
 - At most two grouped remediation/re-review cycles.
 - Deterministic supervision and log extraction instead of repeated model turns.
@@ -320,6 +344,9 @@ uncontrolled parallel merges into the train.
 - A 50-million-token phase circuit breaker, a one-compaction limit, and a
   follow-up/initial-review ratio checkpoint.
 - Exact-if-available token accounting by session, ticket, and phase.
+- Deterministic orchestration metrics by action count, measured duration, and
+  exact action-token deltas, with justified, unjustified, unattributed, and
+  avoided model-wake counts.
 
 Ticket Train also maintains a proportionality profile so recommendations stay
 aligned with the product's real actors, credible threats, protected boundaries,
@@ -360,13 +387,15 @@ The registry also detects manifests from the deprecated
 `$CODEX_HOME/ticket-trains` layout. It blocks a fresh run until those manifests
 are adopted into a canonical reconciliation shell, inventoried, and resolved.
 
-Supervision is resolved before any child starts. Long work uses a verified
-run-scoped watcher when the orchestrator cannot remain in foreground wait. It
-reports transitions immediately and suppresses unchanged state without a
-model wake. If the host requires liveness, it emits a deterministic product
-notification from the manifest. Its `heartbeat` decision forbids pausing or deletion while any
-automatic action, user reminder, verification, review, or finalization remains.
-The user does not need to create a scheduled task.
+Supervision is resolved before any child starts. Long work prefers an
+event-driven wait on visible tasks or verified child-to-orchestrator completion
+callbacks. A background watcher is accepted only when it is a genuine
+zero-model process; a recurring Codex heartbeat automation is not used for
+polling. Verified visible child tasks are the normal progress indicator, so
+the orchestrator does not periodically restate that they are still running. If
+controller state says work is active but no verified visible task exists, that
+visibility gap is surfaced immediately. The user does not need to create a
+scheduled task.
 
 Each main conversation is one measured orchestration segment. At a hard
 activity threshold, the owner prepares a bounded packet and single-use token,
@@ -382,9 +411,12 @@ background watcher can protect work after a turn ends.
 
 Human gates are first-class durable state. Every approval request is headed
 `ACTION REQUIRED` in the main conversation, contains a self-sufficient decision
-packet and exact accepted replies, and remains visible in liveness updates
-until resolved. Repeated unchanged reminders use deterministic notifications
-instead of replaying the full model context.
+packet and exact accepted replies, and states whether any technical task is
+still active. When the gate is the only remaining action, the watcher is
+paused or deleted and the train waits silently for the reply: there is no
+recurring AI heartbeat and no default repeated reminder. An explicitly
+requested reminder is a deterministic product notification, never a replay of
+the orchestrator context. Supervision is reinstated before work resumes.
 
 Final pull-request feedback is first-class state too: collection window,
 deadline, snapshot ID, exact head, source counts, unresolved review threads,
@@ -397,6 +429,9 @@ The bundled deterministic tools support this control plane:
   state machine and next-action planner;
 - [`control_plane_runner.py`](scripts/control_plane_runner.py) creates bounded
   wake packets, suppresses unchanged state, and enforces orchestrator budgets;
+- [`orchestration_metrics.py`](scripts/orchestration_metrics.py) classifies
+  every controller action, records action spans and wakes, and generates the
+  scripted-versus-AI execution audit;
 - [`merge_pull_request.py`](scripts/merge_pull_request.py) is the only
   agent-authorized ticket or final PR merge path and rechecks live GitHub state;
 - [`train_supervisor.py`](scripts/train_supervisor.py) reconciles thread,
@@ -411,6 +446,12 @@ The bundled deterministic tools support this control plane:
   current lifecycle authority belongs only to the procedural controller;
 - [`token_usage.py`](scripts/token_usage.py) captures and reconciles available
   token counters.
+- [`unity_slot_manager.py`](scripts/unity_slot_manager.py) initializes and
+  leases persistent local Unity worktrees, opens editors, verifies MCP
+  readiness, and performs bounded recovery;
+- [`unity_slot_adapter.py`](scripts/unity_slot_adapter.py) executes one
+  controller-authorized Unity resource transition and records its event
+  without prompt-authored lifecycle decisions.
 
 After an interruption, the orchestrator reconstructs current state from the
 manifest, Git, threads, and pull requests before scheduling more work.
@@ -428,7 +469,9 @@ The main conversation receives concise but self-sufficient reports for:
 - train integration and final pull-request readiness;
 - manual tests that remain genuinely useful;
 - code and application attention points;
-- per-phase, per-ticket, per-session, and aggregate token usage.
+- per-phase, per-ticket, per-session, and aggregate token usage;
+- scripted-versus-AI orchestration shares and model-wake quality, with explicit
+  measurement coverage.
 
 The report formats are defined in
 [report-template.md](references/report-template.md).
@@ -455,6 +498,7 @@ ticket-train/
 │   ├── run-continuity.md
 │   ├── ticket-sources.md
 │   ├── usage-reporting.md
+│   ├── unity-mcp-local.md
 │   ├── verification-policy.md
 │   └── workflow.md
 └── scripts/
@@ -462,12 +506,16 @@ ticket-train/
     ├── control_plane_runner.py
     ├── context_packet.py
     ├── merge_pull_request.py
+    ├── orchestration_metrics.py
     ├── run_registry.py
     ├── test_ticket_train_tools.py
     ├── test_train_controller.py
+    ├── test_unity_slot_manager.py
     ├── token_usage.py
     ├── train_controller.py
     ├── train_supervisor.py
+    ├── unity_slot_adapter.py
+    ├── unity_slot_manager.py
     └── verification_runner.py
 ```
 

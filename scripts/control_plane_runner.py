@@ -19,6 +19,7 @@ from typing import Any
 
 import run_registry
 import train_controller
+import orchestration_metrics
 
 
 RUNNER_VERSION = "1.0"
@@ -30,18 +31,7 @@ DEFAULT_MODEL_WAKE_LIMIT = 50
 DEFAULT_TOOL_CALL_LIMIT = 500
 DEFAULT_CONTEXT_COMPACTION_LIMIT = 1
 
-WAIT_ACTIONS = {"WAIT_FOR_PHASE_TRANSITION", "AWAIT_HUMAN_GATE"}
-ADAPTER_ACTIONS = {
-    "ANNOUNCE_HUMAN_GATE",
-    "DISPATCH_VISIBLE_PHASE",
-    "RECONCILE_AMBIGUOUS_LAUNCH",
-    "RESUME_VISIBLE_PHASE_WITH_INPUT",
-}
-DETERMINISTIC_ACTIONS = {
-    "MERGE_TICKET_PR_INTO_TRAIN",
-    "POLL_FINAL_FEEDBACK_DETERMINISTICALLY",
-    "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY",
-}
+WAIT_ACTIONS = {"WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"}
 
 
 class RunnerError(ValueError):
@@ -217,9 +207,11 @@ def compact_action(action: dict[str, Any]) -> dict[str, Any]:
         "action", "phase_key", "phase_keys", "kind", "ticket_id", "tickets",
         "model", "reasoning_effort", "base", "branch", "thread_id",
         "head_commit", "collection_id", "deadline_at", "model_tokens",
-        "required_visibility",
+        "required_visibility", "completion_callback", "target_thread_id",
+        "watcher_id", "allowed_replacements",
     )
     result = {key: action.get(key) for key in allowed if action.get(key) is not None}
+    result["executor_kind"] = orchestration_metrics.classify_action(str(action.get("action")))
     if "gate" in action:
         result["gate"] = compact_gate(action.get("gate"))
     if "context_packet" in action:
@@ -236,36 +228,27 @@ def compact_action(action: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def active_phase_inventory(state: dict[str, Any]) -> list[dict[str, Any]]:
-    proc = train_controller.procedure(state)
-    result: list[dict[str, Any]] = []
-    for value in proc.get("phases", {}).values():
-        if not isinstance(value, dict) or value.get("launch_state") not in train_controller.ACTIVE_PHASE_STATES:
-            continue
-        result.append({
-            "phase_key": value.get("phase_key"),
-            "ticket_id": value.get("ticket_id"),
-            "kind": value.get("kind"),
-            "state": value.get("launch_state"),
-            "thread_id": value.get("thread_id"),
-            "client_thread_id": value.get("client_thread_id"),
-        })
-    return result
-
-
-def wake_kind(actions: list[dict[str, Any]], rotation: dict[str, Any], pending_handoff: Any) -> str:
+def wake_kind(
+    actions: list[dict[str, Any]], rotation: dict[str, Any], pending_handoff: Any,
+    supervision: dict[str, Any],
+) -> str:
     if isinstance(pending_handoff, dict) and pending_handoff.get("status") == "PREPARED":
         return "COMPLETE_CONTROLLED_HANDOFF"
+    names = {str(item.get("action")) for item in actions}
+    if (not names or names.issubset(WAIT_ACTIONS)) and not supervision.get("orchestrator_status_required"):
+        return "NO_MODEL_WAKE"
     if rotation.get("status") == "REQUIRED":
         return "ROTATE_ORCHESTRATOR"
-    names = {str(item.get("action")) for item in actions}
-    if not names or names.issubset(WAIT_ACTIONS):
-        return "NO_MODEL_WAKE"
-    if names & ADAPTER_ACTIONS:
+    if supervision.get("orchestrator_status_required"):
         return "WAKE_ADAPTER"
-    if names and names.issubset(DETERMINISTIC_ACTIONS):
+    executor_kinds = {orchestration_metrics.classify_action(name) for name in names}
+    if "technical-model" in executor_kinds:
+        return "WAKE_TECHNICAL_DECISION"
+    if "adapter" in executor_kinds:
+        return "WAKE_ADAPTER"
+    if executor_kinds == {"deterministic"}:
         return "RUN_DETERMINISTIC"
-    return "WAKE_TECHNICAL_DECISION"
+    raise RunnerError("action executor taxonomy did not produce a wake class")
 
 
 def build_packet(state: dict[str, Any], control_plane: dict[str, Any]) -> dict[str, Any]:
@@ -273,6 +256,7 @@ def build_packet(state: dict[str, Any], control_plane: dict[str, Any]) -> dict[s
     owner = current_owner(state)
     require(owner is not None, "orchestrator lease has no owner")
     actions = [compact_action(item) for item in train_controller.next_actions(state)]
+    supervision = train_controller.supervision_projection(state, actions)
     rotation = refresh_rotation(control_plane, owner)
     pending_action = state.get("pending_human_action")
     if isinstance(pending_action, dict):
@@ -292,13 +276,16 @@ def build_packet(state: dict[str, Any], control_plane: dict[str, Any]) -> dict[s
         "controller_revision": proc.get("revision"),
         "controller_updated_at": proc.get("updated_at"),
         "owner_thread_id": owner,
-        "wake_kind": wake_kind(actions, rotation, state.get("pending_orchestrator_handoff")),
+        "wake_kind": wake_kind(
+            actions, rotation, state.get("pending_orchestrator_handoff"), supervision
+        ),
         "ticket_states": {
             ticket_id: value.get("status")
             for ticket_id, value in proc.get("tickets", {}).items()
             if isinstance(value, dict)
         },
-        "active_phases": active_phase_inventory(state),
+        "active_phases": train_controller.active_phase_inventory(state),
+        "supervision_projection": supervision,
         "pending_human_action": pending_action,
         "finalization_status": (proc.get("finalization") or {}).get("status"),
         "cost_anomaly_count": len(train_controller.unresolved_cost_anomalies(proc)),
@@ -359,6 +346,12 @@ def step(args: argparse.Namespace) -> int:
         control_plane = ensure_control_plane(state)
         packet = build_packet(state, control_plane)
         result = write_packet(path, control_plane, packet, args.output_dir)
+        metrics = orchestration_metrics.ensure_metrics(state)
+        if result["status"] == "packet-written":
+            wake_counts = metrics["decision_packets_by_wake_kind"]
+            wake_kind = str(result["wake_kind"])
+            wake_counts[wake_kind] = int(wake_counts.get(wake_kind, 0)) + 1
+            metrics["updated_at"] = now_iso()
         state["manifest_updated_at"] = now_iso()
         run_registry.save_json(path, state)
     sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
