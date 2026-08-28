@@ -596,6 +596,29 @@ def create_gate(
     return gates[gate_id]
 
 
+def input_gate_resume_mode(proc: dict[str, Any], gate: dict[str, Any]) -> str:
+    explicit = gate.get("resume_mode")
+    if explicit is not None:
+        require(
+            explicit in {"ticket-state", "same-thread", "prelaunch-retry"},
+            "invalid input gate resume mode",
+        )
+        return str(explicit)
+    phase_key = gate.get("phase_key")
+    if not phase_key:
+        return "ticket-state"
+    interrupted = phase(proc, str(phase_key))
+    if interrupted.get("launch_state") == "NEEDS_INPUT":
+        return "same-thread"
+    if (
+        interrupted.get("launch_state") == "BLOCKED"
+        and not interrupted.get("thread_id")
+        and not interrupted.get("client_thread_id")
+    ):
+        return "prelaunch-retry"
+    raise ControllerError("input gate cannot infer a safe resume mode")
+
+
 def active_execution_pairs(proc: dict[str, Any]) -> int:
     return sum(
         1
@@ -747,6 +770,7 @@ def terminate_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, An
         gate.update({key: request[key] for key in (
             "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
         )})
+        gate["resume_mode"] = "same-thread"
         item["launch_state"] = "NEEDS_INPUT"
         ticket_item["status"] = "AWAITING_REQUIRED_INPUT"
     else:
@@ -1299,6 +1323,18 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         gate.update({key: event[key] for key in (
             "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
         )})
+        phase_key = gate.get("phase_key")
+        if phase_key:
+            interrupted = phase(proc, str(phase_key))
+            require(
+                interrupted.get("launch_state") == "BLOCKED"
+                and not interrupted.get("thread_id")
+                and not interrupted.get("client_thread_id"),
+                "pre-launch input requires a blocked phase with no created task",
+            )
+            gate["resume_mode"] = "prelaunch-retry"
+        else:
+            gate["resume_mode"] = "ticket-state"
         item["status"] = "AWAITING_REQUIRED_INPUT"
         return
 
@@ -1374,7 +1410,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         if isinstance(pending_action, dict) and pending_action.get("gate_id") == gate["gate_id"]:
             state["pending_human_action"] = None
         item = ticket(proc, gate["ticket_id"])
-        if gate.get("phase_key"):
+        resume_mode = input_gate_resume_mode(proc, gate)
+        gate["resume_mode"] = resume_mode
+        if resume_mode == "same-thread":
             interrupted = phase(proc, gate["phase_key"])
             require(interrupted.get("launch_state") == "NEEDS_INPUT", "input phase is not waiting")
             interrupted["launch_state"] = "INPUT_READY"
@@ -1382,6 +1420,22 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 "summary": event["response_summary"],
                 "artifact": event["response_artifact"],
             }
+        elif resume_mode == "prelaunch-retry":
+            interrupted = phase(proc, gate["phase_key"])
+            require(
+                interrupted.get("launch_state") == "BLOCKED"
+                and not interrupted.get("thread_id")
+                and not interrupted.get("client_thread_id"),
+                "pre-launch input phase is not safely retryable",
+            )
+            interrupted["launch_state"] = "INTENT_RECORDED"
+            interrupted["prelaunch_retry_count"] = int(interrupted.get("prelaunch_retry_count", 0)) + 1
+            interrupted["provided_input"] = {
+                "summary": event["response_summary"],
+                "artifact": event["response_artifact"],
+            }
+            interrupted["retry_authorized_by_gate"] = gate["gate_id"]
+            item["status"] = gate.get("prior_ticket_status") or "READY_FOR_IMPLEMENTATION"
         else:
             item["status"] = gate.get("prior_ticket_status") or "READY_FOR_IMPLEMENTATION"
         return

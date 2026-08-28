@@ -51,6 +51,8 @@ The main Codex conversation is a thin adapter. It asks the controller for the
 next action, executes only that action through the available task, GitHub, and
 shell tools, then records the observed result as a new event. It must not
 invent a transition because a prompt says that a phase is probably finished.
+The canonical lease must contain the real user-visible Codex task ID. Agent
+paths such as `/root` or `/root/review` are invalid orchestrator identities.
 
 The adapter reads controller state through
 `scripts/control_plane_runner.py`, not by loading the full manifest into the
@@ -63,6 +65,10 @@ Every emitted next action includes one authoritative `executor_kind`:
 action with `orchestration_metrics.py start-action` and `finish-action`, and
 record every actual wake. The classifier fails closed when an action is absent
 from or duplicated in the taxonomy; prompts must not override it.
+The bounded decision packet also emits `authorized_handler`. Only actions whose
+handler is `scripts/unity_slot_adapter.py` may invoke that resource adapter;
+`main-thread-controller-adapter` means apply the named controller transition
+first.
 
 ## Bootstrap
 
@@ -192,6 +198,14 @@ creates an unannounced human-action gate, freezes only the affected ticket,
 and keeps independent work eligible. After `INPUT_PROVIDED`, the next action
 is `RESUME_VISIBLE_PHASE_WITH_INPUT`; record `PHASE_RESUMED` only after the
 same visible thread has received the answer and is running again.
+
+An environment failure before any visible task exists is different. A
+`HUMAN_INPUT_REQUESTED` event may attach to a `BLOCKED` phase only when that
+phase has neither a client task ID nor a real task ID. The gate records
+`resume_mode = prelaunch-retry`; after `INPUT_PROVIDED`, the controller restores
+the prior ticket state and rearms the same phase as `INTENT_RECORDED`. It never
+emits `RESUME_VISIBLE_PHASE_WITH_INPUT` for a task that was never created and
+never duplicates the technical phase solely to apply the answer.
 
 The controller rejects a completion when:
 

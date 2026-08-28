@@ -992,6 +992,10 @@ class TrainControllerTests(unittest.TestCase):
             packet = json.loads(Path(packet_result["packet_reference"]).read_text(encoding="utf-8"))
             self.assertEqual(packet["next_actions"][0]["executor_kind"], "adapter")
             self.assertEqual(
+                packet["next_actions"][0]["authorized_handler"],
+                "main-thread-controller-adapter",
+            )
+            self.assertEqual(
                 packet["next_actions"][0]["completion_callback"]["target_thread_id"],
                 "thread-main",
             )
@@ -1372,6 +1376,101 @@ class TrainControllerTests(unittest.TestCase):
             self.assertEqual(action["action"], "RECORD_ANALYSIS_DISPATCH_INTENT")
             self.assertEqual(action["ticket_id"], "T-1")
             self.assertEqual(action["retry_of_phase_key"], "run:T-1:analysis:1")
+
+    def test_prelaunch_input_rearms_same_phase_without_a_fake_thread_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            model, effort = train_controller.setting_from_matrix(
+                train_controller.ANALYSIS_MATRIX, "LOW", "LOW"
+            )
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="triage",
+                phase_key="run:run:triage:1",
+                base_commit="base-sha",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                triage_profile="standard",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            run.materialize("run:run:triage:1", "thread-triage")
+            run.complete_phase("run:run:triage:1", "gpt-5.6-terra", "medium")
+            self.assertEqual(run.apply(
+                "TICKET_TRIAGED",
+                ticket_id="T-1",
+                phase_key="run:run:triage:1",
+                criticality="LOW",
+                complexity="LOW",
+                confidence="high",
+                triage_model="gpt-5.6-terra",
+                triage_reasoning_effort="medium",
+                analysis_model=model,
+                analysis_reasoning_effort=effort,
+                analysis_routing_conformance="conformant",
+                analysis_unity_requirement="none",
+            ), 0)
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="analysis",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis:1",
+                base_commit="base-sha",
+                model=model,
+                reasoning_effort=effort,
+                routing_conformance="conformant",
+                unity_requirement="none",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            self.assertEqual(run.apply(
+                "PHASE_LAUNCH_OBSERVED",
+                phase_key="run:T-1:analysis:1",
+                launch_state="BLOCKED",
+                reconciliation_evidence_reference="logs/prelaunch-block.json",
+            ), 0)
+            self.assertEqual(run.apply(
+                "HUMAN_INPUT_REQUESTED",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis:1",
+                gate_id="T-1:prelaunch-input:1",
+                revision="prelaunch-1",
+                question="Authorize reversible environment preservation?",
+                reason="A managed local override blocks the checkout.",
+                blocked_scope="T-1 analysis",
+                continuing_scope="none",
+                accepted_replies=["Authorize", "Cancel"],
+            ), 0)
+            gate = run.state()["procedure"]["human_gates"]["T-1:prelaunch-input:1"]
+            self.assertEqual(gate["resume_mode"], "prelaunch-retry")
+            self.assertEqual(run.apply(
+                "GATE_ANNOUNCED",
+                gate_id="T-1:prelaunch-input:1",
+                revision="prelaunch-1",
+                decision_summary="Authorize the reversible preservation step.",
+                evidence_summary="No user code or task thread exists yet.",
+                blocked_scope="T-1 analysis",
+                continuing_scope="none",
+                accepted_replies=["Authorize", "Cancel"],
+            ), 0)
+            self.assertEqual(run.apply(
+                "INPUT_PROVIDED",
+                gate_id="T-1:prelaunch-input:1",
+                revision="prelaunch-1",
+                response_summary="Authorized.",
+                response_artifact="main-thread:user-message-1",
+            ), 0)
+            state = run.state()
+            phase = state["procedure"]["phases"]["run:T-1:analysis:1"]
+            self.assertEqual(phase["launch_state"], "INTENT_RECORDED")
+            self.assertIsNone(phase["thread_id"])
+            self.assertEqual(phase["prelaunch_retry_count"], 1)
+            self.assertEqual(state["procedure"]["tickets"]["T-1"]["status"], "TRIAGED")
+            self.assertEqual(len(state["procedure"]["phases"]), 2)
+            self.assertEqual(
+                train_controller.next_actions(state)[0]["action"],
+                "DISPATCH_VISIBLE_PHASE",
+            )
 
     def test_hidden_phase_requires_phase_specific_user_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

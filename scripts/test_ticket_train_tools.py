@@ -231,6 +231,12 @@ class RunRegistryTests(unittest.TestCase):
             lease_minutes=30,
         )
 
+    def test_agent_path_cannot_be_used_as_visible_orchestrator_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.init_args(Path(directory), owner="/root")
+            with self.assertRaisesRegex(ValueError, "real user-visible task"):
+                run_registry.init_run(args)
+
     def test_duplicate_init_returns_existing_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -346,6 +352,14 @@ class RunRegistryTests(unittest.TestCase):
 
 
 class ControlPlaneRunnerTests(unittest.TestCase):
+    def test_unity_resource_actions_name_the_only_authorized_adapter(self) -> None:
+        action = control_plane_runner.compact_action({
+            "action": "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY",
+            "owner_key": "run:T-1:analysis:1",
+        })
+        self.assertEqual(action["executor_kind"], "deterministic")
+        self.assertEqual(action["authorized_handler"], "scripts/unity_slot_adapter.py")
+
     def create_manifest(self, root: Path) -> Path:
         args = RunRegistryTests().init_args(root)
         with contextlib.redirect_stdout(io.StringIO()):

@@ -72,6 +72,14 @@ existing slot directories, and configures each slot with all AI Game Dev
 tools, prompts, and resources enabled. It uses the `unity-mcp-cli` version
 matching the Unity package version pinned in `Packages/manifest.json`.
 
+The generated worktree-local `.codex/config.toml` is a managed slot override.
+Before switching a slot to another branch or detached commit, the manager
+preserves its bytes in memory, restores the tracked template for the Git
+transition, reapplies the local override, and restores `skip-worktree`. This is
+automatic and reversible; it must not create a user gate or require a manual
+stash. Project files other than this exact managed override remain subject to
+the ordinary clean-worktree refusal.
+
 The stable worktree path preserves Unity's imported Library and the ignored
 `UserSettings/AI-Game-Developer-Config.json` across tickets. This minimizes
 reimports, repeated agent configuration, port changes, and Windows firewall
@@ -134,10 +142,16 @@ One invocation performs exactly one authorized Unity resource transition and
 records its idempotent controller event. Repeat only when the returned
 `next_actions` authorizes another deterministic Unity transition.
 
+Do not invoke this adapter for `RECORD_*`, `DISPATCH_*`, gate, review, or other
+controller actions. In particular, record a phase dispatch intent before the
+controller can authorize slot acquisition. A refusal naming a non-Unity next
+action means the orchestrator called the wrong handler; execute that named
+action instead of treating the refusal as an environment failure.
+
 On acquisition, the manager:
 
 1. obtains an exclusive registry lock;
-2. rejects a dirty slot;
+2. rejects project dirt while preserving the exact managed Codex MCP override;
 3. checks out the required branch, or an exact detached head for read-only and
    final verification;
 4. verifies that the observed head equals the controller-authorized head;
@@ -145,7 +159,10 @@ On acquisition, the manager:
 6. opens the Unity Editor;
 7. waits for local MCP readiness and records status evidence;
 8. retries close/open/readiness at most twice after the initial attempt;
-9. records `BLOCKED_HUMAN` with diagnostics if bounded recovery fails.
+9. quarantines a slot that cannot prepare the requested revision and tries the
+   next eligible slot;
+10. records `BLOCKED_HUMAN` with diagnostics only after the bounded eligible
+    pool or readiness recovery is exhausted.
 
 The controller refuses to launch or resume an MCP-backed phase without its
 matching active lease. A completed, failed, blocked, or input-waiting phase

@@ -45,6 +45,7 @@ STABLE_CONFIG_FIELDS = (
     "prompts",
     "resources",
 )
+MANAGED_CODEX_CONFIG = ".codex/config.toml"
 
 
 class SlotError(ValueError):
@@ -324,13 +325,48 @@ def ensure_clean(slot_path: Path) -> None:
     require(not dirty, f"Unity slot has uncommitted changes: {slot_path}")
 
 
+def switch_preserving_managed_config(
+    slot_path: Path, *, branch: str | None, expected_head: str
+) -> None:
+    config_path = slot_path / MANAGED_CODEX_CONFIG
+    tracked = git(slot_path, "ls-files", "--error-unmatch", MANAGED_CODEX_CONFIG, check=False)
+    if tracked.returncode != 0 or not config_path.is_file():
+        if branch:
+            git(slot_path, "switch", branch)
+        else:
+            git(slot_path, "switch", "--detach", expected_head)
+        return
+
+    target_has_config = git(
+        slot_path,
+        "cat-file",
+        "-e",
+        f"{expected_head}:{MANAGED_CODEX_CONFIG}",
+        check=False,
+    )
+    require(
+        target_has_config.returncode == 0,
+        f"target revision does not track the managed Unity MCP config: {expected_head}",
+    )
+    preserved = config_path.read_bytes()
+    git(slot_path, "update-index", "--no-skip-worktree", MANAGED_CODEX_CONFIG)
+    git(slot_path, "restore", "--source=HEAD", "--staged", "--worktree", "--", MANAGED_CODEX_CONFIG)
+    try:
+        if branch:
+            git(slot_path, "switch", branch)
+        else:
+            git(slot_path, "switch", "--detach", expected_head)
+    finally:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_bytes(preserved)
+        git(slot_path, "update-index", "--skip-worktree", MANAGED_CODEX_CONFIG)
+
+
 def position_slot(slot_path: Path, *, branch: str | None, expected_head: str) -> tuple[str | None, str]:
     ensure_clean(slot_path)
     if branch:
         git(slot_path, "show-ref", "--verify", f"refs/heads/{branch}")
-        git(slot_path, "switch", branch)
-    else:
-        git(slot_path, "switch", "--detach", expected_head)
+    switch_preserving_managed_config(slot_path, branch=branch, expected_head=expected_head)
     head = git(slot_path, "rev-parse", "HEAD").stdout.strip()
     require(head == expected_head, f"Unity slot head mismatch: expected {expected_head}, got {head}")
     actual_branch = git(slot_path, "branch", "--show-current").stdout.strip() or None
@@ -384,28 +420,55 @@ def acquire_slot(args: argparse.Namespace) -> int:
         if isinstance(owned_slot, dict) and owned_slot.get("status") == "LEASED":
             return emit({"status": "already-acquired", "state": str(state_path), "slot": slot_summary(owned_slot)})
         if isinstance(owned_slot, dict):
-            slot = owned_slot
-            lease_id = slot["lease"]["lease_id"]
+            candidates = [owned_slot]
         else:
-            eligible = [
+            candidates = [
                 slot
                 for slot in state["slots"][: int(state["max_editors"])]
                 if slot.get("status") in {"IDLE", "READY"} and not slot.get("lease")
             ]
-            require(eligible, "no Unity editor slot is currently available")
+            require(candidates, "no Unity editor slot is currently available")
             if args.branch:
-                eligible.sort(key=lambda candidate: candidate.get("branch") != args.branch)
-            slot = eligible[0]
-            lease_id = uuid.uuid4().hex
-        slot_path = Path(slot["path"]).resolve()
-        branch, head = position_slot(slot_path, branch=args.branch, expected_head=args.expected_head)
-        config_reference, config_digest = provision_slot(repository, slot_path, skip_cli=args.skip_cli)
+                candidates.sort(key=lambda candidate: candidate.get("branch") != args.branch)
+        preparation_failures: list[dict[str, str]] = []
+        prepared: tuple[dict[str, Any], str | None, str, str | None, str | None] | None = None
+        for candidate in candidates:
+            slot_path = Path(candidate["path"]).resolve()
+            try:
+                branch, head = position_slot(
+                    slot_path, branch=args.branch, expected_head=args.expected_head
+                )
+                config_reference, config_digest = provision_slot(
+                    repository, slot_path, skip_cli=args.skip_cli
+                )
+                prepared = (candidate, branch, head, config_reference, config_digest)
+                break
+            except (SlotError, subprocess.TimeoutExpired) as error:
+                candidate["status"] = "BLOCKED_HUMAN"
+                candidate["last_error"] = str(error)
+                candidate["recovery_attempts"] = 0
+                preparation_failures.append({
+                    "slot_id": str(candidate["slot_id"]),
+                    "error": str(error),
+                })
+                save_state(state_path, state)
+        require(
+            prepared is not None,
+            f"no Unity slot could prepare the requested revision: {preparation_failures}",
+        )
+        slot, branch, head, config_reference, config_digest = prepared
+        lease_id = (
+            slot["lease"]["lease_id"]
+            if isinstance(slot.get("lease"), dict)
+            else uuid.uuid4().hex
+        )
         slot["status"] = "STARTING"
         slot["branch"] = branch
         slot["head"] = head
         slot["config_reference"] = config_reference
         slot["config_profile_sha256"] = config_digest
         slot["last_error"] = None
+        slot["preparation_failures_before_acquire"] = preparation_failures
         slot["lease"] = {
             "lease_id": lease_id,
             "phase_key": args.phase_key,

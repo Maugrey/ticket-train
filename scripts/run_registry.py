@@ -202,7 +202,19 @@ def lease_expired(lease: Any) -> bool:
     return expires <= now()
 
 
+def validate_visible_thread_id(owner_thread_id: str) -> str:
+    value = str(owner_thread_id or "").strip()
+    if not value:
+        raise ValueError("orchestrator thread ID is required")
+    if value.startswith(("/", "\\")) or value.casefold() in {"root", "agent", "orchestrator"}:
+        raise ValueError(
+            "orchestrator thread ID must identify the real user-visible task, not an agent path"
+        )
+    return value
+
+
 def lease(owner_thread_id: str, lease_minutes: int) -> dict[str, Any]:
+    owner_thread_id = validate_visible_thread_id(owner_thread_id)
     timestamp = now()
     return {
         "owner_thread_id": owner_thread_id,

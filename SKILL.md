@@ -131,6 +131,10 @@ If the user did not specify dry-run versus live execution, default to live only 
 
 Keep the resolved configuration fixed for the run. Apply a later change only after an explicit user instruction, then report the change in the main thread.
 
+When initializing or claiming the run registry, pass the actual user-visible
+Codex task ID as `orchestrator_thread`. Never pass an agent path such as
+`/root`, a subagent name, or a narrative role label.
+
 Treat authorization for `max` as separate from approval mode. Persist its exact
 ticket/run, phase, and head scope. Ultra is outside standard routing and
 requires a separate explicit user request for delegated execution.

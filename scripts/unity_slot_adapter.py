@@ -203,7 +203,11 @@ def step(args: argparse.Namespace) -> int:
     elif action_name == "RELEASE_UNITY_SLOT_DETERMINISTICALLY":
         result = release(state_path, action)
     else:
-        raise AdapterError(f"next action is not a deterministic Unity slot transition: {action_name}")
+        raise AdapterError(
+            "next action is not a deterministic Unity slot transition: "
+            f"{action_name}; execute that controller action first and invoke "
+            "unity_slot_adapter.py only for INITIALIZE, ACQUIRE, or RELEASE Unity actions"
+        )
     updated = run_registry.load_json(state_path)
     output = {
         "status": "applied",

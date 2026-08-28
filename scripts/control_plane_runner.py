@@ -32,6 +32,11 @@ DEFAULT_TOOL_CALL_LIMIT = 500
 DEFAULT_CONTEXT_COMPACTION_LIMIT = 1
 
 WAIT_ACTIONS = {"WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"}
+UNITY_SLOT_ACTIONS = {
+    "INITIALIZE_UNITY_SLOTS_DETERMINISTICALLY",
+    "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY",
+    "RELEASE_UNITY_SLOT_DETERMINISTICALLY",
+}
 
 
 class RunnerError(ValueError):
@@ -211,7 +216,18 @@ def compact_action(action: dict[str, Any]) -> dict[str, Any]:
         "watcher_id", "allowed_replacements",
     )
     result = {key: action.get(key) for key in allowed if action.get(key) is not None}
-    result["executor_kind"] = orchestration_metrics.classify_action(str(action.get("action")))
+    action_name = str(action.get("action"))
+    executor_kind = orchestration_metrics.classify_action(action_name)
+    result["executor_kind"] = executor_kind
+    result["authorized_handler"] = (
+        "scripts/unity_slot_adapter.py"
+        if action_name in UNITY_SLOT_ACTIONS
+        else "main-thread-controller-adapter"
+        if executor_kind == "adapter"
+        else "named-deterministic-command"
+        if executor_kind == "deterministic"
+        else "fresh-technical-model-task"
+    )
     if "gate" in action:
         result["gate"] = compact_gate(action.get("gate"))
     if "context_packet" in action:
