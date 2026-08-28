@@ -1224,6 +1224,67 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             finalize_analysis_gate(proc, item)
         return
 
+    if event_type == "ANALYSIS_ROUTE_VALIDATION_RECONCILED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(
+            item.get("status") == "ANALYSIS_RECONCILIATION_REQUIRED",
+            "analysis route validation is not awaiting reconciliation",
+        )
+        analysis = item.get("analysis")
+        require(isinstance(analysis, dict), "analysis reconciliation requires a recorded analysis")
+        failed = analysis.get("routing_validation")
+        require(
+            isinstance(failed, dict) and failed.get("status") == "failed",
+            "analysis reconciliation requires a failed route validation",
+        )
+        require_fields(
+            event,
+            (
+                "analysis_revision", "failed_phase_key", "reconciliation_reference",
+                "reconciliation_summary",
+            ),
+            "analysis route validation reconciliation",
+        )
+        require(
+            event["analysis_revision"] == analysis.get("analysis_revision"),
+            "analysis reconciliation revision mismatch",
+        )
+        require(
+            event["failed_phase_key"] == failed.get("phase_key"),
+            "analysis reconciliation does not target the recorded failed validation",
+        )
+        updated_difficulty = event.get("updated_unresolved_implementation_difficulty")
+        require(
+            isinstance(updated_difficulty, list),
+            "analysis reconciliation requires the updated unresolved implementation difficulty",
+        )
+        retry_context = validate_compact_context(
+            event, "analysis route validation reconciliation"
+        )
+        failed["superseded_by_event_id"] = event["event_id"]
+        failed["superseded_at"] = now_iso()
+        analysis["unresolved_implementation_difficulty"] = updated_difficulty
+        analysis["routing_validation_status"] = "required"
+        reconciliation = {
+            "event_id": event["event_id"],
+            "type": event_type,
+            "analysis_revision": event["analysis_revision"],
+            "failed_phase_key": event["failed_phase_key"],
+            "reconciliation_reference": event["reconciliation_reference"],
+            "reconciliation_summary": event["reconciliation_summary"],
+            "updated_unresolved_implementation_difficulty": updated_difficulty,
+            "retry_context_packet": retry_context,
+            "recorded_at": now_iso(),
+        }
+        analysis.setdefault("routing_validation_reconciliations", []).append(reconciliation)
+        required = item.get("analysis_route_validation_required")
+        require(isinstance(required, dict), "analysis route validation requirement is missing")
+        required["retry_of_phase_key"] = event["failed_phase_key"]
+        required["retry_context_packet"] = retry_context
+        required["reconciliation_reference"] = event["reconciliation_reference"]
+        item["status"] = "ANALYSIS_ROUTE_VALIDATION_REQUIRED"
+        return
+
     if event_type == "DEPENDENCIES_CONSOLIDATED":
         require(not proc.get("dependencies_consolidated"), "dependencies already consolidated")
         require(
@@ -1491,6 +1552,68 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             analysis["unresolved_implementation_difficulty"] = event["unresolved_implementation_difficulty"]
         else:
             item["status"] = "NEEDS_CONTRACT_AMENDMENT"
+        return
+
+    if event_type == "PLAN_CONTRACT_AMENDMENT_RECORDED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(
+            item.get("status") == "NEEDS_CONTRACT_AMENDMENT",
+            "implementation contract is not awaiting amendment",
+        )
+        analysis = item.get("analysis")
+        require(isinstance(analysis, dict), "contract amendment requires a recorded analysis")
+        failed = item.get("plan_contract_validation")
+        require(
+            isinstance(failed, dict) and failed.get("status") == "failed",
+            "contract amendment requires a failed plan-contract validation",
+        )
+        require_fields(
+            event,
+            (
+                "analysis_revision", "failed_phase_key", "implementation_contract_revision",
+                "verification_contract_revision", "amendment_reference", "amendment_summary",
+            ),
+            "plan contract amendment",
+        )
+        require(
+            event["analysis_revision"] == analysis.get("analysis_revision"),
+            "contract amendment analysis revision mismatch",
+        )
+        require(
+            event["failed_phase_key"] == failed.get("phase_key"),
+            "contract amendment does not target the recorded failed validation",
+        )
+        updated_difficulty = event.get("updated_unresolved_implementation_difficulty")
+        require(
+            isinstance(updated_difficulty, list),
+            "contract amendment requires the updated unresolved implementation difficulty",
+        )
+        retry_context = validate_compact_context(event, "plan contract amendment")
+        failed["superseded_by_event_id"] = event["event_id"]
+        failed["superseded_at"] = now_iso()
+        analysis["implementation_contract_revision"] = event["implementation_contract_revision"]
+        analysis["verification_contract_revision"] = event["verification_contract_revision"]
+        analysis["unresolved_implementation_difficulty"] = updated_difficulty
+        amendment = {
+            "event_id": event["event_id"],
+            "type": event_type,
+            "analysis_revision": event["analysis_revision"],
+            "failed_phase_key": event["failed_phase_key"],
+            "implementation_contract_revision": event["implementation_contract_revision"],
+            "verification_contract_revision": event["verification_contract_revision"],
+            "amendment_reference": event["amendment_reference"],
+            "amendment_summary": event["amendment_summary"],
+            "updated_unresolved_implementation_difficulty": updated_difficulty,
+            "retry_context_packet": retry_context,
+            "recorded_at": now_iso(),
+        }
+        item.setdefault("plan_contract_amendments", []).append(amendment)
+        item["plan_contract_retry"] = {
+            "retry_of_phase_key": event["failed_phase_key"],
+            "retry_context_packet": retry_context,
+            "amendment_reference": event["amendment_reference"],
+        }
+        item["status"] = "READY_FOR_IMPLEMENTATION"
         return
 
     if event_type == "EXECUTION_PAIR_DISPATCHED":
@@ -3103,12 +3226,33 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
             and phase_value.get("ticket_id") == ticket_id
         ]
         if validation_phases and validation_phases[-1].get("launch_state") == "COMPLETED":
-            route_validation_actions.append({
-                "action": "RECORD_ANALYSIS_ROUTE_VALIDATION_RESULT",
-                "ticket_id": ticket_id,
-                "phase_key": validation_phases[-1]["phase_key"],
-                "analysis_revision": value["analysis"]["analysis_revision"],
-            })
+            latest_phase = validation_phases[-1]
+            recorded = value.get("analysis", {}).get("routing_validation", {})
+            required = value.get("analysis_route_validation_required", {})
+            if recorded.get("phase_key") != latest_phase.get("phase_key"):
+                route_validation_actions.append({
+                    "action": "RECORD_ANALYSIS_ROUTE_VALIDATION_RESULT",
+                    "ticket_id": ticket_id,
+                    "phase_key": latest_phase["phase_key"],
+                    "analysis_revision": value["analysis"]["analysis_revision"],
+                })
+            elif required.get("retry_context_packet"):
+                route_validation_actions.append({
+                    "action": "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT",
+                    "ticket_id": ticket_id,
+                    "analysis_revision": value["analysis"]["analysis_revision"],
+                    "required_model": required["required_model"],
+                    "required_reasoning_effort": required["required_reasoning_effort"],
+                    "retry_of_phase_key": required.get("retry_of_phase_key"),
+                    "context_packet": required["retry_context_packet"],
+                    "reconciliation_reference": required.get("reconciliation_reference"),
+                })
+            else:
+                route_validation_actions.append({
+                    "action": "BLOCKED_OR_INCONSISTENT_STATE",
+                    "reason": "A recorded failed analysis route validation has no reconciliation packet.",
+                    "ticket_id": ticket_id,
+                })
         elif not validation_phases:
             route_validation_actions.append({
                 "action": "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT",
@@ -3171,11 +3315,29 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
                 and phase_value.get("ticket_id") == ticket_id
             ]
             if phases and phases[-1].get("launch_state") == "COMPLETED":
-                contract_actions.append({
-                    "action": "RECORD_PLAN_CONTRACT_VALIDATION_RESULT",
-                    "ticket_id": ticket_id,
-                    "phase_key": phases[-1]["phase_key"],
-                })
+                latest_phase = phases[-1]
+                recorded = value.get("plan_contract_validation", {})
+                retry = value.get("plan_contract_retry", {})
+                if recorded.get("phase_key") != latest_phase.get("phase_key"):
+                    contract_actions.append({
+                        "action": "RECORD_PLAN_CONTRACT_VALIDATION_RESULT",
+                        "ticket_id": ticket_id,
+                        "phase_key": latest_phase["phase_key"],
+                    })
+                elif retry.get("retry_context_packet"):
+                    contract_actions.append({
+                        "action": "RECORD_PLAN_CONTRACT_VALIDATION_DISPATCH_INTENT",
+                        "ticket_id": ticket_id,
+                        "retry_of_phase_key": retry.get("retry_of_phase_key"),
+                        "context_packet": retry["retry_context_packet"],
+                        "amendment_reference": retry.get("amendment_reference"),
+                    })
+                else:
+                    contract_actions.append({
+                        "action": "BLOCKED_OR_INCONSISTENT_STATE",
+                        "reason": "A recorded failed plan-contract validation has no amendment packet.",
+                        "ticket_id": ticket_id,
+                    })
             elif not phases:
                 contract_actions.append({
                     "action": "RECORD_PLAN_CONTRACT_VALIDATION_DISPATCH_INTENT",

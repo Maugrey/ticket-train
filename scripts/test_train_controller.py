@@ -686,6 +686,90 @@ class TrainControllerTests(unittest.TestCase):
             result_action = train_controller.next_actions(run.state())[0]
             self.assertEqual(result_action["action"], "RECORD_ANALYSIS_ROUTE_VALIDATION_RESULT")
             self.assertEqual(result_action["analysis_revision"], "analysis-1")
+            self.assertEqual(run.apply(
+                "ANALYSIS_ROUTE_VALIDATION_RECORDED",
+                ticket_id="T-1",
+                phase_key="run:T-1:analysis-route-validation:1",
+                analysis_revision="analysis-1",
+                status="failed",
+                validated_sections=["classification evidence missing from compact packet"],
+                report_reference="tasks/thread-route-validation.json",
+            ), 0)
+            self.assertEqual(
+                run.state()["procedure"]["tickets"]["T-1"]["status"],
+                "ANALYSIS_RECONCILIATION_REQUIRED",
+            )
+            self.assertEqual(run.apply(
+                "ANALYSIS_ROUTE_VALIDATION_RECONCILED",
+                ticket_id="T-1",
+                analysis_revision="analysis-1",
+                failed_phase_key="run:T-1:analysis-route-validation:1",
+                reconciliation_reference="artifacts/reconciliation.json",
+                reconciliation_summary="The compact packet now contains the recorded classification evidence.",
+                updated_unresolved_implementation_difficulty=[],
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            retry_action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(retry_action["action"], "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT")
+            self.assertEqual(retry_action["retry_of_phase_key"], "run:T-1:analysis-route-validation:1")
+            self.assertEqual(retry_action["context_packet"]["reference"], "artifacts/context.json")
+
+    def test_failed_plan_contract_validation_can_be_amended_without_reanalysis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze(criticality="HIGH", complexity="HIGH")
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "RECORD_PLAN_CONTRACT_VALIDATION_DISPATCH_INTENT",
+            )
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED",
+                kind="plan_contract_validation",
+                ticket_id="T-1",
+                phase_key="run:T-1:plan-contract:1",
+                base_commit="base-sha",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                routing_conformance="conformant",
+                contract_validation_profile="standard",
+                unity_requirement="none",
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            run.materialize("run:T-1:plan-contract:1", "thread-plan-contract")
+            run.complete_phase("run:T-1:plan-contract:1", "gpt-5.6-terra", "medium")
+            self.assertEqual(run.apply(
+                "PLAN_CONTRACT_VALIDATION_RECORDED",
+                ticket_id="T-1",
+                phase_key="run:T-1:plan-contract:1",
+                status="failed",
+                analysis_complexity="HIGH",
+                residual_implementation_complexity="HIGH",
+                verification_complexity="HIGH",
+                complexity_reduction_evidence="The compact packet was incomplete.",
+                unresolved_implementation_difficulty=["missing manifest"],
+                validation_reference="tasks/thread-plan-contract.json",
+            ), 0)
+            self.assertEqual(
+                run.state()["procedure"]["tickets"]["T-1"]["status"],
+                "NEEDS_CONTRACT_AMENDMENT",
+            )
+            self.assertEqual(run.apply(
+                "PLAN_CONTRACT_AMENDMENT_RECORDED",
+                ticket_id="T-1",
+                analysis_revision="analysis-1",
+                failed_phase_key="run:T-1:plan-contract:1",
+                implementation_contract_revision="implementation-2",
+                verification_contract_revision="verification-2",
+                amendment_reference="artifacts/contract-amendment.json",
+                amendment_summary="The missing manifest and oracles are now present.",
+                updated_unresolved_implementation_difficulty=[],
+                context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            retry_action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(retry_action["action"], "RECORD_PLAN_CONTRACT_VALIDATION_DISPATCH_INTENT")
+            self.assertEqual(retry_action["retry_of_phase_key"], "run:T-1:plan-contract:1")
+            self.assertEqual(retry_action["context_packet"]["reference"], "artifacts/context.json")
 
     def harness(self, directory: str) -> Harness:
         return Harness(Path(directory))

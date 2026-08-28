@@ -267,6 +267,12 @@ the execution pair. A failed contract check returns only the missing or
 contradictory fields to the original analyzer; it never starts a second
 complete analysis.
 
+Persist that bounded correction with `PLAN_CONTRACT_AMENDMENT_RECORDED`, bind
+it to the failed validation phase, and provide the complete corrected compact
+packet. The controller retains the failed attempt as superseded and schedules
+a fresh bounded contract validation. A missing path or omitted source artifact
+is a packet repair, not grounds for another technical analysis.
+
 ## Analysis revision
 
 Keep one analysis thread per ticket throughout initial analysis, consolidation amendments, and pre-implementation reconciliation.

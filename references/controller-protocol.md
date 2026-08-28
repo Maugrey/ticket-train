@@ -235,6 +235,10 @@ The following gates are enforced as code:
 4. Every analysis uses the matrix-selected setting. A confirmed classification
    that is not covered by the dispatched route triggers one targeted route
    validation, never a second complete analysis.
+   When that targeted validation fails because its compact packet or a bounded
+   source input was missing, record `ANALYSIS_ROUTE_VALIDATION_RECONCILED` with
+   the corrected compact packet. Preserve the failed attempt as superseded and
+   dispatch a new targeted validation; do not rerun the complete analysis.
 5. Dependencies are consolidated only after all analyses and any targeted
    route validations are recorded.
    Consolidation includes file/domain/transformation inventories, an explicit
