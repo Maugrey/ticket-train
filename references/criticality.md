@@ -34,6 +34,8 @@ migration, hardening, or rollout proposal may carry a separate projected
 classification, but it must not raise the active complexity, criticality, or
 model route. If the user approves it, recompute both dimensions and perform a
 targeted route validation rather than repeating the complete analysis.
+Apply the same rule to any unresolved specification precision or
+interpretation: it is not active scope until the user selects an option.
 
 Apply the train's versioned proportionality profile from
 [efficiency-policy.md](efficiency-policy.md). Severity must reflect the actual

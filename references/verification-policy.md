@@ -44,6 +44,10 @@ Build the contract only from the active authorized scope revision under
 unapproved compatibility, migration, backfill, or legacy behavior mandatory.
 Keep the minimal and expanded oracles separate until the user selects a
 variant; an unresolved expansion blocks only its affected execution pair.
+Likewise, the test author must not choose an unspecified behavior, default,
+error, state transition, or contract interpretation. Return it as a
+specification-deviation decision instead of encoding the choice into the
+acceptance oracle.
 
 For every acceptance criterion and material invariant, record:
 

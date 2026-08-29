@@ -74,6 +74,7 @@ existing_state_compatibility_posture
 existing_state_value_and_users
 compatibility_source_evidence
 scope_expansion_policy = explicit-approval-required
+specification_deviation_policy = explicit-approval-required
 evidence_and_user_decisions
 ```
 
@@ -97,6 +98,9 @@ work are not operational necessities merely because they could make a future
 upgrade safer. If the source, project rules, or a prior user decision do not
 require them unambiguously, present them as a scope-expansion proposal and
 wait for the distinct user decision. Approval modes do not bypass this gate.
+The same gate applies to a missing specification precision, interpretation,
+default, reduction, or changed observable behavior. Cost efficiency never
+authorizes an agent to choose the cheaper or simpler interpretation silently.
 
 ## Recommendation separation
 

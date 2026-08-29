@@ -26,6 +26,8 @@ Resolve those values from the active authorized scope revision under
 [scope-governance.md](scope-governance.md). Never spend a higher route because
 of an unapproved expansion. Report its projected route separately and
 recompute only after the user approves it.
+Treat an unresolved specification precision the same way: report option routes
+separately and wait for the selected option before changing the active route.
 
 - Route the full analysis from provisional triage values.
 - Route implementation from intrinsic criticality and the validated residual

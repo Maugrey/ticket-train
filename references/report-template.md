@@ -209,18 +209,24 @@ active, its visible task is the progress signal; repeat the gate only through
 an explicitly requested deterministic product reminder. Never reduce the
 request to "waiting for information".
 
-For a scope-expansion gate, add this compact decision table:
+For a specification-deviation gate, add these compact decision tables as
+applicable:
 
 ```markdown
 | Proposal | Why it is outside current scope | Minimal MVP path | Expanded path | Cost/latency | Risk/tests | Recommendation |
 |---|---|---|---|---|---|---|
 | <proposal-id> | | | | | | |
 
+| Precision / deviation | Source text or absence | Unresolved point | Options | Impact | Recommendation |
+|---|---|---|---|---|---|
+| <deviation-id> | | | | | |
+
 - Product lifecycle stage:
 - Existing-state compatibility posture:
 - Current active classification and route:
 - Projected classification and route if approved:
-- Decision required for every proposal: approve | reject | defer
+- Decision required for every scope proposal: approve | reject | defer
+- Selected option required for every specification precision:
 ```
 
 Do not merge this with a criticality-based analysis approval. State explicitly
@@ -337,7 +343,10 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Acceptance criteria:
 - Conditional technical plan:
 - Planned variants:
-- Scope origins: source-explicit | project-mandated | user-approved | derived-necessary | proposed | optional | deferred
+- Specification alignment: exact | decision required | resolved
+- Scope origins: source-explicit | project-mandated | user-approved | derived-necessary | scope proposed | specification deviation proposed | optional | deferred
+- Specification deviations: none | <deviation IDs, source gaps, options, recommendation>
+- Specification decisions: none required | awaiting user | <selected options and decision references>
 - Scope-expansion proposals: none | <proposal IDs and minimal/expanded variants>
 - Scope-expansion decisions: none required | awaiting user | <decision references>
 - Upstream dependencies and assumptions:
@@ -365,7 +374,7 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Collision domain:
 - Scheduling decision: parallel-safe | sequential | blocked
 - Analysis gate: automatically approved | awaiting human approval | human approved
-- Scope-expansion gate: not required | awaiting human decision | resolved
+- Specification-deviation gate: not required | awaiting human decision | resolved
 - Open decisions or risks:
 - Minimum required correction:
 - Optional hardening:
@@ -450,8 +459,10 @@ Use this compact template:
 - Proportionality profile: <revision and decisive assumption>
 - Scope assessment: <revision; lifecycle; compatibility posture>
 - Active scope: <authorized origins and active revision>
+- Specification alignment: exact | decision required | resolved
+- Specification deviations: <none, or IDs with alternatives>
 - Proposed scope expansions: <none, or proposal IDs with minimal/expanded variants>
-- Scope-expansion gate: not required | awaiting user decision | resolved
+- Specification-deviation gate: not required | awaiting user decision | resolved
 - Criticality basis: <credible failure, blast radius, containment and recovery>
 - Complexity basis: <decisive factors, interactions and confidence>
 - Functional / business rules: **<impact label>** — <explicit summary>

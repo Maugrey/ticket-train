@@ -362,9 +362,14 @@ Every analysis also records where each scope item came from. Compatibility,
 migration, backfill, legacy preservation, rollout bridges, and any other work
 that is not explicit, project-mandated, previously approved, or proven
 strictly necessary is presented as a separate proposal. The user chooses the
-minimal or expanded variant through a non-bypassable scope gate—even in
-`full-auto`. Active classification and model routing ignore unapproved scope,
-and reviews cannot turn rejected or deferred work into blocking remediation.
+minimal or expanded variant through a non-bypassable specification gate—even
+in `full-auto`. The same gate applies to every missing precision, interpretation,
+unspecified default, narrowed requirement, observable behavior, data or error
+semantic, contract, compatibility choice, or acceptance change. Internal
+technical choices remain free only when they preserve the exact authorized
+specification. Active classification and model routing ignore unresolved
+choices, and reviews cannot turn rejected or deferred work into blocking
+remediation.
 
 ## Durable control and recovery
 

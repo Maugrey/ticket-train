@@ -101,9 +101,10 @@ suggested_test
 Use blocking severity for issues that must be fixed before merge. Keep cosmetic preferences non-blocking unless project rules require them.
 
 Do not turn a new compatibility strategy, migration, backfill, hardening idea,
-or broader product behavior into a blocking finding unless it is already
-authorized or mandated by a cited project rule. A reviewer-originated scope
-addition opens the distinct scope-expansion gate. A defect that exists only
+broader product behavior, narrower interpretation, unspecified default, or
+other specification precision into a blocking finding unless it is already
+authorized or mandated by a cited project rule. A reviewer-originated change
+opens the distinct specification-deviation gate. A defect that exists only
 because rejected, deferred, or never-authorized behavior is absent receives
 `rejected-out-of-scope`, is non-blocking, and cannot trigger remediation.
 
@@ -313,9 +314,10 @@ implementation contract, branch, pull request, findings, and project
 instructions. Report missing context only when it creates material ambiguity.
 
 Do not weaken tests, suppress valid findings, or broaden scope merely to make the review pass.
-Do not broaden scope merely to satisfy a reviewer suggestion. A material-scope
-remediation returns to [scope-governance.md](scope-governance.md) and waits for
-the explicit user decision in every approval mode.
+Do not change specification or broaden scope merely to satisfy a reviewer
+suggestion. Any such remediation returns to
+[scope-governance.md](scope-governance.md) and waits for the explicit user
+decision in every approval mode.
 
 ## Final train pull-request review
 

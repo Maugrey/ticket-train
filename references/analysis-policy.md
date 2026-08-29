@@ -139,12 +139,20 @@ credible protected-boundary failure, or operational necessity. Apply the
 train's proportionality profile; do not turn generic hardening into blocking
 MVP scope.
 
-### Scope provenance and expansion assessment
+### Specification alignment and scope provenance
 
 Apply [scope-governance.md](scope-governance.md) before dependency
 consolidation. Return one complete `scope_assessment` even when there is no
 proposal. Classify every plan item as source-explicit, project-mandated,
 user-approved, derived-necessary, proposed expansion, optional, or deferred.
+
+Return `specification_alignment = exact` only when the plan needs no unstated
+product or functional precision. Otherwise enumerate every deviation with its
+source reference or documented absence, unresolved point, mutually exclusive
+options, impact, and recommendation. This applies to additions, reductions,
+interpretations, defaults, observable behavior, errors, data, contracts,
+compatibility, and acceptance criteria. The normal analysis approval never
+resolves these decisions.
 
 Do not conflate asset/data transformations explicitly requested by the ticket
 with compatibility for historical runtime state. A request to migrate current

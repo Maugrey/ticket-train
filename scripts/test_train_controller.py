@@ -138,8 +138,12 @@ class Harness:
         }
 
     @staticmethod
-    def scope_assessment(proposals: list[dict[str, object]] | None = None) -> dict[str, object]:
+    def scope_assessment(
+        proposals: list[dict[str, object]] | None = None,
+        specification_deviations: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
         proposals = proposals or []
+        specification_deviations = specification_deviations or []
         items: list[dict[str, object]] = [{
             "item_id": "source-criterion-1",
             "description": "Implement the explicit ticket acceptance criterion.",
@@ -152,6 +156,13 @@ class Harness:
                 "scope_origin": "scope-expansion-proposed",
                 "proposal_id": proposal["proposal_id"],
             })
+        for deviation in specification_deviations:
+            items.append({
+                "item_id": deviation["item_id"],
+                "description": deviation["unresolved_point"],
+                "scope_origin": "specification-deviation-proposed",
+                "deviation_id": deviation["deviation_id"],
+            })
         return {
             "assessment_revision": "scope-1",
             "product_lifecycle_stage": "pre-MVP",
@@ -159,6 +170,8 @@ class Harness:
             "compatibility_source_evidence": "profile-1: pre-MVP saves are disposable",
             "classification_basis": "authorized-scope-only",
             "classification_scope_item_ids": ["source-criterion-1"],
+            "specification_alignment": "decision-required" if specification_deviations else "exact",
+            "specification_deviations": specification_deviations,
             "items": items,
             "proposals": proposals,
         }
@@ -183,11 +196,50 @@ class Harness:
             "recommendation": "Use the minimal MVP variant.",
         }
 
+    @staticmethod
+    def specification_deviation() -> dict[str, object]:
+        return {
+            "deviation_id": "save-reset-semantics",
+            "item_id": "spec-save-reset-semantics",
+            "kind": "compatibility-semantics",
+            "spec_reference": "The ticket does not define existing-save behavior.",
+            "unresolved_point": "Whether incompatible pre-MVP saves reset or are preserved.",
+            "why_resolution_required": "The loader and acceptance oracle differ between the options.",
+            "options": [
+                {
+                    "option_id": "reset",
+                    "description": "Treat pre-MVP saves as disposable and reset them.",
+                    "impact": {
+                        "scope": "no migration",
+                        "cost": "low",
+                        "latency": "none",
+                        "risk": "pre-MVP progress loss",
+                        "tests": "reset behavior",
+                        "classification_if_selected": {"criticality": "LOW", "complexity": "LOW"},
+                    },
+                },
+                {
+                    "option_id": "preserve",
+                    "description": "Preserve old saves through an explicit migration.",
+                    "impact": {
+                        "scope": "save migration",
+                        "cost": "higher",
+                        "latency": "longer",
+                        "risk": "migration defects",
+                        "tests": "legacy fixtures and upgrade paths",
+                        "classification_if_selected": {"criticality": "NORMAL", "complexity": "MEDIUM"},
+                    },
+                },
+            ],
+            "recommended_option_id": "reset",
+        }
+
     def analyze(
         self,
         criticality: str = "LOW",
         complexity: str = "LOW",
         scope_proposals: list[dict[str, object]] | None = None,
+        specification_deviations: list[dict[str, object]] | None = None,
     ) -> None:
         analysis_model, analysis_effort = train_controller.setting_from_matrix(
             train_controller.ANALYSIS_MATRIX, criticality, complexity
@@ -264,7 +316,7 @@ class Harness:
                 verification_complexity=complexity,
                 complexity_reduction_evidence="no reduction claimed",
                 unresolved_implementation_difficulty=[],
-                scope_assessment=self.scope_assessment(scope_proposals),
+                scope_assessment=self.scope_assessment(scope_proposals, specification_deviations),
                 report_thread_id="thread-analysis",
                 model=analysis_model,
                 reasoning_effort=analysis_effort,
@@ -273,7 +325,7 @@ class Harness:
             ),
             0,
         )
-        if scope_proposals:
+        if scope_proposals or specification_deviations:
             return
         self.assert_code(
             self.apply(
@@ -503,6 +555,12 @@ class Harness:
 
 
 class TrainControllerTests(unittest.TestCase):
+    def test_scope_assessment_requires_explicit_specification_alignment_inventory(self) -> None:
+        assessment = Harness.scope_assessment()
+        assessment.pop("specification_deviations")
+        with self.assertRaises(train_controller.ControllerError):
+            train_controller.validate_scope_assessment({"scope_assessment": assessment})
+
     def test_usage_matrix_evidence_rejects_a_missing_transverse_task(self) -> None:
         proc = {
             "tickets": {"T-1": {}},
@@ -2014,7 +2072,7 @@ class TrainControllerTests(unittest.TestCase):
             proposal = run.scope_expansion_proposal()
             run.analyze(scope_proposals=[proposal])
             item = run.state()["procedure"]["tickets"]["T-1"]
-            self.assertEqual(item["status"], "AWAITING_SCOPE_EXPANSION_APPROVAL")
+            self.assertEqual(item["status"], "AWAITING_SPECIFICATION_DECISION")
             gate_id = item["scope_expansion_gate_id"]
             self.assertEqual(train_controller.next_actions(run.state())[0]["action"], "ANNOUNCE_HUMAN_GATE")
             self.assertEqual(run.apply(
@@ -2040,6 +2098,7 @@ class TrainControllerTests(unittest.TestCase):
                     "decision": "deferred",
                     "selected_variant": "minimal",
                 }],
+                specification_decisions=[],
                 user_decision_reference="thread-main:user-message-1",
                 active_scope_revision="scope-active-2",
                 implementation_contract_revision="implementation-2",
@@ -2079,6 +2138,7 @@ class TrainControllerTests(unittest.TestCase):
                     "decision": "approved",
                     "selected_variant": "expanded",
                 }],
+                specification_decisions=[],
                 user_decision_reference="thread-main:user-message-2",
                 active_scope_revision="scope-active-2",
                 implementation_contract_revision="implementation-2",
@@ -2105,6 +2165,63 @@ class TrainControllerTests(unittest.TestCase):
                 train_controller.next_actions(run.state())[0]["action"],
                 "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT",
             )
+
+    def test_specification_precision_requires_a_distinct_non_bypassable_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze(specification_deviations=[run.specification_deviation()])
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "AWAITING_SPECIFICATION_DECISION")
+            gate_id = item["specification_gate_id"]
+            gate = run.state()["procedure"]["human_gates"][gate_id]
+            self.assertEqual(gate["kind"], "specification_deviation")
+            self.assertFalse(gate["bypassable"])
+            self.assertEqual(run.apply(
+                "GATE_ANNOUNCED",
+                gate_id=gate_id,
+                revision="scope-1",
+                decision_summary="Choose the behavior for incompatible pre-MVP saves.",
+                evidence_summary="The source does not specify reset versus preservation.",
+                blocked_scope="T-1 contract, implementation, and acceptance tests",
+                continuing_scope="Independent analyses",
+                accepted_replies=["Reset saves", "Preserve saves"],
+            ), 0)
+            self.assertEqual(run.apply(
+                "GATE_RESOLVED", gate_id=gate_id, revision="scope-1", decision="approved"
+            ), 2)
+            self.assertEqual(run.apply(
+                "SPECIFICATION_DECISIONS_RECORDED",
+                ticket_id="T-1",
+                gate_id=gate_id,
+                revision="scope-1",
+                decisions=[],
+                specification_decisions=[{
+                    "deviation_id": "save-reset-semantics",
+                    "selected_option_id": "reset",
+                }],
+                user_decision_reference="thread-main:user-message-3",
+                active_scope_revision="scope-active-2",
+                implementation_contract_revision="implementation-2",
+                verification_contract_revision="verification-2",
+                criticality="LOW",
+                complexity="LOW",
+                criticality_evidence="Pre-MVP save loss is explicitly accepted and contained.",
+                complexity_evidence="The selected reset behavior has a direct deterministic oracle.",
+                residual_implementation_complexity="LOW",
+                verification_complexity="LOW",
+                complexity_reduction_evidence="The user resolved the only behavioral ambiguity.",
+                unresolved_implementation_difficulty=[],
+                classification_scope_item_ids=["source-criterion-1", "spec-save-reset-semantics"],
+            ), 0)
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "ANALYZED")
+            selected_item = next(
+                scope_item for scope_item in item["analysis"]["scope_assessment"]["items"]
+                if scope_item["item_id"] == "spec-save-reset-semantics"
+            )
+            self.assertEqual(selected_item["scope_origin"], "user-approved")
+            self.assertEqual(selected_item["selected_option_id"], "reset")
 
     def test_missing_information_is_a_visible_durable_action(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

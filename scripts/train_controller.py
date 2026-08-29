@@ -33,7 +33,7 @@ UNITY_REQUIREMENT_ORDER = {value: index for index, value in enumerate(UNITY_REQU
 DEFAULT_MAX_UNITY_EDITORS = 3
 MAX_CONFIGURABLE_UNITY_EDITORS = 16
 ROUTING_POLICY_VERSION = "2026-08-27-v2"
-SCOPE_POLICY_VERSION = "2026-08-29-v1"
+SCOPE_POLICY_VERSION = "2026-08-29-v2"
 PRODUCT_LIFECYCLE_STAGES = (
     "prototype", "pre-MVP", "private-beta", "public-beta", "production", "unknown",
 )
@@ -42,11 +42,17 @@ COMPATIBILITY_POSTURES = (
 )
 SCOPE_ORIGINS = {
     "source-explicit", "project-mandated", "user-approved", "derived-necessary",
-    "scope-expansion-proposed", "optional", "deferred",
+    "scope-expansion-proposed", "specification-deviation-proposed", "optional", "deferred",
 }
 SCOPE_EXPANSION_CATEGORIES = {
     "compatibility", "migration", "backfill", "legacy-preservation", "rollout-bridge",
     "deprecation-shim", "dual-read-write", "versioning", "historical-repair", "other",
+}
+SPECIFICATION_DEVIATION_KINDS = {
+    "interpretation", "clarification", "unspecified-default", "scope-reduction",
+    "behavior-change", "acceptance-change", "contract-change", "data-semantics",
+    "error-semantics", "compatibility-semantics", "architecture-change",
+    "security-posture", "operational-semantics", "performance-semantics", "other",
 }
 MECHANICAL_FAST_PATH_FIELDS = (
     "fully_specified",
@@ -398,6 +404,7 @@ def validate_scope_assessment(event: dict[str, Any]) -> dict[str, Any]:
             "assessment_revision", "product_lifecycle_stage",
             "existing_state_compatibility_posture", "compatibility_source_evidence",
             "classification_basis", "classification_scope_item_ids",
+            "specification_alignment",
         ),
         "scope assessment",
     )
@@ -415,8 +422,14 @@ def validate_scope_assessment(event: dict[str, Any]) -> dict[str, Any]:
     )
     items = assessment.get("items")
     proposals = assessment.get("proposals")
+    deviations = assessment.get("specification_deviations")
     require(isinstance(items, list), "scope assessment items must be a list")
     require(isinstance(proposals, list), "scope assessment proposals must be a list")
+    require(isinstance(deviations, list), "specification_deviations must be a list")
+    require(
+        assessment["specification_alignment"] in {"exact", "decision-required"},
+        "invalid specification alignment",
+    )
     proposal_ids: set[str] = set()
     for proposal in proposals:
         require(isinstance(proposal, dict), "scope expansion proposal must be an object")
@@ -447,9 +460,51 @@ def validate_scope_assessment(event: dict[str, Any]) -> dict[str, Any]:
             "invalid projected scope classification",
         )
         proposal_ids.add(str(proposal["proposal_id"]))
+    deviation_ids: set[str] = set()
+    deviation_item_ids: dict[str, str] = {}
+    for deviation in deviations:
+        require(isinstance(deviation, dict), "specification deviation must be an object")
+        require_fields(
+            deviation,
+            (
+                "deviation_id", "item_id", "kind", "spec_reference", "unresolved_point",
+                "why_resolution_required", "options", "recommended_option_id",
+            ),
+            "specification deviation",
+        )
+        require(deviation["deviation_id"] not in deviation_ids, "duplicate specification deviation ID")
+        require(deviation["kind"] in SPECIFICATION_DEVIATION_KINDS, "invalid specification deviation kind")
+        options = deviation["options"]
+        require(isinstance(options, list) and len(options) >= 2, "specification deviation requires at least two options")
+        option_ids: set[str] = set()
+        for option in options:
+            require(isinstance(option, dict), "specification deviation option must be an object")
+            require_fields(option, ("option_id", "description", "impact"), "specification deviation option")
+            require(option["option_id"] not in option_ids, "duplicate specification deviation option ID")
+            require(isinstance(option["impact"], dict), "specification deviation option impact must be an object")
+            require_fields(
+                option["impact"],
+                ("scope", "cost", "latency", "risk", "tests", "classification_if_selected"),
+                "specification deviation option impact",
+            )
+            projected = option["impact"]["classification_if_selected"]
+            require(
+                isinstance(projected, dict)
+                and projected.get("criticality") in CRITICALITIES
+                and projected.get("complexity") in COMPLEXITIES,
+                "invalid selected-option classification",
+            )
+            option_ids.add(str(option["option_id"]))
+        require(
+            deviation["recommended_option_id"] in option_ids,
+            "recommended specification option is unknown",
+        )
+        deviation_ids.add(str(deviation["deviation_id"]))
+        deviation_item_ids[str(deviation["deviation_id"])] = str(deviation["item_id"])
     item_ids: set[str] = set()
     item_origins: dict[str, str] = {}
     referenced_proposals: set[str] = set()
+    referenced_deviations: set[str] = set()
     for scope_item in items:
         require(isinstance(scope_item, dict), "scope item must be an object")
         require_fields(scope_item, ("item_id", "description", "scope_origin"), "scope item")
@@ -472,9 +527,28 @@ def validate_scope_assessment(event: dict[str, Any]) -> dict[str, Any]:
                 "a scope expansion proposal may be referenced by only one scope item",
             )
             referenced_proposals.add(str(scope_item["proposal_id"]))
+        if scope_item["scope_origin"] == "specification-deviation-proposed":
+            require_fields(scope_item, ("deviation_id",), "specification deviation scope item")
+            require(
+                str(scope_item["deviation_id"]) not in referenced_deviations,
+                "a specification deviation may be referenced by only one scope item",
+            )
+            require(
+                deviation_item_ids.get(str(scope_item["deviation_id"])) == str(scope_item["item_id"]),
+                "specification deviation item_id mismatch",
+            )
+            referenced_deviations.add(str(scope_item["deviation_id"]))
     require(
         referenced_proposals == proposal_ids,
         "every scope expansion proposal must have exactly one proposed scope item",
+    )
+    require(
+        referenced_deviations == deviation_ids,
+        "every specification deviation must have exactly one proposed scope item",
+    )
+    require(
+        (assessment["specification_alignment"] == "decision-required") == bool(deviations),
+        "specification alignment conflicts with deviation inventory",
     )
     classification_item_ids = assessment["classification_scope_item_ids"]
     require(
@@ -495,10 +569,10 @@ def validate_scope_assessment(event: dict[str, Any]) -> dict[str, Any]:
             in {"source-explicit", "project-mandated", "user-approved", "derived-necessary"}
             for item_id in classification_item_ids
         ),
-        "active classification cannot include proposed, optional, or deferred scope",
+        "active classification cannot include proposed, optional, deferred, or unresolved specification scope",
     )
     assessment["policy_version"] = SCOPE_POLICY_VERSION
-    assessment["status"] = "APPROVAL_REQUIRED" if proposals else "CLEAR"
+    assessment["status"] = "APPROVAL_REQUIRED" if proposals or deviations else "CLEAR"
     return dict(assessment)
 
 
@@ -517,7 +591,7 @@ def require_authorized_scope(item: dict[str, Any], event: dict[str, Any], label:
         return
     require(
         assessment.get("status") in {"CLEAR", "RESOLVED"},
-        f"{label} is blocked by unresolved scope expansion",
+        f"{label} is blocked by an unresolved specification deviation or scope expansion",
     )
     require_fields(event, ("scope_assessment_revision", "scope_conformance"), label)
     require(
@@ -1439,45 +1513,53 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         item["analysis"]["scope_assessment"] = assessment
         require(event["report_thread_id"] == source_phase.get("thread_id"), "analysis report thread does not match the visible phase")
         if assessment["status"] == "APPROVAL_REQUIRED":
-            gate_id = f"{event['ticket_id']}:scope-expansion:{assessment['assessment_revision']}"
+            gate_id = f"{event['ticket_id']}:specification:{assessment['assessment_revision']}"
             gate = create_gate(
                 proc,
                 gate_id=gate_id,
-                kind="scope_expansion",
+                kind="specification_deviation",
                 ticket_id=event["ticket_id"],
                 revision=assessment["assessment_revision"],
             )
             gate["bypassable"] = False
             gate["proposals"] = assessment["proposals"]
-            gate["reason"] = "The analysis proposes work beyond the explicit or mandatory ticket scope."
+            gate["specification_deviations"] = assessment["specification_deviations"]
+            gate["reason"] = (
+                "The analysis proposes a scope change or supplies a specification precision "
+                "that the source does not authorize explicitly."
+            )
+            item["specification_gate_id"] = gate_id
             item["scope_expansion_gate_id"] = gate_id
-            item["status"] = "AWAITING_SCOPE_EXPANSION_APPROVAL"
+            item["status"] = "AWAITING_SPECIFICATION_DECISION"
         else:
             route_or_finalize_analysis(proc, item)
         return
 
-    if event_type == "SCOPE_EXPANSION_DECIDED":
+    if event_type in {"SCOPE_EXPANSION_DECIDED", "SPECIFICATION_DECISIONS_RECORDED"}:
         item = ticket(proc, str(event.get("ticket_id") or ""))
         require(
-            item.get("status") == "AWAITING_SCOPE_EXPANSION_APPROVAL",
-            "ticket is not awaiting a scope-expansion decision",
+            item.get("status") == "AWAITING_SPECIFICATION_DECISION",
+            "ticket is not awaiting a specification decision",
         )
         assessment = scope_assessment(item)
-        require(isinstance(assessment, dict), "scope-expansion decision requires an assessment")
+        require(isinstance(assessment, dict), "specification decision requires an assessment")
         gate = proc.get("human_gates", {}).get(event.get("gate_id"))
-        require(isinstance(gate, dict) and gate.get("kind") == "scope_expansion", "unknown scope-expansion gate")
-        require(gate.get("status") == "PENDING_ANNOUNCED", "scope-expansion gate must be announced first")
-        require(event.get("revision") == gate.get("revision"), "scope-expansion gate revision mismatch")
+        require(
+            isinstance(gate, dict) and gate.get("kind") == "specification_deviation",
+            "unknown specification-deviation gate",
+        )
+        require(gate.get("status") == "PENDING_ANNOUNCED", "specification gate must be announced first")
+        require(event.get("revision") == gate.get("revision"), "specification gate revision mismatch")
         require_fields(
             event,
             (
                 "user_decision_reference", "active_scope_revision",
                 "implementation_contract_revision", "verification_contract_revision",
             ),
-            "scope-expansion decision",
+            "specification decision",
         )
         decisions = event.get("decisions")
-        require(isinstance(decisions, list) and decisions, "scope-expansion decisions must be a non-empty list")
+        require(isinstance(decisions, list), "scope-expansion decisions must be a list")
         proposal_ids = {proposal["proposal_id"] for proposal in assessment.get("proposals", [])}
         decision_ids: set[str] = set()
         approved = False
@@ -1494,6 +1576,37 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 require(decision["selected_variant"] == "minimal", "rejected or deferred scope must select minimal")
             decision_ids.add(decision["proposal_id"])
         require(decision_ids == proposal_ids, "every scope-expansion proposal requires one user decision")
+        specification_decisions = event.get("specification_decisions")
+        require(isinstance(specification_decisions, list), "specification_decisions must be a list")
+        deviation_by_id = {
+            deviation["deviation_id"]: deviation
+            for deviation in assessment.get("specification_deviations", [])
+        }
+        specification_decision_ids: set[str] = set()
+        for specification_decision in specification_decisions:
+            require(isinstance(specification_decision, dict), "specification decision must be an object")
+            require_fields(
+                specification_decision,
+                ("deviation_id", "selected_option_id"),
+                "specification decision",
+            )
+            deviation_id = specification_decision["deviation_id"]
+            require(deviation_id in deviation_by_id, "specification decision references an unknown deviation")
+            require(deviation_id not in specification_decision_ids, "duplicate specification decision")
+            valid_options = {
+                option["option_id"] for option in deviation_by_id[deviation_id]["options"]
+            }
+            require(
+                specification_decision["selected_option_id"] in valid_options,
+                "specification decision selects an unknown option",
+            )
+            specification_decision_ids.add(deviation_id)
+        require(
+            specification_decision_ids == set(deviation_by_id),
+            "every specification deviation requires one explicit selected option",
+        )
+        if event_type == "SCOPE_EXPANSION_DECIDED":
+            require(not deviation_by_id, "use SPECIFICATION_DECISIONS_RECORDED when specification precision is required")
         analysis = item["analysis"]
         decision_by_proposal = {decision["proposal_id"]: decision for decision in decisions}
         for scope_item in assessment.get("items", []):
@@ -1505,7 +1618,19 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 scope_item["user_decision_reference"] = event["user_decision_reference"]
             else:
                 scope_item["scope_origin"] = "deferred"
-        if approved:
+        selected_deviation_ids = {
+            decision["deviation_id"] for decision in specification_decisions
+        }
+        for scope_item in assessment.get("items", []):
+            if scope_item.get("deviation_id") in selected_deviation_ids:
+                scope_item["scope_origin"] = "user-approved"
+                scope_item["user_decision_reference"] = event["user_decision_reference"]
+                scope_item["selected_option_id"] = next(
+                    decision["selected_option_id"]
+                    for decision in specification_decisions
+                    if decision["deviation_id"] == scope_item["deviation_id"]
+                )
+        if approved or specification_decisions:
             require_fields(
                 event,
                 (
@@ -1513,16 +1638,16 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                     "residual_implementation_complexity", "verification_complexity",
                     "complexity_reduction_evidence", "classification_scope_item_ids",
                 ),
-                "approved expanded scope classification",
+                "approved specification classification",
             )
             require(event["criticality"] in CRITICALITIES and event["complexity"] in COMPLEXITIES, "invalid expanded scope classification")
             require(
                 event["criticality"] == higher_classification(analysis["criticality"], event["criticality"], CRITICALITIES),
-                "approved scope classification cannot lower intrinsic criticality",
+                "approved specification classification cannot lower intrinsic criticality",
             )
             require(
                 event["complexity"] == higher_classification(analysis["complexity"], event["complexity"], COMPLEXITIES),
-                "approved scope classification cannot lower complexity",
+                "approved specification classification cannot lower complexity",
             )
             require(event["residual_implementation_complexity"] in COMPLEXITIES, "invalid expanded residual implementation complexity")
             require(event["verification_complexity"] in COMPLEXITIES, "invalid expanded verification complexity")
@@ -1539,7 +1664,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             )
             require(
                 set(event["classification_scope_item_ids"]).issubset(authorized_ids),
-                "expanded classification includes unauthorized scope",
+                "approved specification classification includes unauthorized scope",
             )
             assessment["classification_scope_item_ids"] = event["classification_scope_item_ids"]
             for field in (
@@ -1552,6 +1677,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         analysis["verification_contract_revision"] = event["verification_contract_revision"]
         assessment["status"] = "RESOLVED"
         assessment["decisions"] = decisions
+        assessment["specification_decisions"] = specification_decisions
+        assessment["specification_alignment"] = "resolved"
         assessment["user_decision_reference"] = event["user_decision_reference"]
         assessment["active_scope_revision"] = event["active_scope_revision"]
         gate["status"] = "RESOLVED"
@@ -1657,7 +1784,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 value.get("analysis")
                 and value.get("status") not in {
                     "TRIAGED", "ANALYSIS_ROUTE_VALIDATION_REQUIRED", "ANALYSIS_RECONCILIATION_REQUIRED",
-                    "AWAITING_SCOPE_EXPANSION_APPROVAL",
+                    "AWAITING_SPECIFICATION_DECISION",
                 }
                 for value in proc["tickets"].values()
             ),
@@ -1806,8 +1933,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(gate.get("status") == "PENDING_ANNOUNCED", "gate must be announced before resolution")
         require(event.get("revision") == gate.get("revision"), "gate revision mismatch")
         require(
-            gate.get("kind") != "scope_expansion",
-            "use SCOPE_EXPANSION_DECIDED with one explicit decision per proposal",
+            gate.get("kind") != "specification_deviation",
+            "use SPECIFICATION_DECISIONS_RECORDED with one explicit decision per deviation",
         )
         require(gate.get("kind") != "input" or event.get("decision") == "rejected", "use INPUT_PROVIDED for supplied information")
         decision = event.get("decision")
@@ -3717,14 +3844,14 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         return route_validation_actions + gate_actions
     pending_scope_decisions = [
         value for value in proc["tickets"].values()
-        if value.get("status") == "AWAITING_SCOPE_EXPANSION_APPROVAL"
+        if value.get("status") == "AWAITING_SPECIFICATION_DECISION"
     ]
     if pending_scope_decisions:
         if waiting_gates:
             return [{"action": "AWAIT_HUMAN_GATE", "gate": gate} for gate in waiting_gates]
         return [{
             "action": "BLOCKED_OR_INCONSISTENT_STATE",
-            "reason": "A scope-expansion proposal is awaiting its non-bypassable user decision.",
+            "reason": "A specification deviation or scope proposal is awaiting its non-bypassable user decision.",
         }]
     reconciliation_required = [
         {
@@ -4081,8 +4208,8 @@ def compact_status(state: dict[str, Any]) -> dict[str, Any]:
 def migrate_procedure(state: dict[str, Any]) -> bool:
     proc = procedure(state)
     changed = False
-    if int(proc.get("schema_version", 1)) < 8:
-        proc["schema_version"] = 8
+    if int(proc.get("schema_version", 1)) < 9:
+        proc["schema_version"] = 9
         changed = True
     if proc.get("scope_policy_version") != SCOPE_POLICY_VERSION:
         proc["scope_policy_version"] = SCOPE_POLICY_VERSION
@@ -4207,7 +4334,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             require(unity_repository is not None, "unity-mcp-local requires --unity-repository")
             unity_repository = str(Path(unity_repository).expanduser().resolve())
         timestamp = now_iso()
-        state["schema_version"] = max(int(state.get("schema_version", 0)), 8)
+        state["schema_version"] = max(int(state.get("schema_version", 0)), 9)
         state["pending_orchestrator_handoff"] = None
         state["orchestrator_rotation_policy"] = {
             "mode": "automatic-budgeted-handoff",
@@ -4219,7 +4346,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             "decision_packet_max_bytes": 16_384,
         }
         state["procedure"] = {
-            "schema_version": 8,
+            "schema_version": 9,
             "routing_policy_version": ROUTING_POLICY_VERSION,
             "scope_policy_version": SCOPE_POLICY_VERSION,
             "revision": 0,

@@ -1,6 +1,6 @@
 ---
 name: ticket-train
-description: Explicitly orchestrate bounded, cost-controlled trains of implementation tickets from a user-provided source. Use when the user invokes $ticket-train to triage tickets in visible threads, apply a product proportionality profile, reconcile plans, run implementation and independent acceptance-test authoring in parallel branches and worktrees, manage a bounded persistent local Unity MCP editor pool when applicable, enforce red/green functional and environment gates including Supabase/Auth/RLS when applicable, route model effort strictly, run one exhaustive review plus grouped remediation and targeted re-review, validate the final train pull request, report manual tests and attention points, measure per-session and per-phase token usage, audit scripted-versus-AI orchestration and model-wake quality, enforce human gates, and stop at ticket-count or review-surface checkpoints. Do not use for ordinary one-off coding tasks or without explicit invocation.
+description: Explicitly orchestrate bounded, cost-controlled trains of implementation tickets from a user-provided source. Use when the user invokes $ticket-train to triage tickets in visible threads, apply a product proportionality profile, reconcile plans, require a distinct non-bypassable user decision for every specification deviation or missing precision, run implementation and independent acceptance-test authoring in parallel branches and worktrees, manage a bounded local Unity MCP editor pool when applicable, enforce red/green functional and environment gates, route model effort strictly, run one exhaustive review plus grouped remediation and targeted re-review, validate the final train pull request, report manual tests and attention points, measure per-session and per-phase token usage, audit scripted-versus-AI orchestration and model-wake quality, enforce human gates, and stop at ticket-count or review-surface checkpoints. Do not use for ordinary one-off coding tasks or without explicit invocation.
 ---
 
 # Ticket Train
@@ -25,9 +25,9 @@ Read these references before starting:
 - [ticket-sources.md](references/ticket-sources.md) for source resolution and ticket normalization.
 - [criticality.md](references/criticality.md) for intrinsic criticality, complexity, and human validation matrices.
 - [analysis-policy.md](references/analysis-policy.md) for parallel conditional analysis, dependency consolidation, and reconciliation.
-- [scope-governance.md](references/scope-governance.md) for authorized-scope
-  provenance and the non-bypassable approval gate for every proposed scope
-  expansion, including compatibility and migration work.
+- [scope-governance.md](references/scope-governance.md) for specification
+  fidelity, authorized-scope provenance, and the non-bypassable approval gate
+  for every deviation, missing precision, interpretation, or scope expansion.
 - [model-routing.md](references/model-routing.md) for fast triage and model/reasoning matrices.
 - [usage-reporting.md](references/usage-reporting.md) for exact-if-available token accounting and orchestration execution-share metrics.
 - [report-template.md](references/report-template.md) for required main-thread reports.
@@ -396,10 +396,12 @@ At a high level:
    not expose raw controller state or full child history to the orchestrator.
 11. Route and run one full analysis per ticket with at most five active threads, without dependency or human-gate waits. Reuse a valid durable analysis on resume.
 12. Consolidate returned dependency contracts and route targeted amendments to original analysis threads.
-13. Require every analysis to classify each planned item by scope origin under
+13. Require every analysis to prove exact specification alignment and classify
+    each planned item by scope origin under
     [scope-governance.md](references/scope-governance.md). When compatibility,
-    migration, hardening, or any other work exceeds the explicit or mandatory
-    source scope, present minimal and expanded variants and obtain the distinct
+    migration, hardening, interpretation, unspecified default, narrowing,
+    behavioral precision, or any other choice differs from or supplements the
+    explicit specification, present the alternatives and obtain the distinct
     non-bypassable user decision before routing or contracting that work.
 14. Require every recommendation to separate the minimum required correction,
     optional hardening, and explicitly deferred post-MVP work.
@@ -520,10 +522,11 @@ Pause and report a blocker when:
 - the ticket source or selection is unresolved;
 - the orchestrator startup preflight has not been explicitly confirmed;
 - a material product or architecture decision is missing;
-- an analysis, implementation, test, review, or remediation proposes work
-  beyond explicit ticket requirements, applicable project rules, or a prior
-  user decision and the scope-expansion gate is unresolved; approval mode does
-  not bypass this stop;
+- an analysis, implementation, test, review, or remediation diverges from,
+  narrows, supplements, interprets, or supplies a missing precision to the
+  explicit ticket requirements, applicable project rules, or prior user
+  decisions and the specification-deviation gate is unresolved; approval mode
+  does not bypass this stop;
 - required credentials, connectors, permissions, or environments are unavailable;
 - mandatory automated tests fail after reasonable remediation;
 - independent acceptance coverage, red/green evidence, environment parity, or
@@ -570,10 +573,12 @@ After `INPUT_PROVIDED`, resume the same visible child thread when applicable.
 
 When a human analysis or pre-merge gate is required, pause only the affected ticket and implementations that depend on it. Continue every selected analysis and any independent implementation whose gates are satisfied.
 
-Treat scope-expansion approval as a separate human action. It applies at every
-criticality and complexity and in every approval mode. A generic analysis
-approval, startup confirmation, `full-auto`, or reviewer recommendation never
-authorizes additional scope.
+Treat specification-deviation approval as a separate human action. It applies
+at every criticality and complexity and in every approval mode. A generic
+analysis approval, startup confirmation, `full-auto`, or reviewer
+recommendation never authorizes added scope, a reduced requirement, a chosen
+interpretation, an unspecified default, or any externally observable
+precision absent from the source.
 
 Publish every required decision in the main conversation using the `ACTION
 REQUIRED` report from [report-template.md](references/report-template.md), then

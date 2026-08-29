@@ -18,7 +18,8 @@ The deterministic controller owns:
 - event idempotency and manifest revision;
 - ticket and train lifecycle state;
 - human-gate creation, announcement, and exact-revision resolution;
-- scope-origin validation and the non-bypassable per-proposal expansion gate;
+- specification-alignment and scope-origin validation plus the non-bypassable
+  per-deviation decision gate;
 - model-routing matrix lookup and conformance;
 - routing-policy version, phase-local route comparisons, mechanical fast-path
   proof, and scoped Max authorizations;
@@ -245,12 +246,15 @@ The following gates are enforced as code:
    Consolidation includes file/domain/transformation inventories, an explicit
    schedule, a cumulative size budget, and rejects a parallel group with an
    unproven shared file or collision domain.
-6. Every complete analysis records a scope assessment whose active
-   classification is based on authorized scope only. Proposed expansions open
-   a `scope_expansion` gate before route validation, dependency consolidation,
-   contract validation, implementation, or acceptance-test authoring. The
-   specialized `SCOPE_EXPANSION_DECIDED` event records one explicit user
-   decision per proposal. No approval mode bypasses this gate.
+6. Every complete analysis records exact specification alignment or a complete
+   deviation inventory, plus a scope assessment whose active classification is
+   based on authorized scope only. Any missing precision, interpretation,
+   reduction, behavior change, or expansion opens a `specification_deviation`
+   gate before route validation, dependency consolidation, contract
+   validation, implementation, or acceptance-test authoring. The specialized
+   `SPECIFICATION_DECISIONS_RECORDED` event records one explicit selected
+   option per deviation and one decision per expansion. No approval mode
+   bypasses this gate.
 7. A matrix-required analysis approval is announced in the main conversation
    before it can be resolved.
 8. Hard dependencies are merged before an execution pair starts. `HIGH` and
@@ -331,7 +335,7 @@ The following gates are enforced as code:
     perform the final merge.
 
 Approval modes alter only the two human-validation matrices. They do not
-bypass any other procedural gate, including scope-expansion approval.
+bypass any other procedural gate, including specification-deviation approval.
 
 ## Human action lifecycle
 
@@ -353,13 +357,13 @@ scope, independently continuing scope, accepted reply formats, and revision.
 Only one human action is announced at a time, and it is mirrored as
 `pending_human_action` in the canonical manifest.
 
-Scope-expansion decisions use this announcement visibility but not generic
-`GATE_RESOLVED`. Apply `SCOPE_EXPANSION_DECIDED` with the assessment revision,
-user-decision reference, selected variant for every proposal, active-scope
-revision, and amended contract revisions. Approval of expanded scope may raise
-classification and trigger one targeted route validation. Rejection or
-deferral preserves the minimal classification and records the expansion as
-inactive.
+Specification decisions use this announcement visibility but not generic
+`GATE_RESOLVED`. Apply `SPECIFICATION_DECISIONS_RECORDED` with the assessment
+revision, user-decision reference, selected option for every deviation,
+selected variant for every expansion, active-scope revision, and amended
+contract revisions. The resulting specification may raise classification and
+trigger one targeted route validation. Rejection or deferral of optional scope
+preserves the minimal classification and records the expansion as inactive.
 
 ## Next-action loop
 
