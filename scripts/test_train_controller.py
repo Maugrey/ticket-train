@@ -771,6 +771,40 @@ class TrainControllerTests(unittest.TestCase):
             self.assertEqual(retry_action["retry_of_phase_key"], "run:T-1:plan-contract:1")
             self.assertEqual(retry_action["context_packet"]["reference"], "artifacts/context.json")
 
+    def test_post_consolidation_analysis_readiness_can_be_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            state = run.state()
+            state["procedure"]["tickets"]["T-1"]["status"] = "ANALYZED"
+            run_registry.save_json(run.path, state)
+
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "RECORD_ANALYSIS_READINESS_RECONCILIATION")
+            self.assertEqual(action["analysis_revision"], "analysis-1")
+            self.assertEqual(run.apply(
+                "ANALYSIS_READINESS_RECONCILED",
+                ticket_id="T-1",
+                analysis_revision="analysis-1",
+                reason="analysis completed after dependency consolidation",
+            ), 0)
+            self.assertEqual(
+                run.state()["procedure"]["tickets"]["T-1"]["status"],
+                "READY_FOR_IMPLEMENTATION",
+            )
+
+    def test_analysis_finalized_after_consolidation_is_immediately_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            state = run.state()
+            item = state["procedure"]["tickets"]["T-1"]
+            item["status"] = "ANALYZED"
+            train_controller.finalize_analysis_gate(state["procedure"], item)
+            self.assertEqual(item["status"], "READY_FOR_IMPLEMENTATION")
+
     def harness(self, directory: str) -> Harness:
         return Harness(Path(directory))
 

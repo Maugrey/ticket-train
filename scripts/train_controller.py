@@ -314,7 +314,7 @@ def finalize_analysis_gate(proc: dict[str, Any], item: dict[str, Any]) -> None:
         item["analysis_gate_id"] = gate_id
         item["status"] = "AWAITING_ANALYSIS_APPROVAL"
     else:
-        item["status"] = "ANALYZED"
+        item["status"] = "READY_FOR_IMPLEMENTATION" if proc.get("dependencies_consolidated") else "ANALYZED"
 
 
 def analysis_human_gate(criticality: str, complexity: str, approval_mode: str) -> bool:
@@ -1516,6 +1516,26 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         )
         require(isinstance(gate, dict) and gate.get("status") == "PROVIDED", "phase input gate is not resolved")
         ticket(proc, gate["ticket_id"])["status"] = gate.get("prior_ticket_status") or "EXECUTION_PAIR_RUNNING"
+        return
+
+    if event_type == "ANALYSIS_READINESS_RECONCILED":
+        require(proc.get("dependencies_consolidated"), "analysis readiness requires consolidated dependencies")
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(item.get("status") == "ANALYZED", "ticket is not awaiting post-consolidation readiness")
+        analysis = item.get("analysis")
+        require(isinstance(analysis, dict), "analysis readiness requires a recorded analysis")
+        require_fields(event, ("analysis_revision", "reason"), "analysis readiness reconciliation")
+        require(
+            event["analysis_revision"] == analysis.get("analysis_revision"),
+            "analysis readiness revision mismatch",
+        )
+        item["status"] = "READY_FOR_IMPLEMENTATION"
+        item["analysis_readiness_reconciliation"] = {
+            "event_id": event["event_id"],
+            "analysis_revision": event["analysis_revision"],
+            "reason": event["reason"],
+            "recorded_at": now_iso(),
+        }
         return
 
     if event_type == "PLAN_CONTRACT_VALIDATION_RECORDED":
@@ -3294,6 +3314,19 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         }] + gate_actions
     if not proc.get("dependencies_consolidated"):
         return [{"action": "CONSOLIDATE_DEPENDENCIES"}]
+
+    stale_analyzed = [
+        (ticket_id, value)
+        for ticket_id, value in proc["tickets"].items()
+        if value.get("status") == "ANALYZED" and isinstance(value.get("analysis"), dict)
+    ]
+    if stale_analyzed:
+        return [{
+            "action": "RECORD_ANALYSIS_READINESS_RECONCILIATION",
+            "ticket_id": ticket_id,
+            "analysis_revision": value["analysis"]["analysis_revision"],
+            "reason": "analysis completed after dependency consolidation",
+        } for ticket_id, value in stale_analyzed] + gate_actions
 
     if state.get("execution_mode") == "dry-run":
         if waiting_gates:

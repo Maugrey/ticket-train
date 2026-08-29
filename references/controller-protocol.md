@@ -457,6 +457,13 @@ Never rerun triage, analysis, implementation, or review merely to rebuild
 conversation context. The event log and durable artifacts are the recovery
 source of truth.
 
+If an analysis or routed-analysis validation finishes after dependency
+consolidation, it must become `READY_FOR_IMPLEMENTATION` immediately. For a
+legacy manifest stranded at `ANALYZED`, the controller returns
+`RECORD_ANALYSIS_READINESS_RECONCILIATION`; apply
+`ANALYSIS_READINESS_RECONCILED` for that exact analysis revision. Do not repeat
+dependency consolidation or analysis to repair this ordering condition.
+
 When the control-plane runner requests rotation, prepare a single-use handoff
 through `run_registry.py prepare-handoff`, create exactly one fresh visible
 successor with the bounded packet, and transfer ownership through
