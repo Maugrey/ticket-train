@@ -635,7 +635,7 @@ applicable. Link code concerns to the final pull-request diff. State explicitly
 when no manual test or no attention point is identified; never use omission to
 mean none.
 
-Use [token_usage.py](scripts/token_usage.py) under [usage-reporting.md](references/usage-reporting.md). Report exact per-phase counters when available, the total per ticket, orchestration separately, and the train aggregate. Mark incomplete coverage as `partial` or `unavailable`; never invent a token estimate.
+Use [token_usage.py](scripts/token_usage.py) under [usage-reporting.md](references/usage-reporting.md). At every checkpoint and completion, publishing the generated two-dimensional token matrices is mandatory: one row per requested ticket with one column per phase and row/column totals, followed by one row per transverse task. Report exact counters when available, mark every unavailable or non-applicable cell explicitly, keep orchestration separate, and include the train aggregate. Never invent a token estimate. A prose total or a ledger link does not satisfy this requirement.
 
 Use its `ledger` command at checkpoints and completion to reconcile
 baseline/final/delta for every known session and every manifest phase. Count
@@ -667,8 +667,10 @@ include:
 Never present one blended percentage without its basis. Token allocation uses
 only captured non-overlapping action deltas; the session ledger remains the
 authoritative token total. `FINAL_EVIDENCE_RECORDED` and dry-run completion
-must include the orchestration-metrics artifact, even when its status is
-`partial` or `unavailable`.
+must include both the rendered usage-matrix artifact and the orchestration-
+metrics artifact, even when either status is `partial` or `unavailable`. The
+controller must reject completion if a requested ticket row, phase column,
+transverse-task row, or explicit cell status is missing.
 
 Reuse trustworthy CI evidence only when it is tied to the exact reviewed head
 commit and all required checks are available. Reviewers still run independent

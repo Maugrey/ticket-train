@@ -446,6 +446,36 @@ class Harness:
 
 
 class TrainControllerTests(unittest.TestCase):
+    def test_usage_matrix_evidence_rejects_a_missing_transverse_task(self) -> None:
+        proc = {
+            "tickets": {"T-1": {}},
+            "phases": {
+                "run:run:triage:1": {
+                    "phase_key": "run:run:triage:1",
+                    "ticket_id": None,
+                },
+            },
+            "event_log": [{"type": "DEPENDENCIES_CONSOLIDATED"}],
+        }
+        event = {
+            "usage_matrix_ready": True,
+            "usage_matrix_reference": "reports/token-matrix.md",
+            "usage_matrix_sha256": "f" * 64,
+            "usage_matrix_status": "partial",
+            "usage_matrix_ticket_ids": ["T-1"],
+            "usage_matrix_ticket_phase_columns": list(train_controller.USAGE_TICKET_PHASE_COLUMNS),
+            "usage_matrix_transverse_task_ids": [
+                "phase:run:run:triage:1",
+                "run:orchestration",
+                "run:usage-reporting",
+            ],
+            "usage_matrix_unreported_cell_count": 0,
+        }
+        with self.assertRaisesRegex(train_controller.ControllerError, "transverse task rows"):
+            train_controller.validate_usage_matrix_evidence(
+                proc, event, label="test matrix"
+            )
+
     def test_active_routing_policy_snapshot(self) -> None:
         self.assertEqual(train_controller.ROUTING_POLICY_VERSION, "2026-08-27-v2")
         self.assertEqual(train_controller.ANALYSIS_MATRIX, {
@@ -2448,6 +2478,19 @@ class TrainControllerTests(unittest.TestCase):
                     unmeasured_session_ids=[],
                     task_inventory_requested_count=1,
                     task_inventory_terminal_count=1,
+                    usage_matrix_ready=True,
+                    usage_matrix_reference="reports/dry-run-token-matrix.md",
+                    usage_matrix_sha256="f" * 64,
+                    usage_matrix_status="complete",
+                    usage_matrix_ticket_ids=["T-1"],
+                    usage_matrix_ticket_phase_columns=list(train_controller.USAGE_TICKET_PHASE_COLUMNS),
+                    usage_matrix_transverse_task_ids=[
+                        "phase:run:run:triage:1",
+                        "run:dependency-consolidation",
+                        "run:orchestration",
+                        "run:usage-reporting",
+                    ],
+                    usage_matrix_unreported_cell_count=0,
                 ),
                 0,
             )
@@ -2611,6 +2654,22 @@ class TrainControllerTests(unittest.TestCase):
                     unmeasured_session_ids=[],
                     task_inventory_requested_count=1,
                     task_inventory_terminal_count=1,
+                    usage_matrix_ready=True,
+                    usage_matrix_reference="reports/final-token-matrix.md",
+                    usage_matrix_sha256="f" * 64,
+                    usage_matrix_status="complete",
+                    usage_matrix_ticket_ids=["T-1"],
+                    usage_matrix_ticket_phase_columns=list(train_controller.USAGE_TICKET_PHASE_COLUMNS),
+                    usage_matrix_transverse_task_ids=[
+                        "phase:run:run:final-review:1",
+                        "phase:run:run:triage:1",
+                        "run:dependency-consolidation",
+                        "run:final-verification",
+                        "run:github-feedback",
+                        "run:orchestration",
+                        "run:usage-reporting",
+                    ],
+                    usage_matrix_unreported_cell_count=0,
                 ),
                 0,
             )

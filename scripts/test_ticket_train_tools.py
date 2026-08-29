@@ -574,27 +574,54 @@ class TokenUsageTests(unittest.TestCase):
             manifest_path.write_text(json.dumps({
                 "orchestrator_lease": {"owner_thread_id": orchestrator_id},
                 "handoff_history": [],
-                "procedure": {"phases": {
-                    "run:T-1:review:1": {
-                        "phase_key": "run:T-1:review:1",
-                        "ticket_id": "T-1",
-                        "thread_id": child_id,
-                        "usage_captured": True,
+                "procedure": {
+                    "tickets": {"T-1": {"status": "BLOCKED"}},
+                    "phases": {
+                        "run:T-1:review:1": {
+                            "phase_key": "run:T-1:review:1",
+                            "kind": "review",
+                            "ticket_id": "T-1",
+                            "thread_id": child_id,
+                            "usage_captured": True,
+                        },
                     },
-                }},
+                    "event_log": [],
+                },
             }), encoding="utf-8")
             output = root / "ledger.json"
+            matrix_output = root / "usage-matrix.md"
             token_usage.ledger_command(argparse.Namespace(
                 manifest=manifest_path,
                 thread=None,
                 codex_home=codex_home,
                 output=output,
+                matrix_output=matrix_output,
             ))
             ledger = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(ledger["aggregate"]["status"], "complete")
             self.assertTrue(ledger["orchestrator_session_included"])
             self.assertEqual(ledger["unmapped_hidden_sessions"], [])
             self.assertEqual(ledger["phase_usage"]["run:T-1:review:1"]["total_tokens"], 200)
+            matrix = ledger["usage_matrix"]
+            self.assertEqual(matrix["expected_ticket_ids"], ["T-1"])
+            self.assertEqual(matrix["ticket_rows"]["T-1"]["cells"]["initial_review"]["usage"]["total_tokens"], 200)
+            self.assertEqual(matrix["unreported_cell_count"], 0)
+            rendered = matrix_output.read_text(encoding="utf-8")
+            self.assertIn("Token consumption by ticket and phase", rendered)
+            self.assertIn("Token consumption for transverse tasks", rendered)
+
+    def test_invalid_orchestrator_alias_is_not_treated_as_a_missing_session(self) -> None:
+        manifest = {
+            "orchestrator_lease": {"owner_thread_id": "thread-main"},
+            "handoff_history": [{
+                "from_thread_id": "/root",
+                "to_thread_id": "thread-main",
+            }],
+        }
+        self.assertEqual(
+            token_usage.collect_orchestrator_thread_ids(manifest),
+            ["thread-main"],
+        )
 
 
 class VerificationRunnerTests(unittest.TestCase):

@@ -44,6 +44,17 @@ MECHANICAL_FAST_PATH_FIELDS = (
     "reversible",
     "immediately_detectable",
 )
+USAGE_TICKET_PHASE_COLUMNS = (
+    "analysis",
+    "analysis_validation",
+    "contract_validation",
+    "acceptance_tests",
+    "implementation",
+    "verification",
+    "initial_review",
+    "remediation",
+    "followup_review",
+)
 
 ANALYSIS_MATRIX = {
     "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
@@ -131,6 +142,71 @@ def require(condition: bool, message: str) -> None:
 def require_fields(value: dict[str, Any], fields: tuple[str, ...], label: str) -> None:
     missing = [field for field in fields if value.get(field) in (None, "", [])]
     require(not missing, f"{label} is missing: {', '.join(missing)}")
+
+
+def expected_usage_transverse_task_ids(proc: dict[str, Any]) -> list[str]:
+    task_ids = {"run:orchestration", "run:usage-reporting"}
+    phases = proc.get("phases") if isinstance(proc.get("phases"), dict) else {}
+    for phase_value in phases.values():
+        if not isinstance(phase_value, dict) or phase_value.get("ticket_id") not in {None, "run"}:
+            continue
+        phase_key = phase_value.get("phase_key")
+        if phase_key:
+            task_ids.add(f"phase:{phase_key}")
+    event_types = {
+        str(item.get("type"))
+        for item in proc.get("event_log", [])
+        if isinstance(item, dict)
+    }
+    if "DEPENDENCIES_CONSOLIDATED" in event_types:
+        task_ids.add("run:dependency-consolidation")
+    if "FINAL_VERIFICATION_RECORDED" in event_types:
+        task_ids.add("run:final-verification")
+    if event_types & {"FINAL_FEEDBACK_SNAPSHOT_RECORDED", "FINAL_FINDINGS_RECONCILED"}:
+        task_ids.add("run:github-feedback")
+    return sorted(task_ids)
+
+
+def validate_usage_matrix_evidence(
+    proc: dict[str, Any], event: dict[str, Any], *, label: str
+) -> None:
+    require_fields(
+        event,
+        (
+            "usage_matrix_ready",
+            "usage_matrix_reference",
+            "usage_matrix_sha256",
+            "usage_matrix_status",
+            "usage_matrix_ticket_ids",
+            "usage_matrix_ticket_phase_columns",
+            "usage_matrix_transverse_task_ids",
+        ),
+        label,
+    )
+    require(event["usage_matrix_ready"] is True, f"{label} must be ready")
+    require_sha256(event["usage_matrix_sha256"], f"{label} sha256")
+    require(
+        event["usage_matrix_status"] in {"complete", "partial", "unavailable"},
+        f"invalid {label} status",
+    )
+    require(
+        event["usage_matrix_ticket_ids"] == sorted(str(ticket_id) for ticket_id in proc["tickets"]),
+        f"{label} ticket rows do not match the requested tickets",
+    )
+    require(
+        event["usage_matrix_ticket_phase_columns"] == list(USAGE_TICKET_PHASE_COLUMNS),
+        f"{label} phase columns are incomplete or out of order",
+    )
+    require(
+        event["usage_matrix_transverse_task_ids"] == expected_usage_transverse_task_ids(proc),
+        f"{label} transverse task rows are incomplete",
+    )
+    require(
+        isinstance(event.get("usage_matrix_unreported_cell_count"), int)
+        and not isinstance(event.get("usage_matrix_unreported_cell_count"), bool)
+        and event["usage_matrix_unreported_cell_count"] == 0,
+        f"{label} contains unreported cells",
+    )
 
 
 def procedure(state: dict[str, Any]) -> dict[str, Any]:
@@ -2372,6 +2448,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 "orchestration_metrics_reference", "orchestration_metrics_sha256",
                 "authoritative_phase_count", "measured_phase_count", "task_inventory_requested_count",
                 "task_inventory_terminal_count",
+                "usage_matrix_ready", "usage_matrix_reference", "usage_matrix_sha256",
+                "usage_matrix_status", "usage_matrix_ticket_ids",
+                "usage_matrix_ticket_phase_columns", "usage_matrix_transverse_task_ids",
             ),
             "dry-run evidence",
         )
@@ -2393,6 +2472,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             require(not event["unmeasured_phase_keys"] and not event["unmeasured_session_ids"], "complete dry-run token report has missing measurements")
         require(event["task_inventory_requested_count"] == len(proc["tickets"]), "dry-run task inventory requested count mismatch")
         require(event["task_inventory_terminal_count"] == len(proc["tickets"]), "dry-run task inventory terminal count mismatch")
+        validate_usage_matrix_evidence(
+            proc, event, label="dry-run token consumption matrix"
+        )
         for field in (
             "session_usage_ledger_ready", "analysis_reports_ready", "task_inventory_ready",
             "completion_report_ready", "orchestration_metrics_ready",
@@ -2839,6 +2921,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 "orchestration_metrics_ready", "orchestration_metrics_status",
                 "orchestration_metrics_reference", "orchestration_metrics_sha256",
                 "task_inventory_requested_count", "task_inventory_terminal_count",
+                "usage_matrix_ready", "usage_matrix_reference", "usage_matrix_sha256",
+                "usage_matrix_status", "usage_matrix_ticket_ids",
+                "usage_matrix_ticket_phase_columns", "usage_matrix_transverse_task_ids",
             ),
             "final evidence",
         )
@@ -2872,6 +2957,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(
             event["task_inventory_terminal_count"] == len(proc["tickets"]),
             "task inventory omits a non-terminal ticket",
+        )
+        validate_usage_matrix_evidence(
+            proc, event, label="final token consumption matrix"
         )
         for field in (
             "session_usage_ledger_ready", "verification_summary_ready", "manual_validation_summary_ready",
@@ -2939,6 +3027,8 @@ def completion_issues(state: dict[str, Any]) -> list[str]:
         evidence = final.get("dry_run_evidence") or {}
         if not evidence.get("completion_report_ready"):
             issues.append("dry-run completion report is missing")
+        if evidence.get("usage_matrix_ready") is not True:
+            issues.append("dry-run token consumption matrix is missing")
         return issues
     pr = final.get("pull_request") or {}
     verification = final.get("verification") or {}
@@ -2960,6 +3050,10 @@ def completion_issues(state: dict[str, Any]) -> list[str]:
     if ledger.get("feedback_snapshot_id") != snapshot.get("snapshot_id"):
         issues.append("final finding ledger does not use the latest GitHub feedback snapshot")
     evidence = final.get("evidence") or {}
+    if evidence.get("usage_matrix_ready") is not True:
+        issues.append("final token consumption matrix is missing")
+    if evidence.get("usage_matrix_unreported_cell_count") != 0:
+        issues.append("final token consumption matrix has unreported cells")
     if evidence.get("token_reporting_status") == "complete":
         if evidence.get("orchestrator_session_included") is not True:
             issues.append("complete token ledger omits orchestrator usage")

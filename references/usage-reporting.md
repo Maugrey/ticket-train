@@ -94,6 +94,14 @@ At run completion, early stop, or train checkpoint:
 10. Require every owner named by the lease and handoff history in the final
     ledger. A controlled handoff is a sequential orchestration segment, not a
     duplicate.
+11. Generate and publish the two mandatory Markdown matrices: requested
+    tickets by phase, including row and column totals, and transverse tasks by
+    token counter. Every cell must contain an exact value, `unavailable`, or
+    `not applicable`; blanks are forbidden.
+12. Do not record completion evidence until the controller has validated the
+    exact ticket IDs, canonical phase columns, transverse-task inventory, and
+    zero unreported cells. `partial` and `unavailable` are acceptable coverage
+    states; omission of the matrices is not.
 
 Keep snapshots in the external run-state directory and do not commit them.
 Retain them until the train completes or is explicitly abandoned, so a
@@ -289,7 +297,8 @@ completion:
 ```powershell
 python scripts/token_usage.py ledger `
   --manifest <run-manifest.json> `
-  --output <usage-ledger.json>
+  --output <usage-ledger.json> `
+  --matrix-output <usage-matrix.md>
 ```
 
 The ledger includes every orchestrator segment, sessions discovered from hidden-agent
@@ -304,6 +313,16 @@ It also emits per-phase and per-ticket usage aggregates, orchestration usage,
 authoritative/measured phase counts, unmapped hidden sessions, and whether the
 known orchestrator segments were included. The controller accepts `complete` only when
 those inventories reconcile exactly.
+
+The generated Markdown is the mandatory user-facing report. Its first table
+has one row for every requested ticket and the canonical phase columns
+`analysis`, `analysis_validation`, `contract_validation`, `acceptance_tests`,
+`implementation`, `verification`, `initial_review`, `remediation`, and
+`followup_review`, plus ticket and phase totals. Its second table lists every
+run-level phase and transverse task, including orchestration, dependency
+consolidation, final verification, GitHub feedback reconciliation, and usage
+reporting when applicable. Tasks included in orchestration must say so and
+must not be added twice.
 
 The completion or dry-run evidence must also reference the orchestration
 metrics artifact, its SHA-256, and its status (`complete`, `partial`, or

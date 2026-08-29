@@ -701,7 +701,7 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 | Exact-head CI collected | complete \| pending \| unavailable | | |
 | Copilot/comments dispositioned | complete \| pending \| unavailable \| not configured | | |
 | GitHub feedback snapshot covers final head | complete \| stale \| missing | | |
-| Token accounting reported | complete \| partial \| unavailable | | |
+| Token matrices published for every ticket, phase, and transverse task | complete \| partial \| unavailable | | |
 | Orchestration execution metrics reported | complete \| partial \| unavailable | | |
 | Orchestrator segments included | <measured>/<known> | | |
 | Hidden sessions reconciled | yes \| no | | |
@@ -737,11 +737,27 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 |---|---|---|---|---|
 | blocking \| important \| informational | | | | |
 
-### Token usage by ticket
+### Token consumption by ticket and phase — mandatory
 
-| Ticket | Analysis | Contract validation | Implementation | Test authoring | Red/green/environment | Initial review | Remediation | Follow-up review | Ticket total | Coverage |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| <ticket-id> | | | | | | | | | | |
+| Ticket | Analysis | Analysis validation | Contract validation | Acceptance tests | Implementation | Verification | Initial review | Remediation | Follow-up review | Ticket total | Coverage |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| <ticket-id> | | | | | | | | | | | complete \| partial \| unavailable |
+| **Phase total** | | | | | | | | | | | |
+
+Every requested ticket and every canonical phase column must be present. Use
+an exact number, `N/D`, or `—` for not applicable in every cell; never leave a
+cell blank in the published report.
+
+### Token consumption for transverse tasks — mandatory
+
+| Transverse task | Input | Cached input | Output | Reasoning output | Total | Coverage | Accounting |
+|---|---:|---:|---:|---:|---:|---|---|
+| <run-level phase or transverse task> | | | | | | complete \| partial \| unavailable \| included in orchestration | independent \| included-in-orchestration |
+
+List every applicable run-level phase and transverse task, including
+orchestration, dependency consolidation, final verification, GitHub feedback
+reconciliation, and usage reporting. Never double-count a task whose interval
+is included in orchestration.
 
 ### Aggregate token usage
 

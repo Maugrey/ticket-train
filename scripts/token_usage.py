@@ -24,6 +24,18 @@ USAGE_FIELDS = (
 )
 THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{5,127}$")
 PHASE_ATTEMPT_PATTERN = re.compile(r"^(?P<family>.+):(?P<attempt>[0-9]+)$")
+TICKET_PHASE_COLUMNS = (
+    ("analysis", "Analysis"),
+    ("analysis_validation", "Analysis validation"),
+    ("contract_validation", "Contract validation"),
+    ("acceptance_tests", "Acceptance tests"),
+    ("implementation", "Implementation"),
+    ("verification", "Verification"),
+    ("initial_review", "Initial review"),
+    ("remediation", "Remediation"),
+    ("followup_review", "Follow-up review"),
+)
+OPTIONAL_TICKET_PHASES = {"analysis_validation", "remediation", "followup_review"}
 
 
 def now_iso() -> str:
@@ -305,7 +317,9 @@ def collect_orchestrator_thread_ids(manifest: dict[str, Any]) -> list[str]:
     thread_ids: set[str] = set()
     lease = manifest.get("orchestrator_lease")
     if isinstance(lease, dict) and isinstance(lease.get("owner_thread_id"), str):
-        thread_ids.add(lease["owner_thread_id"])
+        owner = lease["owner_thread_id"]
+        if THREAD_ID_PATTERN.fullmatch(owner):
+            thread_ids.add(owner)
     history = manifest.get("handoff_history")
     if isinstance(history, list):
         for handoff in history:
@@ -313,7 +327,7 @@ def collect_orchestrator_thread_ids(manifest: dict[str, Any]) -> list[str]:
                 continue
             for field in ("from_thread_id", "to_thread_id"):
                 value = handoff.get(field)
-                if isinstance(value, str):
+                if isinstance(value, str) and THREAD_ID_PATTERN.fullmatch(value):
                     thread_ids.add(value)
     return sorted(thread_ids)
 
@@ -368,6 +382,344 @@ def aggregate_status(available: int, unavailable: int) -> str:
     if unavailable:
         return "partial"
     return "complete"
+
+
+def phase_matrix_category(phase: dict[str, Any]) -> str | None:
+    kind = str(phase.get("kind") or "")
+    phase_key = str(phase.get("phase_key") or "")
+    if kind == "analysis":
+        return "analysis"
+    if kind == "analysis_route_validation":
+        return "analysis_validation"
+    if kind == "plan_contract_validation":
+        return "contract_validation"
+    if kind == "acceptance_tests":
+        return "acceptance_tests"
+    if kind == "implementation":
+        return "implementation"
+    if kind == "remediation":
+        return "remediation"
+    if kind == "review":
+        return "followup_review" if "followup" in phase_key.lower() or phase.get("scope") == "followup" else "initial_review"
+    return None
+
+
+def unavailable_measurement(reason: str, phase_keys: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "usage": None,
+        "phase_keys": list(phase_keys or []),
+        "missing_reasons": [reason],
+    }
+
+
+def exact_measurement(usage: dict[str, int], phase_keys: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "status": "complete",
+        "usage": usage,
+        "phase_keys": list(phase_keys or []),
+        "missing_reasons": [],
+    }
+
+
+def not_applicable_measurement(reason: str) -> dict[str, Any]:
+    return {
+        "status": "not_applicable",
+        "usage": None,
+        "phase_keys": [],
+        "missing_reasons": [reason],
+    }
+
+
+def combine_measurements(measurements: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [
+        normalize_usage(item.get("usage"))
+        for item in measurements
+        if item.get("status") in {"complete", "partial"}
+    ]
+    exact = [item for item in available if item is not None]
+    missing = [
+        reason
+        for item in measurements
+        if item.get("status") in {"partial", "unavailable"}
+        for reason in item.get("missing_reasons", [])
+    ]
+    phase_keys = sorted({
+        str(phase_key)
+        for item in measurements
+        for phase_key in item.get("phase_keys", [])
+        if phase_key
+    })
+    if not measurements or all(item.get("status") == "not_applicable" for item in measurements):
+        return not_applicable_measurement("no applicable phase was recorded")
+    if exact:
+        return {
+            "status": "partial" if missing else "complete",
+            "usage": sum_usage(exact),
+            "phase_keys": phase_keys,
+            "missing_reasons": sorted(set(missing)),
+        }
+    return unavailable_measurement(
+        "; ".join(sorted(set(missing))) or "exact counters unavailable",
+        phase_keys,
+    )
+
+
+def phase_measurement(
+    phase: dict[str, Any], sessions: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    phase_key = str(phase.get("phase_key") or "")
+    thread_id = phase.get("thread_id")
+    if not thread_id:
+        return unavailable_measurement("thread ID missing", [phase_key])
+    session = sessions.get(str(thread_id))
+    if not session or session.get("status") != "available":
+        return unavailable_measurement("session counters unavailable", [phase_key])
+    if phase.get("usage_captured") is not True:
+        return unavailable_measurement("phase measurement boundary was not captured", [phase_key])
+    usage = normalize_usage(session.get("delta_usage"))
+    if usage is None:
+        return unavailable_measurement("invalid session counters", [phase_key])
+    if len(session.get("phase_keys", [])) > 1:
+        return unavailable_measurement("shared session window was not isolated by phase", [phase_key])
+    return exact_measurement(usage, [phase_key])
+
+
+def expected_transverse_task_ids(manifest: dict[str, Any]) -> list[str]:
+    procedure = manifest.get("procedure") if isinstance(manifest.get("procedure"), dict) else {}
+    phases = procedure.get("phases") if isinstance(procedure.get("phases"), dict) else {}
+    task_ids = {"run:orchestration", "run:usage-reporting"}
+    for phase in phases.values():
+        if not isinstance(phase, dict) or phase.get("ticket_id") not in {None, "run"}:
+            continue
+        phase_key = phase.get("phase_key")
+        if phase_key:
+            task_ids.add(f"phase:{phase_key}")
+    event_types = {
+        str(item.get("type"))
+        for item in procedure.get("event_log", [])
+        if isinstance(item, dict)
+    }
+    if "DEPENDENCIES_CONSOLIDATED" in event_types:
+        task_ids.add("run:dependency-consolidation")
+    if "FINAL_VERIFICATION_RECORDED" in event_types:
+        task_ids.add("run:final-verification")
+    if event_types & {"FINAL_FEEDBACK_SNAPSHOT_RECORDED", "FINAL_FINDINGS_RECONCILED"}:
+        task_ids.add("run:github-feedback")
+    return sorted(task_ids)
+
+
+def build_usage_matrix(
+    manifest: dict[str, Any],
+    sessions: dict[str, dict[str, Any]],
+    orchestrator_thread_ids: list[str],
+    aggregate_usage: dict[str, int],
+) -> dict[str, Any]:
+    procedure = manifest.get("procedure") if isinstance(manifest.get("procedure"), dict) else {}
+    phases_object = procedure.get("phases") if isinstance(procedure.get("phases"), dict) else {}
+    phases = [phase for phase in phases_object.values() if isinstance(phase, dict)]
+    tickets = procedure.get("tickets") if isinstance(procedure.get("tickets"), dict) else {}
+    ticket_rows: dict[str, Any] = {}
+
+    for ticket_id, ticket_state in sorted(tickets.items()):
+        ticket_phases = [phase for phase in phases if str(phase.get("ticket_id") or "") == str(ticket_id)]
+        cells: dict[str, Any] = {}
+        merged = isinstance(ticket_state, dict) and ticket_state.get("status") == "MERGED_INTO_TRAIN"
+        for column, _label in TICKET_PHASE_COLUMNS:
+            matching = [phase for phase in ticket_phases if phase_matrix_category(phase) == column]
+            if column == "verification":
+                verification = ticket_state.get("verification") if isinstance(ticket_state, dict) else None
+                if isinstance(verification, dict) and verification.get("model_tokens") == 0:
+                    cells[column] = exact_measurement(empty_usage(), [])
+                elif isinstance(verification, dict):
+                    cells[column] = unavailable_measurement("verification token boundary unavailable")
+                elif merged:
+                    cells[column] = unavailable_measurement("required verification evidence missing")
+                else:
+                    cells[column] = not_applicable_measurement("ticket did not reach verification")
+                continue
+            if matching:
+                cells[column] = combine_measurements([
+                    phase_measurement(phase, sessions) for phase in matching
+                ])
+            elif column in OPTIONAL_TICKET_PHASES:
+                cells[column] = not_applicable_measurement("phase not required for this ticket")
+            elif merged:
+                cells[column] = unavailable_measurement("required phase missing from manifest")
+            else:
+                cells[column] = not_applicable_measurement("ticket stopped before this phase")
+
+        total = combine_measurements([
+            cell for cell in cells.values() if cell.get("status") != "not_applicable"
+        ])
+        ticket_rows[str(ticket_id)] = {
+            "scope_type": "ticket",
+            "cells": cells,
+            "total": total,
+        }
+
+    phase_totals = {
+        column: combine_measurements([
+            row["cells"][column] for row in ticket_rows.values()
+            if row["cells"][column].get("status") != "not_applicable"
+        ])
+        for column, _label in TICKET_PHASE_COLUMNS
+    }
+
+    transverse_rows: dict[str, Any] = {}
+    orchestration_measurements = []
+    for thread_id in orchestrator_thread_ids:
+        session = sessions.get(thread_id)
+        usage = normalize_usage(session.get("delta_usage")) if isinstance(session, dict) else None
+        if isinstance(session, dict) and session.get("status") == "available" and usage is not None:
+            orchestration_measurements.append(exact_measurement(usage, []))
+        else:
+            orchestration_measurements.append(unavailable_measurement(f"orchestrator segment unavailable: {thread_id}"))
+    transverse_rows["run:orchestration"] = {
+        **combine_measurements(orchestration_measurements),
+        "accounting_mode": "independent",
+        "notes": "Non-overlapping orchestrator segments, measured before report publication.",
+    }
+
+    for phase in phases:
+        if phase.get("ticket_id") not in {None, "run"}:
+            continue
+        phase_key = str(phase.get("phase_key") or "")
+        if not phase_key:
+            continue
+        transverse_rows[f"phase:{phase_key}"] = {
+            **phase_measurement(phase, sessions),
+            "accounting_mode": "independent",
+            "notes": str(phase.get("kind") or "run-level model phase"),
+        }
+
+    event_types = {
+        str(item.get("type"))
+        for item in procedure.get("event_log", [])
+        if isinstance(item, dict)
+    }
+    if "DEPENDENCIES_CONSOLIDATED" in event_types:
+        transverse_rows["run:dependency-consolidation"] = {
+            **unavailable_measurement("not isolated from orchestrator session"),
+            "status": "included_in_orchestration",
+            "accounting_mode": "included-in-orchestration",
+            "notes": "Reported explicitly without double-counting the orchestrator total.",
+        }
+    finalization = procedure.get("finalization") if isinstance(procedure.get("finalization"), dict) else {}
+    if "FINAL_VERIFICATION_RECORDED" in event_types:
+        verification = finalization.get("verification") if isinstance(finalization.get("verification"), dict) else {}
+        measurement = (
+            exact_measurement(empty_usage())
+            if verification.get("model_tokens") == 0
+            else unavailable_measurement("final verification token boundary unavailable")
+        )
+        transverse_rows["run:final-verification"] = {
+            **measurement,
+            "accounting_mode": "independent",
+            "notes": "Deterministic verification reports zero model tokens only when confirmed by evidence.",
+        }
+    if event_types & {"FINAL_FEEDBACK_SNAPSHOT_RECORDED", "FINAL_FINDINGS_RECONCILED"}:
+        transverse_rows["run:github-feedback"] = {
+            **unavailable_measurement("not isolated from orchestrator session"),
+            "status": "included_in_orchestration",
+            "accounting_mode": "included-in-orchestration",
+            "notes": "Collection and reconciliation are listed explicitly; their model usage remains in orchestration.",
+        }
+    transverse_rows["run:usage-reporting"] = {
+        **exact_measurement(empty_usage()),
+        "accounting_mode": "independent",
+        "notes": "Ledger and matrix generation are deterministic; prose publication remains in orchestration.",
+    }
+
+    reported_measurements = [
+        cell
+        for row in ticket_rows.values()
+        for cell in row["cells"].values()
+        if cell.get("status") != "not_applicable"
+    ] + [
+        row
+        for row in transverse_rows.values()
+        if row.get("accounting_mode") == "independent"
+    ]
+    has_exact = any(normalize_usage(item.get("usage")) is not None for item in reported_measurements)
+    has_missing = any(item.get("status") in {"partial", "unavailable"} for item in reported_measurements)
+    coverage_status = "partial" if has_exact and has_missing else ("complete" if has_exact else "unavailable")
+
+    return {
+        "schema_version": 1,
+        "coverage_status": coverage_status,
+        "ticket_phase_columns": [column for column, _label in TICKET_PHASE_COLUMNS],
+        "ticket_phase_labels": {column: label for column, label in TICKET_PHASE_COLUMNS},
+        "ticket_rows": ticket_rows,
+        "phase_totals": phase_totals,
+        "transverse_rows": dict(sorted(transverse_rows.items())),
+        "expected_ticket_ids": sorted(str(ticket_id) for ticket_id in tickets),
+        "expected_transverse_task_ids": expected_transverse_task_ids(manifest),
+        "unreported_cell_count": 0,
+        "aggregate_usage": aggregate_usage,
+    }
+
+
+def markdown_tokens(measurement: dict[str, Any]) -> str:
+    status = measurement.get("status")
+    if status == "not_applicable":
+        return "—"
+    usage = normalize_usage(measurement.get("usage"))
+    if usage is None:
+        return "N/D (orchestration)" if status == "included_in_orchestration" else "N/D"
+    suffix = "*" if status == "partial" else ""
+    return f"{usage['total_tokens']:,}{suffix}"
+
+
+def render_usage_matrix_markdown(matrix: dict[str, Any]) -> str:
+    columns = matrix["ticket_phase_columns"]
+    labels = matrix["ticket_phase_labels"]
+    lines = [
+        "## Token consumption by ticket and phase",
+        "",
+        "| Ticket | " + " | ".join(labels[column] for column in columns) + " | Ticket total | Coverage |",
+        "|---|" + "|".join("---:" for _ in columns) + "|---:|---|",
+    ]
+    for ticket_id, row in matrix["ticket_rows"].items():
+        lines.append(
+            f"| {ticket_id} | "
+            + " | ".join(markdown_tokens(row["cells"][column]) for column in columns)
+            + f" | {markdown_tokens(row['total'])} | {row['total']['status']} |"
+        )
+    lines.append(
+        "| **Phase total** | "
+        + " | ".join(markdown_tokens(matrix["phase_totals"][column]) for column in columns)
+        + " |  |  |"
+    )
+    lines.extend([
+        "",
+        "## Token consumption for transverse tasks",
+        "",
+        "| Transverse task | Input | Cached input | Output | Reasoning output | Total | Coverage | Accounting |",
+        "|---|---:|---:|---:|---:|---:|---|---|",
+    ])
+    for task_id, row in matrix["transverse_rows"].items():
+        usage = normalize_usage(row.get("usage"))
+        counters = ["N/D"] * 5 if usage is None else [
+            f"{usage['input_tokens']:,}", f"{usage['cached_input_tokens']:,}",
+            f"{usage['output_tokens']:,}", f"{usage['reasoning_output_tokens']:,}",
+            f"{usage['total_tokens']:,}",
+        ]
+        lines.append(
+            f"| {task_id} | " + " | ".join(counters)
+            + f" | {row['status']} | {row['accounting_mode']} |"
+        )
+    aggregate = normalize_usage(matrix.get("aggregate_usage")) or empty_usage()
+    lines.extend([
+        "",
+        f"- Measured train total: **{aggregate['total_tokens']:,} tokens**",
+        f"- Input: {aggregate['input_tokens']:,}; cached input: {aggregate['cached_input_tokens']:,}; output: {aggregate['output_tokens']:,}; reasoning output: {aggregate['reasoning_output_tokens']:,}.",
+        "- `N/D` means that the exact task interval was unavailable; `N/D (orchestration)` means it is included in the orchestrator total and must not be added again.",
+        "- `*` marks a partial cell: the displayed exact attempts are included, but at least one attempt is unmeasured.",
+        "- Token counters are not subscription-credit or billing counters.",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def capture_command(args: argparse.Namespace) -> None:
@@ -711,8 +1063,11 @@ def ledger_command(args: argparse.Namespace) -> None:
     unavailable_sessions = sum(
         1 for session in sessions.values() if session.get("status") != "available"
     )
-    write_document(
-        {
+    aggregate_usage = sum_usage(available_usage)
+    usage_matrix = build_usage_matrix(
+        manifest, sessions, orchestrator_thread_ids, aggregate_usage
+    )
+    ledger = {
             "schema_version": SCHEMA_VERSION,
             "kind": "ledger",
             "captured_at": now_iso(),
@@ -735,6 +1090,7 @@ def ledger_command(args: argparse.Namespace) -> None:
                 ticket_id: sum_usage(items) for ticket_id, items in sorted(ticket_usage.items())
             },
             "orchestration_usage": orchestration_usage,
+            "usage_matrix": usage_matrix,
             "aggregate": {
                 "status": aggregate_status(
                     len(available_usage),
@@ -743,7 +1099,7 @@ def ledger_command(args: argparse.Namespace) -> None:
                     + len(unmapped_hidden_sessions)
                     + (0 if orchestrator_session_included else 1),
                 ),
-                "usage": sum_usage(available_usage),
+                "usage": aggregate_usage,
                 "available_sessions": len(available_usage),
                 "unavailable_sessions": unavailable_sessions,
                 "unmeasured_phases": len(unmeasured_phases),
@@ -771,9 +1127,15 @@ def ledger_command(args: argparse.Namespace) -> None:
                 "windows still require explicit capture/diff measurements. Token "
                 "counts are not subscription-credit counters."
             ),
-        },
-        args.output,
-    )
+        }
+    write_document(ledger, args.output)
+    matrix_output = getattr(args, "matrix_output", None)
+    if matrix_output is not None:
+        matrix_path = matrix_output.expanduser().resolve()
+        matrix_path.parent.mkdir(parents=True, exist_ok=True)
+        matrix_path.write_text(
+            render_usage_matrix_markdown(usage_matrix), encoding="utf-8"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -826,6 +1188,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ledger.add_argument("--codex-home", type=Path)
     ledger.add_argument("--output", type=Path)
+    ledger.add_argument(
+        "--matrix-output",
+        type=Path,
+        help="Write the mandatory ticket/phase and transverse-task Markdown matrices.",
+    )
     ledger.set_defaults(handler=ledger_command)
 
     return parser
