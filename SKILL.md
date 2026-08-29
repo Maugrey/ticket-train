@@ -635,7 +635,7 @@ applicable. Link code concerns to the final pull-request diff. State explicitly
 when no manual test or no attention point is identified; never use omission to
 mean none.
 
-Use [token_usage.py](scripts/token_usage.py) under [usage-reporting.md](references/usage-reporting.md). At every checkpoint and completion, publishing the generated two-dimensional token matrices is mandatory: one row per requested ticket with one column per phase and row/column totals, followed by one row per transverse task. Report exact counters when available, mark every unavailable or non-applicable cell explicitly, keep orchestration separate, and include the train aggregate. Never invent a token estimate. A prose total or a ledger link does not satisfy this requirement.
+Use [token_usage.py](scripts/token_usage.py) under [usage-reporting.md](references/usage-reporting.md). At every checkpoint and completion, publishing its generated compact two-dimensional table is mandatory: rows contain every requested ticket followed by every transverse responsibility; columns are Analysis, Implementation, Acceptance, Remediation, Review, and Total; the final row gives a total for every column. The machine ledger retains the finer subphase breakdown used for validation. Report exact counters when available, mark every unavailable or non-applicable cell explicitly, keep unallocated orchestration visible, and include the train aggregate. Never invent a token estimate. A prose total or a ledger link does not satisfy this requirement.
 
 Use its `ledger` command at checkpoints and completion to reconcile
 baseline/final/delta for every known session and every manifest phase. Count

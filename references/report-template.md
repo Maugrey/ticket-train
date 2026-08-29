@@ -737,27 +737,22 @@ Use the final pull-request diff for important-file links. If a stable file ancho
 |---|---|---|---|---|
 | blocking \| important \| informational | | | | |
 
-### Token consumption by ticket and phase — mandatory
+### Compact token consumption table — mandatory
 
-| Ticket | Analysis | Analysis validation | Contract validation | Acceptance tests | Implementation | Verification | Initial review | Remediation | Follow-up review | Ticket total | Coverage |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| <ticket-id> | | | | | | | | | | | complete \| partial \| unavailable |
-| **Phase total** | | | | | | | | | | | |
+| Ticket / responsibility | Analysis | Implementation | Acceptance | Remediation | Review | Total |
+|---|---:|---:|---:|---:|---:|---:|
+| <ticket-id> | | | | | | |
+| <transverse responsibility> | | | | | | |
+| **Total** | | | | | | |
 
-Every requested ticket and every canonical phase column must be present. Use
-an exact number, `N/D`, or `—` for not applicable in every cell; never leave a
-cell blank in the published report.
-
-### Token consumption for transverse tasks — mandatory
-
-| Transverse task | Input | Cached input | Output | Reasoning output | Total | Coverage | Accounting |
-|---|---:|---:|---:|---:|---:|---|---|
-| <run-level phase or transverse task> | | | | | | complete \| partial \| unavailable \| included in orchestration | independent \| included-in-orchestration |
-
-List every applicable run-level phase and transverse task, including
-orchestration, dependency consolidation, final verification, GitHub feedback
-reconciliation, and usage reporting. Never double-count a task whose interval
-is included in orchestration.
+Use millions with two decimal places for readability and show the number of
+passes when a remediation or review column aggregates several passes. Every
+requested ticket and every applicable transverse responsibility must be a row.
+Every phase column and the grand-total column must have a bottom total. Use an
+exact number, `N/D`, `—` for not applicable, or `Included in orchestrator` in
+every cell; never leave a cell blank. Keep orchestration as its own row when it
+cannot be allocated safely among phases. The machine ledger retains the
+canonical subphase breakdown and exact counters.
 
 ### Aggregate token usage
 

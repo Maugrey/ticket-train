@@ -660,63 +660,245 @@ def build_usage_matrix(
     }
 
 
-def markdown_tokens(measurement: dict[str, Any]) -> str:
+DISPLAY_PHASE_COLUMNS = (
+    ("analysis", ("analysis", "analysis_validation", "contract_validation")),
+    ("implementation", ("implementation",)),
+    ("acceptance", ("acceptance_tests", "verification")),
+    ("remediation", ("remediation",)),
+    ("review", ("initial_review", "followup_review")),
+)
+
+
+REPORT_TEXT = {
+    "en": {
+        "title": "Token consumption summary",
+        "scope": "Ticket / responsibility",
+        "analysis": "Analysis",
+        "implementation": "Implementation",
+        "acceptance": "Acceptance",
+        "remediation": "Remediation",
+        "review": "Review",
+        "total": "Total",
+        "column_total": "Total",
+        "included": "Included in orchestrator",
+        "measured_total": "Measured train total",
+        "breakdown": "Input: {input}; cached input: {cached}; output: {output}; reasoning output: {reasoning}.",
+        "missing": "`N/A` means that the exact interval is unavailable; `—` means not applicable.",
+        "partial": "`*` marks a partial value: displayed measured passes are included, but at least one interval is unavailable.",
+        "orchestration": "Orchestrator",
+        "orchestration_detail": "Coordination, controls, supervision, pull requests, and reports",
+        "dependency": "Dependency consolidation",
+        "final_verification": "Final train verification",
+        "github_feedback": "GitHub feedback reconciliation",
+        "usage_reporting": "Usage reporting",
+        "triage": "Train triage",
+        "final_review": "Final train review",
+        "final_remediation": "Final train remediation",
+        "passes": "passes",
+        "credit": "Token counters are not subscription-credit or billing counters.",
+    },
+    "fr": {
+        "title": "Synthèse de la consommation de tokens",
+        "scope": "Ticket / responsabilité",
+        "analysis": "Analyse",
+        "implementation": "Implémentation",
+        "acceptance": "Acceptation",
+        "remediation": "Remédiation",
+        "review": "Revue",
+        "total": "Total",
+        "column_total": "Total",
+        "included": "Inclus dans l’orchestrateur",
+        "measured_total": "Total mesuré du train",
+        "breakdown": "Entrée : {input} ; entrée en cache : {cached} ; sortie : {output} ; raisonnement en sortie : {reasoning}.",
+        "missing": "`N/D` signifie que l’intervalle exact est indisponible ; `—` signifie non applicable.",
+        "partial": "`*` signale une valeur partielle : les passes mesurées sont incluses, mais au moins un intervalle est indisponible.",
+        "orchestration": "Orchestrateur",
+        "orchestration_detail": "Coordination, contrôles, supervision, PR et rapports",
+        "dependency": "Consolidation des dépendances",
+        "final_verification": "Vérification finale du train",
+        "github_feedback": "Réconciliation des retours GitHub",
+        "usage_reporting": "Rapport de consommation",
+        "triage": "Triage du train",
+        "final_review": "Revue finale du train",
+        "final_remediation": "Remédiation finale du train",
+        "passes": "passes",
+        "credit": "Les compteurs de tokens ne sont pas des compteurs de crédits d’abonnement ou de facturation.",
+    },
+}
+
+
+def format_millions(total_tokens: int, *, language: str) -> str:
+    if total_tokens == 0:
+        return "0"
+    value = total_tokens / 1_000_000
+    rendered = f"{value:.2f}".replace(".", ",") if language == "fr" else f"{value:.2f}"
+    return f"{rendered} M"
+
+
+def compact_markdown_tokens(
+    measurement: dict[str, Any], *, language: str, show_passes: bool = False
+) -> str:
     status = measurement.get("status")
     if status == "not_applicable":
         return "—"
+    if status == "included_in_orchestration":
+        return REPORT_TEXT[language]["included"]
     usage = normalize_usage(measurement.get("usage"))
     if usage is None:
-        return "N/D (orchestration)" if status == "included_in_orchestration" else "N/D"
-    suffix = "*" if status == "partial" else ""
-    return f"{usage['total_tokens']:,}{suffix}"
+        return "N/D" if language == "fr" else "N/A"
+    rendered = format_millions(usage["total_tokens"], language=language)
+    if status == "partial":
+        rendered += "*"
+    pass_count = len(measurement.get("phase_keys", []))
+    if show_passes and pass_count > 1:
+        rendered += f" ({pass_count} {REPORT_TEXT[language]['passes']})"
+    return rendered
 
 
-def render_usage_matrix_markdown(matrix: dict[str, Any]) -> str:
-    columns = matrix["ticket_phase_columns"]
-    labels = matrix["ticket_phase_labels"]
+def transverse_display_column(task_id: str) -> str | None:
+    lowered = task_id.lower()
+    if "triage" in lowered or "dependency-consolidation" in lowered:
+        return "analysis"
+    if "final-verification" in lowered:
+        return "acceptance"
+    if "final-remediation" in lowered:
+        return "remediation"
+    if "final-review" in lowered or "github-feedback" in lowered:
+        return "review"
+    return None
+
+
+def transverse_display_label(task_id: str, *, language: str) -> str:
+    text = REPORT_TEXT[language]
+    if task_id == "run:orchestration":
+        return text["orchestration"]
+    if task_id == "run:dependency-consolidation":
+        return text["dependency"]
+    if task_id == "run:final-verification":
+        return text["final_verification"]
+    if task_id == "run:github-feedback":
+        return text["github_feedback"]
+    if task_id == "run:usage-reporting":
+        return text["usage_reporting"]
+    lowered = task_id.lower()
+    if "triage" in lowered:
+        return text["triage"]
+    if "final-remediation" in lowered:
+        return text["final_remediation"]
+    if "final-review" in lowered:
+        return text["final_review"]
+    return task_id.removeprefix("phase:")
+
+
+def transverse_display_order(task_id: str) -> tuple[int, str]:
+    lowered = task_id.lower()
+    if "triage" in lowered:
+        return (10, task_id)
+    if task_id == "run:dependency-consolidation":
+        return (20, task_id)
+    if task_id == "run:final-verification":
+        return (30, task_id)
+    if "final-remediation" in lowered:
+        return (40, task_id)
+    if "final-review" in lowered:
+        return (50, task_id)
+    if task_id == "run:github-feedback":
+        return (60, task_id)
+    if task_id == "run:orchestration":
+        return (70, task_id)
+    if task_id == "run:usage-reporting":
+        return (80, task_id)
+    return (65, task_id)
+
+
+def render_usage_matrix_markdown(matrix: dict[str, Any], *, language: str = "en") -> str:
+    if language not in REPORT_TEXT:
+        raise ValueError(f"Unsupported report language: {language}")
+    text = REPORT_TEXT[language]
+    column_keys = [column for column, _sources in DISPLAY_PHASE_COLUMNS]
+    headers = [text[column] for column in column_keys]
     lines = [
-        "## Token consumption by ticket and phase",
+        f"## {text['title']}",
         "",
-        "| Ticket | " + " | ".join(labels[column] for column in columns) + " | Ticket total | Coverage |",
-        "|---|" + "|".join("---:" for _ in columns) + "|---:|---|",
+        f"| {text['scope']} | " + " | ".join(headers) + f" | {text['total']} |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
+    column_measurements: dict[str, list[dict[str, Any]]] = {
+        column: [] for column in column_keys
+    }
+
     for ticket_id, row in matrix["ticket_rows"].items():
+        display_cells: dict[str, dict[str, Any]] = {}
+        for column, sources in DISPLAY_PHASE_COLUMNS:
+            display_cells[column] = combine_measurements([
+                row["cells"][source]
+                for source in sources
+                if row["cells"][source].get("status") != "not_applicable"
+            ])
+            column_measurements[column].append(display_cells[column])
+        rendered_cells = [
+            compact_markdown_tokens(
+                display_cells[column], language=language,
+                show_passes=column in {"remediation", "review"},
+            )
+            for column in column_keys
+        ]
         lines.append(
-            f"| {ticket_id} | "
-            + " | ".join(markdown_tokens(row["cells"][column]) for column in columns)
-            + f" | {markdown_tokens(row['total'])} | {row['total']['status']} |"
+            f"| {ticket_id} | " + " | ".join(rendered_cells)
+            + f" | **{compact_markdown_tokens(row['total'], language=language)}** |"
         )
+
+    for task_id in sorted(matrix["transverse_rows"], key=transverse_display_order):
+        row = matrix["transverse_rows"][task_id]
+        display_column = transverse_display_column(task_id)
+        cells = {column: not_applicable_measurement("not applicable") for column in column_keys}
+        if display_column:
+            cells[display_column] = row
+            column_measurements[display_column].append(
+                unavailable_measurement("included in orchestrator")
+                if row.get("status") == "included_in_orchestration"
+                else row
+            )
+        rendered_cells = [
+            compact_markdown_tokens(
+                cells[column], language=language,
+                show_passes=column in {"remediation", "review"},
+            )
+            for column in column_keys
+        ]
+        if task_id == "run:orchestration":
+            rendered_cells[0] = text["orchestration_detail"]
+        lines.append(
+            f"| {transverse_display_label(task_id, language=language)} | "
+            + " | ".join(rendered_cells)
+            + f" | **{compact_markdown_tokens(row, language=language)}** |"
+        )
+
+    aggregate = normalize_usage(matrix.get("aggregate_usage")) or empty_usage()
+    column_totals = {
+        column: combine_measurements(measurements)
+        for column, measurements in column_measurements.items()
+    }
     lines.append(
-        "| **Phase total** | "
-        + " | ".join(markdown_tokens(matrix["phase_totals"][column]) for column in columns)
-        + " |  |  |"
+        f"| **{text['column_total']}** | "
+        + " | ".join(
+            f"**{compact_markdown_tokens(column_totals[column], language=language)}**"
+            for column in column_keys
+        )
+        + f" | **{format_millions(aggregate['total_tokens'], language=language)}** |"
     )
     lines.extend([
         "",
-        "## Token consumption for transverse tasks",
-        "",
-        "| Transverse task | Input | Cached input | Output | Reasoning output | Total | Coverage | Accounting |",
-        "|---|---:|---:|---:|---:|---:|---|---|",
-    ])
-    for task_id, row in matrix["transverse_rows"].items():
-        usage = normalize_usage(row.get("usage"))
-        counters = ["N/D"] * 5 if usage is None else [
-            f"{usage['input_tokens']:,}", f"{usage['cached_input_tokens']:,}",
-            f"{usage['output_tokens']:,}", f"{usage['reasoning_output_tokens']:,}",
-            f"{usage['total_tokens']:,}",
-        ]
-        lines.append(
-            f"| {task_id} | " + " | ".join(counters)
-            + f" | {row['status']} | {row['accounting_mode']} |"
-        )
-    aggregate = normalize_usage(matrix.get("aggregate_usage")) or empty_usage()
-    lines.extend([
-        "",
-        f"- Measured train total: **{aggregate['total_tokens']:,} tokens**",
-        f"- Input: {aggregate['input_tokens']:,}; cached input: {aggregate['cached_input_tokens']:,}; output: {aggregate['output_tokens']:,}; reasoning output: {aggregate['reasoning_output_tokens']:,}.",
-        "- `N/D` means that the exact task interval was unavailable; `N/D (orchestration)` means it is included in the orchestrator total and must not be added again.",
-        "- `*` marks a partial cell: the displayed exact attempts are included, but at least one attempt is unmeasured.",
-        "- Token counters are not subscription-credit or billing counters.",
+        f"- {text['measured_total']}: **{format_millions(aggregate['total_tokens'], language=language)}**.",
+        "- " + text["breakdown"].format(
+            input=format_millions(aggregate["input_tokens"], language=language),
+            cached=format_millions(aggregate["cached_input_tokens"], language=language),
+            output=format_millions(aggregate["output_tokens"], language=language),
+            reasoning=format_millions(aggregate["reasoning_output_tokens"], language=language),
+        ),
+        "- " + text["missing"],
+        "- " + text["partial"],
+        "- " + text["credit"],
         "",
     ])
     return "\n".join(lines)
@@ -1134,7 +1316,11 @@ def ledger_command(args: argparse.Namespace) -> None:
         matrix_path = matrix_output.expanduser().resolve()
         matrix_path.parent.mkdir(parents=True, exist_ok=True)
         matrix_path.write_text(
-            render_usage_matrix_markdown(usage_matrix), encoding="utf-8"
+            render_usage_matrix_markdown(
+                usage_matrix,
+                language=getattr(args, "report_language", "en"),
+            ),
+            encoding="utf-8",
         )
 
 
@@ -1192,6 +1378,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--matrix-output",
         type=Path,
         help="Write the mandatory ticket/phase and transverse-task Markdown matrices.",
+    )
+    ledger.add_argument(
+        "--report-language",
+        choices=sorted(REPORT_TEXT),
+        default="en",
+        help="Language for the user-facing Markdown matrix (default: en).",
     )
     ledger.set_defaults(handler=ledger_command)
 

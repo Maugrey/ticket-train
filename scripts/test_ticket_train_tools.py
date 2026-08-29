@@ -607,8 +607,13 @@ class TokenUsageTests(unittest.TestCase):
             self.assertEqual(matrix["ticket_rows"]["T-1"]["cells"]["initial_review"]["usage"]["total_tokens"], 200)
             self.assertEqual(matrix["unreported_cell_count"], 0)
             rendered = matrix_output.read_text(encoding="utf-8")
-            self.assertIn("Token consumption by ticket and phase", rendered)
-            self.assertIn("Token consumption for transverse tasks", rendered)
+            self.assertIn("Token consumption summary", rendered)
+            self.assertIn("| Ticket / responsibility | Analysis | Implementation | Acceptance | Remediation | Review | Total |", rendered)
+            self.assertIn("| **Total** |", rendered)
+
+            rendered_fr = token_usage.render_usage_matrix_markdown(matrix, language="fr")
+            self.assertIn("Synthèse de la consommation de tokens", rendered_fr)
+            self.assertIn("| Ticket / responsabilité | Analyse | Implémentation | Acceptation | Remédiation | Revue | Total |", rendered_fr)
 
     def test_invalid_orchestrator_alias_is_not_treated_as_a_missing_session(self) -> None:
         manifest = {
