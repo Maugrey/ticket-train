@@ -243,6 +243,14 @@ launch-unknown, or ready for an automatic successor. The same model
 conversation need not stay active when verified completion callbacks or a
 deterministic zero-model watcher can signal changed state.
 
+An automatic deterministic action is not active work merely because it is the
+controller's `next_action`. Do not report it as running until its subprocess
+or guarded adapter invocation has actually started. When no child phase is
+active and heartbeat returns `CONTINUE_AUTOMATICALLY`, execute that action in
+the current turn; do not publish a final response that leaves it merely ready.
+For a long deterministic subprocess, keep the execution session open and
+report that concrete process as the progress signal.
+
 Use one event-driven `wait_threads` call for all active user-visible threads
 with their latest host IDs and cursors. Prefer the longest product-approved
 wait that still permits required user updates. On every wake-up:

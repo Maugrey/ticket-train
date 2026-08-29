@@ -598,6 +598,25 @@ class TokenUsageTests(unittest.TestCase):
 
 
 class VerificationRunnerTests(unittest.TestCase):
+    def test_unity_mcp_test_command_requires_explicit_client_timeout(self) -> None:
+        plan = {
+            "schema_version": 1,
+            "workdir": ".",
+            "expected_head": "head",
+            "commands": [{
+                "id": "unity-tests",
+                "argv": [
+                    "powershell", "-Command",
+                    "npx unity-mcp-cli@0.90.0 run-tool tests-run project",
+                ],
+                "timeout_seconds": 900,
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "Unity MCP client --timeout"):
+            verification_runner.validate_plan(plan)
+        plan["commands"][0]["argv"][-1] += " --timeout 900000"
+        verification_runner.validate_plan(plan)
+
     def test_runner_records_zero_model_tokens_and_exact_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

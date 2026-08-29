@@ -183,6 +183,15 @@ the local MCP through that editor only. The slot lease is execution evidence;
 it does not replace `verification_runner.py` results, exact-head checks, or
 captured logs.
 
+For every `unity-mcp-cli run-tool tests-run` command, set the CLI's own
+`--timeout` explicitly. The CLI defaults to 60 seconds and this inner timeout
+is independent from the plan's outer `timeout_seconds`; increasing only the
+runner timeout does not help. Use a bounded value suitable for Unity startup
+and compilation (normally `--timeout 900000` with an outer timeout of at least
+900 seconds). Treat an inner client timeout as an infrastructure result, not a
+failed test, and retry only after confirming the editor and MCP endpoint are
+still ready.
+
 The controller accepts both `passed` and `failed` runner results so failure
 evidence is durable. It allows review only after a passing result. A model may
 classify a failed result as implementation defect, test defect, environment

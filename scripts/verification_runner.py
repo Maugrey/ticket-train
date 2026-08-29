@@ -72,6 +72,16 @@ def validate_plan(plan: dict[str, Any]) -> tuple[Path, str, list[dict[str, Any]]
         timeout = command.get("timeout_seconds", 1800)
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
             raise ValueError(f"Verification command {command_id} has an invalid timeout")
+        rendered_argv = " ".join(argv).lower()
+        if (
+            "unity-mcp-cli" in rendered_argv
+            and "run-tool" in rendered_argv
+            and "tests-run" in rendered_argv
+            and "--timeout" not in rendered_argv
+        ):
+            raise ValueError(
+                f"Verification command {command_id} must set the Unity MCP client --timeout explicitly"
+            )
         seen.add(command_id)
     return Path(workdir_value).expanduser().resolve(), expected_head, commands
 
