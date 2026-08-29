@@ -209,6 +209,23 @@ active, its visible task is the progress signal; repeat the gate only through
 an explicitly requested deterministic product reminder. Never reduce the
 request to "waiting for information".
 
+For a scope-expansion gate, add this compact decision table:
+
+```markdown
+| Proposal | Why it is outside current scope | Minimal MVP path | Expanded path | Cost/latency | Risk/tests | Recommendation |
+|---|---|---|---|---|---|---|
+| <proposal-id> | | | | | | |
+
+- Product lifecycle stage:
+- Existing-state compatibility posture:
+- Current active classification and route:
+- Projected classification and route if approved:
+- Decision required for every proposal: approve | reject | defer
+```
+
+Do not merge this with a criticality-based analysis approval. State explicitly
+that `full-auto` and the other approval modes do not bypass it.
+
 ## Routing triage report
 
 Report triage as a compact batch table:
@@ -287,6 +304,11 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Analysis revision:
 - Verification contract revision:
 - Proportionality profile revision:
+- Product lifecycle stage:
+- Existing-state compatibility posture and evidence:
+- Scope assessment revision:
+- Active scope revision:
+- Classification basis: authorized-scope-only
 - Applicability: confirmed | partial | obsolete | blocked
 - Intrinsic criticality:
 - Credible failure mode and causal path:
@@ -315,6 +337,9 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Acceptance criteria:
 - Conditional technical plan:
 - Planned variants:
+- Scope origins: source-explicit | project-mandated | user-approved | derived-necessary | proposed | optional | deferred
+- Scope-expansion proposals: none | <proposal IDs and minimal/expanded variants>
+- Scope-expansion decisions: none required | awaiting user | <decision references>
 - Upstream dependencies and assumptions:
 - Downstream dependency contract:
 - Functional invariants:
@@ -340,6 +365,7 @@ Use Codex-provided `total_tokens`; do not calculate it by adding the breakdown f
 - Collision domain:
 - Scheduling decision: parallel-safe | sequential | blocked
 - Analysis gate: automatically approved | awaiting human approval | human approved
+- Scope-expansion gate: not required | awaiting human decision | resolved
 - Open decisions or risks:
 - Minimum required correction:
 - Optional hardening:
@@ -422,6 +448,10 @@ Use this compact template:
 - Complexity reduction evidence: <brief evidence | no reduction>
 - Unresolved implementation difficulty: <items | none>
 - Proportionality profile: <revision and decisive assumption>
+- Scope assessment: <revision; lifecycle; compatibility posture>
+- Active scope: <authorized origins and active revision>
+- Proposed scope expansions: <none, or proposal IDs with minimal/expanded variants>
+- Scope-expansion gate: not required | awaiting user decision | resolved
 - Criticality basis: <credible failure, blast radius, containment and recovery>
 - Complexity basis: <decisive factors, interactions and confidence>
 - Functional / business rules: **<impact label>** — <explicit summary>

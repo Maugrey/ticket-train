@@ -358,6 +358,14 @@ aligned with the product's real actors, credible threats, protected boundaries,
 and MVP scope. Recommendations are separated into minimum required correction,
 optional hardening, and explicitly deferred post-MVP work.
 
+Every analysis also records where each scope item came from. Compatibility,
+migration, backfill, legacy preservation, rollout bridges, and any other work
+that is not explicit, project-mandated, previously approved, or proven
+strictly necessary is presented as a separate proposal. The user chooses the
+minimal or expanded variant through a non-bypassable scope gate—even in
+`full-auto`. Active classification and model routing ignore unapproved scope,
+and reviews cannot turn rejected or deferred work into blocking remediation.
+
 ## Durable control and recovery
 
 The main thread stores compact decisions and status while detailed work remains

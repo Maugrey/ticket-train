@@ -69,6 +69,11 @@ acceptable_containment_and_recovery
 mvp_scope
 explicit_non_goals
 post_mvp_hardening_candidates
+product_lifecycle_stage
+existing_state_compatibility_posture
+existing_state_value_and_users
+compatibility_source_evidence
+scope_expansion_policy = explicit-approval-required
 evidence_and_user_decisions
 ```
 
@@ -85,6 +90,14 @@ model or acceptance criteria.
 A material profile change invalidates affected analysis or review evidence.
 A wording-only clarification does not.
 
+Apply [scope-governance.md](scope-governance.md) before promoting any useful
+work into `minimum_required_correction`. In particular, pre-MVP compatibility,
+save migration, backfill, legacy preservation, rollout bridges, and similar
+work are not operational necessities merely because they could make a future
+upgrade safer. If the source, project rules, or a prior user decision do not
+require them unambiguously, present them as a scope-expansion proposal and
+wait for the distinct user decision. Approval modes do not bypass this gate.
+
 ## Recommendation separation
 
 Every analysis, implementation report, review, remediation disposition, and
@@ -100,6 +113,7 @@ final report must separate recommendations into exactly these categories:
 Do not make optional hardening blocking. Do not hide required work in the
 optional or deferred categories. A reviewer must cite the profile, acceptance
 criterion, invariant, or project rule that makes a recommendation required.
+Ambiguous source language and generic best practice are insufficient proof.
 
 ## Ticket and train size budgets
 

@@ -447,14 +447,17 @@ Require each analyzer to:
 13. State the matrix inputs and selected cell received from the orchestrator.
 14. State explicitly that no files were modified.
 15. Apply the proportionality profile to every failure path and recommendation.
-16. Separate `minimum_required_correction`, `optional_hardening`, and
+16. Produce the complete scope-origin assessment from
+    [scope-governance.md](scope-governance.md). Keep active classification on
+    authorized scope and present every expansion as minimal versus expanded.
+17. Separate `minimum_required_correction`, `optional_hardening`, and
     `explicitly_deferred_post_mvp`.
-17. Estimate material file, migration/data-transformation, and structural
+18. Estimate material file, migration/data-transformation, and structural
     domain counts, and identify epic evidence.
-18. Produce the versioned verification contract from
+19. Produce the versioned verification contract from
     [verification-policy.md](verification-policy.md), including acceptance,
     state, role, negative, recovery, environment, red, and green oracles.
-19. Identify applicable Supabase/Auth/RLS/SSR-cookie/redirect/storage/hosted
+20. Identify applicable Supabase/Auth/RLS/SSR-cookie/redirect/storage/hosted
     environment surfaces and the required local or staging tier.
 
 The orchestrator checks completeness and consistency of the classification
@@ -476,6 +479,11 @@ automatically approved analysis, label the digest as informational and
 continue without waiting. When human approval is required by the matrix and
 mode, pause only that ticket's implementation and implementations that require
 its merged result.
+
+Before that matrix gate, resolve every scope-expansion proposal through the
+separate non-bypassable user decision. `full-auto` does not authorize the
+expanded variant. Other analyses may continue, but dependency consolidation
+and every technical phase that depends on the unresolved variant must wait.
 
 A waiting human analysis gate never blocks analysis or dependency consolidation for another selected ticket. It does not block an independent implementation whose own gates are satisfied.
 
@@ -817,7 +825,8 @@ updating this pull request is part of live train execution; merging it is not.
 
 The worker must:
 
-1. Receive a reconciled analysis whose human analysis gate is satisfied or bypassed.
+1. Receive a reconciled analysis whose scope-expansion gate is resolved and
+   whose human analysis gate is satisfied or bypassed.
 2. Re-read the ticket analysis, project instructions, and current train base.
 3. Use the implementation model and effort selected from [model-routing.md](model-routing.md).
 4. Stay within the approved scope.
@@ -860,7 +869,9 @@ After both initial workers complete:
 6. Reassess effective intrinsic criticality and complexity from the complete
    production and test diff.
 7. Keep the higher value per dimension between analysis and implementation.
-8. Report scope expansion and any newly applicable human gate.
+8. If the diff reveals scope expansion, stop and open the distinct
+   scope-expansion gate before review; do not treat it as an ordinary
+   criticality gate.
 9. Route the independent reviewer from the effective values under [model-routing.md](model-routing.md).
 10. Run one exhaustive independent review under
    [review-policy.md](review-policy.md) and require the complete finding

@@ -136,7 +136,59 @@ class Harness:
                 "log_reference": "logs/tests.log",
             }],
         }
-    def analyze(self, criticality: str = "LOW", complexity: str = "LOW") -> None:
+
+    @staticmethod
+    def scope_assessment(proposals: list[dict[str, object]] | None = None) -> dict[str, object]:
+        proposals = proposals or []
+        items: list[dict[str, object]] = [{
+            "item_id": "source-criterion-1",
+            "description": "Implement the explicit ticket acceptance criterion.",
+            "scope_origin": "source-explicit",
+        }]
+        for proposal in proposals:
+            items.append({
+                "item_id": f"proposed-{proposal['proposal_id']}",
+                "description": proposal["description"],
+                "scope_origin": "scope-expansion-proposed",
+                "proposal_id": proposal["proposal_id"],
+            })
+        return {
+            "assessment_revision": "scope-1",
+            "product_lifecycle_stage": "pre-MVP",
+            "existing_state_compatibility_posture": "disposable",
+            "compatibility_source_evidence": "profile-1: pre-MVP saves are disposable",
+            "classification_basis": "authorized-scope-only",
+            "classification_scope_item_ids": ["source-criterion-1"],
+            "items": items,
+            "proposals": proposals,
+        }
+
+    @staticmethod
+    def scope_expansion_proposal() -> dict[str, object]:
+        return {
+            "proposal_id": "legacy-save-migration",
+            "category": "migration",
+            "description": "Migrate unpublished pre-MVP local saves.",
+            "source_gap": "The ticket asks for asset migration, not save compatibility.",
+            "minimal_variant": "Allow pre-MVP saves to reset.",
+            "expanded_variant": "Add a versioned save migration and compatibility tests.",
+            "impact": {
+                "scope": "save schema and loader",
+                "cost": "additional implementation and review",
+                "latency": "longer delivery",
+                "risk": "migration defects",
+                "tests": "legacy fixtures and upgrade paths",
+                "classification_if_approved": {"criticality": "NORMAL", "complexity": "MEDIUM"},
+            },
+            "recommendation": "Use the minimal MVP variant.",
+        }
+
+    def analyze(
+        self,
+        criticality: str = "LOW",
+        complexity: str = "LOW",
+        scope_proposals: list[dict[str, object]] | None = None,
+    ) -> None:
         analysis_model, analysis_effort = train_controller.setting_from_matrix(
             train_controller.ANALYSIS_MATRIX, criticality, complexity
         )
@@ -212,6 +264,7 @@ class Harness:
                 verification_complexity=complexity,
                 complexity_reduction_evidence="no reduction claimed",
                 unresolved_implementation_difficulty=[],
+                scope_assessment=self.scope_assessment(scope_proposals),
                 report_thread_id="thread-analysis",
                 model=analysis_model,
                 reasoning_effort=analysis_effort,
@@ -220,6 +273,8 @@ class Harness:
             ),
             0,
         )
+        if scope_proposals:
+            return
         self.assert_code(
             self.apply(
                 "DEPENDENCIES_CONSOLIDATED",
@@ -264,6 +319,8 @@ class Harness:
                 acceptance_model="gpt-5.6-terra",
                 acceptance_reasoning_effort="medium",
                 acceptance_routing_conformance="conformant",
+                scope_assessment_revision="scope-1",
+                scope_conformance="within-authorized-scope",
                 implementation_unity_requirement=implementation_unity_requirement,
                 acceptance_unity_requirement=acceptance_unity_requirement,
                 verification_unity_requirement=verification_unity_requirement,
@@ -676,6 +733,7 @@ class TrainControllerTests(unittest.TestCase):
                 verification_complexity="MEDIUM",
                 complexity_reduction_evidence="bounded design resolved",
                 unresolved_implementation_difficulty=[],
+                scope_assessment=run.scope_assessment(),
                 report_thread_id="thread-analysis",
                 model="gpt-5.6-terra",
                 reasoning_effort="medium",
@@ -1293,6 +1351,57 @@ class TrainControllerTests(unittest.TestCase):
                 ),
             )
 
+    def test_out_of_scope_review_finding_cannot_block_or_trigger_remediation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.functional_ready()
+            self.assertEqual(run.record_pr(), 0)
+            run.clean_review(reconcile=False)
+            fields = {
+                "ticket_id": "T-1",
+                "head_commit": "ticket-sha",
+                "ledger_status": "complete",
+                "sources_dispositioned": ["codex", "ci", "copilot"],
+                "feedback_collection_started_at": "2026-08-01T10:00:00+00:00",
+                "feedback_collection_deadline_at": "2026-08-01T10:10:00+00:00",
+                "feedback_collected_at": "2026-08-01T10:02:00+00:00",
+                "ci_status": "passed",
+                "copilot_status": "received",
+                "source_counts": {"codex": 1, "ci": 0, "copilot": 0},
+                "source_findings": [{"finding_id": "scope-1", "source": "codex"}],
+                "feedback_evidence_reference": "artifacts/ticket-feedback.json",
+            }
+            self.assertEqual(run.apply(
+                "TICKET_FINDINGS_RECONCILED",
+                finding_dispositions=[{
+                    "finding_id": "scope-1",
+                    "disposition": "rejected-out-of-scope",
+                    "blocking": True,
+                    "remediation_status": "pending",
+                    "verification": "Not required by the ticket.",
+                }],
+                blocking_findings=["scope-1"],
+                **fields,
+            ), 2)
+            self.assertEqual(run.apply(
+                "TICKET_FINDINGS_RECONCILED",
+                finding_dispositions=[{
+                    "finding_id": "scope-1",
+                    "disposition": "rejected-out-of-scope",
+                    "blocking": False,
+                    "remediation_status": "not-required",
+                    "verification": "Not required by the ticket.",
+                }],
+                blocking_findings=[],
+                **fields,
+            ), 0)
+            self.assertEqual(
+                run.state()["procedure"]["tickets"]["T-1"]["status"],
+                "READY_TO_MERGE",
+            )
+
     def test_external_ticket_pr_head_drift_is_recorded_before_finding_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
@@ -1434,6 +1543,8 @@ class TrainControllerTests(unittest.TestCase):
             reasoning_effort="medium",
             routing_conformance="conformant",
             reasoning_authorized=True,
+            scope_assessment_revision="scope-1",
+            scope_conformance="within-authorized-scope",
             context_packet=run.context_packet("ticket-sha", "ticket-sha"),
         )
 
@@ -1896,6 +2007,105 @@ class TrainControllerTests(unittest.TestCase):
                 2,
             )
 
+    def test_scope_expansion_gate_is_non_bypassable_in_full_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            proposal = run.scope_expansion_proposal()
+            run.analyze(scope_proposals=[proposal])
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "AWAITING_SCOPE_EXPANSION_APPROVAL")
+            gate_id = item["scope_expansion_gate_id"]
+            self.assertEqual(train_controller.next_actions(run.state())[0]["action"], "ANNOUNCE_HUMAN_GATE")
+            self.assertEqual(run.apply(
+                "GATE_ANNOUNCED",
+                gate_id=gate_id,
+                revision="scope-1",
+                decision_summary="Choose minimal MVP scope or approve save migration.",
+                evidence_summary="Save migration is not required by the source and the product is pre-MVP.",
+                blocked_scope="T-1 implementation and acceptance tests",
+                continuing_scope="Independent analyses",
+                accepted_replies=["Minimal MVP", "Approve migration", "Defer migration"],
+            ), 0)
+            self.assertEqual(run.apply(
+                "GATE_RESOLVED", gate_id=gate_id, revision="scope-1", decision="approved"
+            ), 2)
+            self.assertEqual(run.apply(
+                "SCOPE_EXPANSION_DECIDED",
+                ticket_id="T-1",
+                gate_id=gate_id,
+                revision="scope-1",
+                decisions=[{
+                    "proposal_id": "legacy-save-migration",
+                    "decision": "deferred",
+                    "selected_variant": "minimal",
+                }],
+                user_decision_reference="thread-main:user-message-1",
+                active_scope_revision="scope-active-2",
+                implementation_contract_revision="implementation-2",
+                verification_contract_revision="verification-2",
+            ), 0)
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "ANALYZED")
+            self.assertEqual(item["analysis"]["scope_assessment"]["status"], "RESOLVED")
+            self.assertEqual(
+                item["analysis"]["scope_assessment"]["decisions"][0]["decision"],
+                "deferred",
+            )
+
+    def test_approved_scope_expansion_reclassifies_and_uses_targeted_route_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze(scope_proposals=[run.scope_expansion_proposal()])
+            gate_id = run.state()["procedure"]["tickets"]["T-1"]["scope_expansion_gate_id"]
+            self.assertEqual(run.apply(
+                "GATE_ANNOUNCED",
+                gate_id=gate_id,
+                revision="scope-1",
+                decision_summary="Choose minimal MVP scope or approve save migration.",
+                evidence_summary="The expanded variant changes routing and tests.",
+                blocked_scope="T-1 implementation and acceptance tests",
+                continuing_scope="Independent analyses",
+                accepted_replies=["Minimal MVP", "Approve migration", "Defer migration"],
+            ), 0)
+            self.assertEqual(run.apply(
+                "SCOPE_EXPANSION_DECIDED",
+                ticket_id="T-1",
+                gate_id=gate_id,
+                revision="scope-1",
+                decisions=[{
+                    "proposal_id": "legacy-save-migration",
+                    "decision": "approved",
+                    "selected_variant": "expanded",
+                }],
+                user_decision_reference="thread-main:user-message-2",
+                active_scope_revision="scope-active-2",
+                implementation_contract_revision="implementation-2",
+                verification_contract_revision="verification-2",
+                criticality="NORMAL",
+                complexity="MEDIUM",
+                criticality_evidence="The approved migration changes persisted state but remains recoverable.",
+                complexity_evidence="The approved migration adds versioned loading and legacy fixtures.",
+                residual_implementation_complexity="MEDIUM",
+                verification_complexity="MEDIUM",
+                complexity_reduction_evidence="The variants and oracle are explicit.",
+                unresolved_implementation_difficulty=[],
+                classification_scope_item_ids=["source-criterion-1", "proposed-legacy-save-migration"],
+            ), 0)
+            item = run.state()["procedure"]["tickets"]["T-1"]
+            self.assertEqual(item["status"], "ANALYSIS_ROUTE_VALIDATION_REQUIRED")
+            self.assertEqual(item["analysis"]["criticality"], "NORMAL")
+            approved_item = next(
+                scope_item for scope_item in item["analysis"]["scope_assessment"]["items"]
+                if scope_item["item_id"] == "proposed-legacy-save-migration"
+            )
+            self.assertEqual(approved_item["scope_origin"], "user-approved")
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "RECORD_ANALYSIS_ROUTE_VALIDATION_DISPATCH_INTENT",
+            )
+
     def test_missing_information_is_a_visible_durable_action(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
@@ -2349,6 +2559,7 @@ class TrainControllerTests(unittest.TestCase):
                     model="gpt-5.6-terra",
                     reasoning_effort="medium",
                     routing_conformance="conformant",
+                    scope_conformance="within-authorized-scope",
                     context_packet=run.context_packet("train-sha", "train-sha"),
                 ),
                 0,

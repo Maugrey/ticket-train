@@ -39,6 +39,12 @@ The analyzer produces a versioned verification contract beside the compact
 implementation contract. Do not start the implementation/test pair while a
 material behavior lacks an observable oracle.
 
+Build the contract only from the active authorized scope revision under
+[scope-governance.md](scope-governance.md). An acceptance test must not make an
+unapproved compatibility, migration, backfill, or legacy behavior mandatory.
+Keep the minimal and expanded oracles separate until the user selects a
+variant; an unresolved expansion blocks only its affected execution pair.
+
 For every acceptance criterion and material invariant, record:
 
 ```text
@@ -134,6 +140,7 @@ Give the worker only:
 - normalized ticket and acceptance criteria;
 - approved analysis digest;
 - verification contract;
+- active scope-assessment revision and recorded expansion decisions;
 - proportionality profile;
 - exact execution-pair base;
 - project test guidance and allowed test paths;

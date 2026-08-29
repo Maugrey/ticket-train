@@ -28,6 +28,13 @@ imaginable.
 
 The user may explicitly override a classification.
 
+Classify the active ticket from authorized scope only, as defined by
+[scope-governance.md](scope-governance.md). An unapproved compatibility,
+migration, hardening, or rollout proposal may carry a separate projected
+classification, but it must not raise the active complexity, criticality, or
+model route. If the user approves it, recompute both dimensions and perform a
+targeted route validation rather than repeating the complete analysis.
+
 Apply the train's versioned proportionality profile from
 [efficiency-policy.md](efficiency-policy.md). Severity must reflect the actual
 assets, actors, credible threats, containment, recovery, and protected

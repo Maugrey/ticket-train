@@ -32,6 +32,9 @@ Use a reviewer thread that:
 - uses the model and reasoning effort selected from the effective intrinsic criticality and complexity under [model-routing.md](model-routing.md);
 - receives the ticket, approved analysis, acceptance criteria, project guidance, pull-request URL, base and head revisions, and test evidence;
 - receives the proportionality profile and compact implementation contract;
+- receives the active scope-assessment revision and every approved, rejected,
+  or deferred expansion decision under
+  [scope-governance.md](scope-governance.md);
 - receives the verification contract, independent test commit and pull
   request, acceptance-coverage map, baseline-red evidence, exact-head green
   evidence, environment fingerprints, and applicable Supabase/Auth status;
@@ -96,6 +99,13 @@ suggested_test
 ```
 
 Use blocking severity for issues that must be fixed before merge. Keep cosmetic preferences non-blocking unless project rules require them.
+
+Do not turn a new compatibility strategy, migration, backfill, hardening idea,
+or broader product behavior into a blocking finding unless it is already
+authorized or mandated by a cited project rule. A reviewer-originated scope
+addition opens the distinct scope-expansion gate. A defect that exists only
+because rejected, deferred, or never-authorized behavior is absent receives
+`rejected-out-of-scope`, is non-blocking, and cannot trigger remediation.
 
 Also return:
 
@@ -303,6 +313,9 @@ implementation contract, branch, pull request, findings, and project
 instructions. Report missing context only when it creates material ambiguity.
 
 Do not weaken tests, suppress valid findings, or broaden scope merely to make the review pass.
+Do not broaden scope merely to satisfy a reviewer suggestion. A material-scope
+remediation returns to [scope-governance.md](scope-governance.md) and waits for
+the explicit user decision in every approval mode.
 
 ## Final train pull-request review
 

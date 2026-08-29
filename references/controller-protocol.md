@@ -18,6 +18,7 @@ The deterministic controller owns:
 - event idempotency and manifest revision;
 - ticket and train lifecycle state;
 - human-gate creation, announcement, and exact-revision resolution;
+- scope-origin validation and the non-bypassable per-proposal expansion gate;
 - model-routing matrix lookup and conformance;
 - routing-policy version, phase-local route comparisons, mechanical fast-path
   proof, and scoped Max authorizations;
@@ -244,29 +245,35 @@ The following gates are enforced as code:
    Consolidation includes file/domain/transformation inventories, an explicit
    schedule, a cumulative size budget, and rejects a parallel group with an
    unproven shared file or collision domain.
-6. A matrix-required analysis approval is announced in the main conversation
+6. Every complete analysis records a scope assessment whose active
+   classification is based on authorized scope only. Proposed expansions open
+   a `scope_expansion` gate before route validation, dependency consolidation,
+   contract validation, implementation, or acceptance-test authoring. The
+   specialized `SCOPE_EXPANSION_DECIDED` event records one explicit user
+   decision per proposal. No approval mode bypasses this gate.
+7. A matrix-required analysis approval is announced in the main conversation
    before it can be resolved.
-7. Hard dependencies are merged before an execution pair starts. `HIGH` and
+8. Hard dependencies are merged before an execution pair starts. `HIGH` and
    `MAXIMUM` analysis complexity also require a routed one-turn plan-contract
    validation. Implementation uses the validated residual implementation
    complexity; acceptance tests use their dedicated verification matrix.
-8. Implementation and independent tests start as one atomic pair from the
+9. Implementation and independent tests start as one atomic pair from the
    same base.
-9. Both workers finish before functional verification. The controller then
+10. Both workers finish before functional verification. The controller then
    requires `EXECUTION_PAIR_INTEGRATED`, with exact implementation/test commits,
    combined implementation-branch head, and deterministic integration evidence.
-10. Verification commands run through `verification_runner.py`, preserve the
+11. Verification commands run through `verification_runner.py`, preserve the
     exact Git head, store complete logs outside the repository, and record
     `model_tokens = 0`. A failed run is recorded before technical failure
     adjudication.
-11. Red, green, environment, and applicable Supabase/Auth evidence pass before
+12. Red, green, environment, and applicable Supabase/Auth evidence pass before
     review. Every verification explicitly classifies operational changes; a
     changed scheduler, workflow, provider, webhook, or runtime configuration
     requires a deterministic presence preflight and complete inventory before
     review.
-12. A ticket pull request must target the train branch.
-13. The first review is exhaustive and covers the verified ticket head.
-14. The ticket PR is ready, then Codex, CI, Copilot, and available human
+13. A ticket pull request must target the train branch.
+14. The first review is exhaustive and covers the verified ticket head.
+15. The ticket PR is ready, then Codex, CI, Copilot, and available human
     findings are collected and reconciled into one exact-head ledger before
     remediation or merge. The ticket event records actual collection times,
     stable finding IDs, source counts matching that inventory, exactly one
@@ -278,45 +285,45 @@ The following gates are enforced as code:
     finding is `accepted-deferred`, blocking, listed in `blocking_findings`,
     and has `pending` remediation. This transition enters remediation; it
     never makes the ticket mergeable.
-15. A follow-up review requires the latest trustworthy exhaustive baseline,
+16. A follow-up review requires the latest trustworthy exhaustive baseline,
     remediation, and a
     structured delta classification with its own verification complexity.
-16. A focused follow-up cannot use a setting outside the phase-local
+17. A focused follow-up cannot use a setting outside the phase-local
     compatibility ceiling of the trustworthy full
     review ceiling.
-17. A ticket receives at most two automatic remediation cycles. One third
+18. A ticket receives at most two automatic remediation cycles. One third
     cycle requires a completed root-cause checkpoint, an explicit user input
     gate, and a controller-recorded run-scoped, ticket-scoped, single-use
     exception. The exception grants exactly one cycle and is consumed at
     dispatch.
-18. The ticket cannot merge until review is clean, live exact-head GitHub
+19. The ticket cannot merge until review is clean, live exact-head GitHub
     checks pass, Copilot is terminal and dispositioned, and the exact human
     pre-merge gate, when applicable, is approved. Agent merges use only
     `merge_pull_request.py`; direct GitHub merge commands are unsupported.
-19. Finalization freezes active work.
-20. The final train pull request exists and is no longer draft before final
+20. Finalization freezes active work.
+21. The final train pull request exists and is no longer draft before final
     review.
-21. Final verification and final review cover the same exact PR head. Ticket
+22. Final verification and final review cover the same exact PR head. Ticket
     review settings become final-review floors only with explicit evidence
     that integration invalidated the review or affected its protected surface.
-22. After the final review, a feedback window of at least ten minutes covers
+23. After the final review, a feedback window of at least ten minutes covers
     Codex, CI, Copilot, and human sources on that same exact head. Every
     collected finding receives exactly one technical disposition. `timed_out`
     and `unavailable` are accepted only after the recorded deadline;
     `not_configured` and `unavailable` require evidence.
-23. Blocking final-review findings enter at most two routed final-remediation
+24. Blocking final-review findings enter at most two routed final-remediation
     cycles; every updated PR head invalidates prior verification and review,
     GitHub feedback snapshot, and ledger, then receives targeted follow-up
     review unless material scope changed.
-24. CI, Copilot disposition, finding ledger, token ledger, manual validation,
+25. CI, Copilot disposition, finding ledger, token ledger, manual validation,
     attention points, task inventory, and the completion report are recorded
     before `RUN_COMPLETED`.
-25. A phase above 50 million tokens, more than one context compaction, or a
+26. A phase above 50 million tokens, more than one context compaction, or a
     focused re-review above twice its initial-review usage opens a blocking
     cost checkpoint. Only `COST_ANOMALY_RESOLVED` may advance the run until a
     quality-neutral restart/continuation or user-approved quality tradeoff is
     recorded.
-26. Merging the final train into the base branch additionally requires a
+27. Merging the final train into the base branch additionally requires a
     `FINAL_BASE_MERGE_AUTHORIZED` event tied to the exact final head and a
     direct user decision reference. Approval mode never supplies this event.
     This authorization may be recorded after `RUN_COMPLETED`, because normal
@@ -324,7 +331,7 @@ The following gates are enforced as code:
     perform the final merge.
 
 Approval modes alter only the two human-validation matrices. They do not
-bypass any other procedural gate.
+bypass any other procedural gate, including scope-expansion approval.
 
 ## Human action lifecycle
 
@@ -345,6 +352,14 @@ information" status. The gate stores the exact question, reason, blocked
 scope, independently continuing scope, accepted reply formats, and revision.
 Only one human action is announced at a time, and it is mirrored as
 `pending_human_action` in the canonical manifest.
+
+Scope-expansion decisions use this announcement visibility but not generic
+`GATE_RESOLVED`. Apply `SCOPE_EXPANSION_DECIDED` with the assessment revision,
+user-decision reference, selected variant for every proposal, active-scope
+revision, and amended contract revisions. Approval of expanded scope may raise
+classification and trigger one targeted route validation. Rejection or
+deferral preserves the minimal classification and records the expansion as
+inactive.
 
 ## Next-action loop
 

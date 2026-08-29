@@ -22,6 +22,11 @@ Active policy version: `2026-08-27-v2`. Superseded matrices are preserved in
 
 Use intrinsic criticality and complexity directly. Do not derive a combined control level.
 
+Resolve those values from the active authorized scope revision under
+[scope-governance.md](scope-governance.md). Never spend a higher route because
+of an unapproved expansion. Report its projected route separately and
+recompute only after the user approves it.
+
 - Route the full analysis from provisional triage values.
 - Route implementation from intrinsic criticality and the validated residual
   implementation complexity, never from analysis complexity by default.

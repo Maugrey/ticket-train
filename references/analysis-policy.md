@@ -139,6 +139,25 @@ credible protected-boundary failure, or operational necessity. Apply the
 train's proportionality profile; do not turn generic hardening into blocking
 MVP scope.
 
+### Scope provenance and expansion assessment
+
+Apply [scope-governance.md](scope-governance.md) before dependency
+consolidation. Return one complete `scope_assessment` even when there is no
+proposal. Classify every plan item as source-explicit, project-mandated,
+user-approved, derived-necessary, proposed expansion, optional, or deferred.
+
+Do not conflate asset/data transformations explicitly requested by the ticket
+with compatibility for historical runtime state. A request to migrate current
+assets, schema, or configuration authorizes only that named transformation;
+preserving old saves, old payloads, or unpublished pre-release state requires
+its own source proof or user decision.
+
+For every proposed expansion, return the minimal path and expanded path plus
+their cost, latency, risk, tests, and projected classification. Keep the active
+classification and route based on authorized scope only. The controller opens
+the non-bypassable gate; do not implement, test, or validate the expanded
+variant before its recorded decision.
+
 ### Dependency contract
 
 Return:
