@@ -85,7 +85,7 @@ def github_gate_issues(
     return issues
 
 
-def apply_controller_event(state_path: Path, event: dict[str, Any]) -> None:
+def apply_controller_event(state_path: Path, event: dict[str, Any], owner: str, epoch: str) -> None:
     state = run_registry.load_json(state_path)
     revision = train_controller.procedure(state)["revision"]
     command = [
@@ -96,6 +96,7 @@ def apply_controller_event(state_path: Path, event: dict[str, Any]) -> None:
         str(state_path.expanduser().resolve()),
         "--expected-revision",
         str(revision),
+        "--owner-thread-id", owner, "--owner-epoch", epoch,
         "--event-json",
         json.dumps(event, ensure_ascii=False, separators=(",", ":")),
     ]
@@ -110,6 +111,7 @@ def apply_controller_event(state_path: Path, event: dict[str, Any]) -> None:
 def merge(args: argparse.Namespace) -> int:
     state_path = args.state.expanduser().resolve()
     state = run_registry.load_json(state_path)
+    run_registry.require_owner(state, args.owner, args.owner_epoch)
     proc = train_controller.procedure(state)
 
     if args.action == "ticket":
@@ -148,13 +150,14 @@ def merge(args: argparse.Namespace) -> int:
         "gh", "pr", "view", number, "--repo", args.repo, "--json",
         "number,url,state,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup,mergeCommit,mergedAt",
     ])
-    issues = permit_issues + github_gate_issues(
+    already_merged = live.get("state") == "MERGED" and live.get("headRefOid") == pull_request["head_commit"]
+    issues = permit_issues + ([] if already_merged else github_gate_issues(
         live,
         expected_head=pull_request["head_commit"],
         expected_base=expected_base,
         expected_head_branch=pull_request["head_branch"],
         ci_not_configured=ci_not_configured,
-    )
+    ))
     if issues:
         sys.stdout.write(json.dumps({"status": "blocked", "issues": issues}, ensure_ascii=False, indent=2) + "\n")
         return 2
@@ -169,14 +172,14 @@ def merge(args: argparse.Namespace) -> int:
         return 0
 
     method_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[args.method]
-    completed = subprocess.run(
-        ["gh", "pr", "merge", number, "--repo", args.repo, method_flag],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise ValueError(completed.stderr.strip() or completed.stdout.strip() or "GitHub merge failed")
+    if not already_merged:
+        run_registry.require_owner(run_registry.load_json(state_path), args.owner, args.owner_epoch)
+        completed = subprocess.run(
+            ["gh", "pr", "merge", number, "--repo", args.repo, method_flag, "--match-head-commit", pull_request["head_commit"]],
+            check=False, capture_output=True, text=True,
+        )
+        if completed.returncode != 0:
+            raise ValueError(completed.stderr.strip() or completed.stdout.strip() or "GitHub merge failed")
 
     merged = run_json([
         "gh", "pr", "view", number, "--repo", args.repo, "--json",
@@ -189,7 +192,7 @@ def merge(args: argparse.Namespace) -> int:
         raise ValueError("GitHub merge confirmation omitted the merge commit")
 
     event: dict[str, Any] = {
-        "event_id": f"guarded-merge-{uuid.uuid4()}",
+        "event_id": f"guarded-merge:{pull_request['url']}:{merge_commit}",
         "head_commit": pull_request["head_commit"],
         "merge_commit": merge_commit,
     }
@@ -210,7 +213,7 @@ def merge(args: argparse.Namespace) -> int:
             "type": "FINAL_BASE_MERGED",
             "merged_at": merged.get("mergedAt") or datetime.now(timezone.utc).isoformat(),
         })
-    apply_controller_event(state_path, event)
+    apply_controller_event(state_path, event, args.owner, args.owner_epoch)
     sys.stdout.write(json.dumps({
         "status": "merged-and-recorded",
         "action": args.action,
@@ -224,6 +227,8 @@ def merge(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--owner-epoch", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--action", choices=("ticket", "final-remediation", "final"), required=True)
     parser.add_argument("--ticket-id")

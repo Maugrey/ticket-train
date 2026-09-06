@@ -23,29 +23,8 @@ import verification_runner
 
 @contextlib.contextmanager
 def execution_lock(path: Path):
-    """OS-owned lock: a crashed adapter cannot leave a stale PID lock behind."""
-    with path.open("a+b") as handle:
-        if path.stat().st_size == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            raise ValueError("Verification invocation already active; follow that process, do not rerun") from error
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+    with run_registry.file_lock(path, timeout_seconds=0):
+        yield
 
 
 def execute(args: argparse.Namespace) -> dict:
@@ -54,7 +33,7 @@ def execute(args: argparse.Namespace) -> dict:
     plan_path = args.plan.expanduser().resolve()
     evidence = run_registry.load_json(args.evidence)
     event_type = evidence.get("type")
-    if event_type not in {"VERIFICATION_RECORDED", "FINAL_VERIFICATION_RECORDED"}:
+    if event_type not in {"VERIFICATION_RECORDED", "FINAL_VERIFICATION_RECORDED", "VALIDATION_ONLY_RECORDED"}:
         raise ValueError("Evidence must be a ticket or final verification event template")
     plan = verification_runner.load_json(plan_path)
     workdir, expected_head, _ = verification_runner.validate_plan(plan)
@@ -63,20 +42,24 @@ def execute(args: argparse.Namespace) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
     with execution_lock(output.with_suffix(output.suffix + ".execution.lock")):
         state = run_registry.load_json(state_path)
+        owner = getattr(args, "owner", None) or os.environ.get("CODEX_THREAD_ID")
+        epoch = getattr(args, "owner_epoch", None)
+        run_registry.require_owner(state, owner, epoch)
         ticket_id = evidence.get("ticket_id")
         if not output.exists():
             required = (
+                "RUN_VALIDATION_ONLY_VERIFICATION" if event_type == "VALIDATION_ONLY_RECORDED" else
                 "RUN_DETERMINISTIC_TICKET_VERIFICATION"
                 if event_type == "VERIFICATION_RECORDED"
                 else "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY"
             )
             if not any(
                 action.get("action") == required
-                and (event_type != "VERIFICATION_RECORDED" or action.get("ticket_id") == ticket_id)
+                and (event_type == "FINAL_VERIFICATION_RECORDED" or action.get("ticket_id") == ticket_id)
                 for action in train_controller.next_actions(state)
             ):
                 raise ValueError("Verification is not currently authorized by the controller")
-            verification_runner.run_plan(plan_path, output, args.logs_dir)
+            verification_runner.run_detached_plan(plan_path, output, args.logs_dir)
 
         result = run_registry.load_json(output)
         if result.get("plan_sha256") != plan_hash:
@@ -85,6 +68,11 @@ def execute(args: argparse.Namespace) -> dict:
             raise ValueError("Stored verification worktree/head differs from its plan")
         if verification_runner.git_head(workdir) != expected_head or not result.get("head_unchanged"):
             raise ValueError("Verification head changed; reconcile instead of recording stale evidence")
+        excluded = (args.logs_dir.resolve(), output, output.with_suffix(".runner.lock"), output.with_suffix(output.suffix + ".execution.lock"))
+        if result.get("worktree_fingerprint") and (
+            not result.get("worktree_unchanged") or verification_runner.worktree_fingerprint(workdir, excluded) != result["worktree_fingerprint"]
+        ):
+            raise ValueError("Verification worktree changed; stored evidence no longer covers the current files")
         digest = hashlib.sha256(output.read_bytes()).hexdigest()
         event = {
             **evidence,
@@ -110,10 +98,11 @@ def execute(args: argparse.Namespace) -> dict:
             train_controller.apply_event(argparse.Namespace(
                 state=state_path, event=None, event_json=json.dumps(event),
                 expected_revision=state["procedure"]["revision"],
+                owner_thread_id=owner, owner_epoch=epoch,
             ))
         packet_output = io.StringIO()
         with contextlib.redirect_stdout(packet_output):
-            control_plane_runner.step(argparse.Namespace(state=state_path, output_dir=None))
+            control_plane_runner.step(argparse.Namespace(state=state_path, output_dir=None, owner_thread_id=owner, owner_epoch=epoch))
         return {
             "status": "recorded", "verification_status": result["status"],
             "result": str(output), "sha256": digest, "model_tokens": 0,
@@ -125,10 +114,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("state", "evidence", "plan", "output", "logs-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--owner-epoch", required=True)
     args = parser.parse_args()
     try:
         result = execute(args)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
         # The result stays on disk. Repeating the identical invocation attempts
         # only registration; it never repeats the expensive test commands.
         result = {"status": "reconciliation-required", "error": str(error), "result": str(args.output)}

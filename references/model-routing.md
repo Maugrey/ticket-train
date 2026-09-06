@@ -1,7 +1,7 @@
 # Model and Reasoning Routing
 
-Active policy version: `2026-08-27-v2`. Superseded matrices are preserved in
-[model-routing-history.md](model-routing-history.md).
+Active policy version: `2026-08-27-v2`. The controller tables are authoritative.
+Historical versions remain in Git and pinned run releases.
 
 ## Contents
 
@@ -86,95 +86,12 @@ controller never invents a comparison between them and Terra/High.
 
 ## Orchestrator startup preflight
 
-Recommend the main-conversation setting from orchestration complexity, not
-from the highest ticket criticality or the number of child phases routed to
-`XH`.
-
-Default to `Terra/M` when the train:
-
-- targets one repository, one base branch, and one train branch;
-- stays within the normal five-ticket checkpoint;
-- has a resolved, coherent source and selection;
-- can delegate technical analysis, implementation, and review to routed
-  threads;
-- can maintain compact durable state and use normal thread-management tools;
-- has no source-visible evidence of a dense or contradictory dependency graph.
-
-Recommend `Terra/H` when at least one material orchestration condition applies:
-
-- the run resumes from missing, stale, or inconsistent state and must reconcile
-  several branches, pull requests, thread results, or gate decisions;
-- the authorized scope spans several repositories, base branches, train
-  branches, trackers, deployment targets, or other systems whose states must be
-  reconciled;
-- declared dependencies or shared central contracts make the source-visible
-  ticket graph dense, contradictory, or likely to require repeated scheduling
-  arbitration;
-- the user authorized an extended train beyond the normal five-ticket
-  checkpoint and the orchestrator must coordinate several batches;
-- compact durable state or normal thread controls are unavailable, forcing the
-  main conversation to retain and reconcile materially more context;
-
-Recommend `Sol/H` only when a material technical arbitration cannot be
-delegated and must exceptionally occur in the main conversation. Ticket
-criticality alone never causes this route.
-
-Do not recommend `Sol/H` solely because tickets are `HIGH` or `CRITICAL`,
-because human gates are expected, or because child analyses and reviews use
-`Sol/XH`. Those concerns belong to the routed child phases.
-
-Do not recommend `XH` for routine orchestration. When one isolated dependency
-or architecture conflict needs deeper reasoning, keep the orchestrator at
-`High` and dispatch a scoped `Sol/XH` arbitration thread.
-
-Do not keep an overprovisioned orchestrator merely for continuity. Every
-controlled successor applies this same preflight recommendation from the
-current run state and receives only the bounded decision packet. Rotation does
-not authorize a stronger model or effort.
-
-After resolving the source, selection, run mode, and repository configuration,
-but before triage or any child dispatch:
-
-1. Determine the recommended orchestrator setting from the criteria above.
-2. Read the current conversation's actual model and reasoning effort when
-   observable. Never infer it from the user's usual default.
-3. Classify the current setting:
-   - `recommended`: exact match;
-   - `acceptable-overprovisioned`: at least as capable but more expensive than
-     recommended;
-   - `underprovisioned`: below the recommended model or reasoning requirement;
-   - `unknown`: actual values are not observable.
-4. Publish the startup preflight from
-   [report-template.md](report-template.md).
-5. Ask the user whether to continue with the current conversation setting.
-
-This confirmation is mandatory and is not bypassed by `auto-analysis`,
-`auto-merge`, or `full-auto`. An initial read-only orchestrator usage baseline
-may be captured so the preflight cost remains measurable. Do not launch
-triage, create ticket threads, or mutate repository state before confirmation.
-
-If the user declines, stop cleanly and state the recommended setting for a new
-conversation. The skill cannot change the model or reasoning effort of the
-already-running main conversation.
-
-If the current setting is `unknown`, ask the user to verify the composer
-setting or explicitly confirm continuation with an unknown setting. If the run
-configuration later changes enough to alter the recommendation, publish a new
-preflight and request confirmation again.
-
-Classify common current settings deterministically:
-
-- exact recommended combination: `recommended`;
-- `Terra/H`, `Sol/H`, or a higher Sol effort when `Terra/M` is recommended:
-  `acceptable-overprovisioned`;
-- `Sol/H` or a higher Sol effort when `Terra/H` is recommended:
-  `acceptable-overprovisioned`;
-- a higher Sol effort when `Sol/H` is recommended:
-  `acceptable-overprovisioned`;
-- a setting below the recommendation for the selected orchestration profile:
-  `underprovisioned`;
-- any combination whose relative capability cannot be established:
-  `unknown`.
+Keep the user's current conversation setting and prior authorization. Do not
+insert another model-choice gate. The native runner handles orchestration;
+fresh workers receive technical decisions with bounded context. Routine
+classification uses Terra/H; technical phases use the matrices below.
+Record `ORCHESTRATOR_CONFIRMED` from the actual existing train authorization.
+A future owner receives compact state and reuses the approved run settings.
 
 ## Fast triage
 
@@ -357,7 +274,7 @@ the evidence to analysis reconciliation, reclassify, apply any renewed human
 gate, and dispatch the resulting implementation setting explicitly.
 
 For the bounded `HIGH`/`MAXIMUM` plan-contract validation required by
-[efficiency-policy.md](efficiency-policy.md), use `Terra/M` by default and
+[analysis policy](analysis-policy.md), use `Terra/M` by default and
 `Terra/H` only when the compact contract contains several contradictions or a
 sensitive surface. It is a one-turn completeness check without repository-wide
 exploration, not a second technical analysis. Return broader uncertainty to

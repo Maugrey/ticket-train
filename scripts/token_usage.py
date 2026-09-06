@@ -90,6 +90,8 @@ def read_session_usage_bounds(
     session_id: str | None = None
     first_usage: dict[str, int] | None = None
     latest_usage: dict[str, int] | None = None
+    accumulated = empty_usage()
+    previous = empty_usage()
 
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -115,13 +117,96 @@ def read_session_usage_bounds(
                 if normalized is not None:
                     if first_usage is None:
                         first_usage = normalized
-                    latest_usage = normalized
+                    reset = normalized["total_tokens"] < previous["total_tokens"]
+                    for field in USAGE_FIELDS:
+                        accumulated[field] += normalized[field] if reset else max(0, normalized[field] - previous[field])
+                    previous = normalized
+                    latest_usage = dict(accumulated)
     except OSError:
         return None
 
     if session_id != expected_thread_id or first_usage is None or latest_usage is None:
         return None
     return first_usage, latest_usage
+
+
+def session_lines(path: Path):
+    with path.open(encoding="utf-8") as handle:
+        yield from handle
+
+
+def measure_session(path: Path, expected_thread_id: str, start_at: str | None = None,
+                    end_at: str | None = None, cursor: dict | None = None) -> dict[str, Any] | None:
+    """Measure one interval across counter resets; never read prompts into context."""
+    def stamp(value):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+    start, end = stamp(start_at), stamp(end_at)
+    stat = path.stat()
+    cursor = cursor or {}
+    identity = [str(path.resolve()), stat.st_ino, expected_thread_id, start_at, end_at]
+    if cursor.get("identity") != identity or cursor.get("offset", 0) > stat.st_size:
+        cursor = {}
+    usage, previous = cursor.get("usage", empty_usage()), cursor.get("previous", empty_usage())
+    counters, wakes, calls, compactions, resets = (cursor.get(k, 0) for k in ("counters", "wakes", "calls", "compactions", "resets"))
+    session_id = cursor.get("session_id")
+    unknown_times = cursor.get("unknown_times", False)
+    previous_time = stamp(cursor.get("previous_time"))
+    boundary_ambiguous = cursor.get("boundary_ambiguous", False)
+    offset = cursor.get("offset", 0)
+    def lines():
+        nonlocal offset
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    break
+                offset += len(raw)
+                yield raw.decode("utf-8")
+    for line in lines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = event.get("payload") or {}
+        time_value = stamp(event.get("timestamp"))
+        if event.get("type") == "session_meta":
+            session_id = payload.get("id") or payload.get("session_id")
+        in_window = (start is None or (time_value is not None and time_value >= start)) and (end is None or (time_value is not None and time_value <= end))
+        kind = payload.get("type")
+        if in_window:
+            wakes += event.get("type") == "event_msg" and kind == "task_started"
+            calls += event.get("type") == "response_item" and kind in {"function_call", "custom_tool_call"}
+            compactions += event.get("type") == "compacted"
+        if kind != "token_count" or not isinstance(payload.get("info"), dict):
+            continue
+        current = normalize_usage(payload["info"].get("total_token_usage"))
+        if current is None:
+            continue
+        reset = current["total_tokens"] < previous["total_tokens"]
+        if (start or end) and time_value is None:
+            unknown_times = True
+        if in_window:
+            counters += 1
+            resets += reset
+            if start and previous_time and previous_time < start and current != previous:
+                # A sampling boundary is less exact than a recorded per-turn boundary.
+                boundary_ambiguous = True
+            for field in USAGE_FIELDS:
+                usage[field] += current[field] if reset else max(0, current[field] - previous[field])
+        previous = current
+        previous_time = time_value
+    if session_id != expected_thread_id or not counters:
+        return None
+    return {"usage": usage, "start_at": start_at, "end_at": end_at,
+            "measurement_status": "partial" if unknown_times or boundary_ambiguous else "complete",
+            "boundary_ambiguous": boundary_ambiguous, "counter_resets": resets,
+            "token_counter_events": counters, "model_wakes": wakes,
+            "tool_calls": calls, "context_compactions": compactions,
+            "cursor": {"identity": identity, "offset": offset, "usage": usage, "previous": previous,
+                       "counters": counters, "wakes": wakes, "calls": calls, "compactions": compactions,
+                       "resets": resets, "session_id": session_id, "unknown_times": unknown_times,
+                       "boundary_ambiguous": boundary_ambiguous,
+                       "previous_time": previous_time.isoformat() if previous_time else None}}
 
 
 def read_session_usage(path: Path, expected_thread_id: str) -> dict[str, int] | None:
@@ -286,6 +371,8 @@ def collect_manifest_session_records(manifest: dict[str, Any]) -> list[dict[str,
                             "authoritative": value.get("authoritative"),
                             "duplicate_of": value.get("duplicate_of"),
                             "manifest_path": path,
+                            "start_at": value.get("start_at") or value.get("created_at"),
+                            "end_at": value.get("end_at") or value.get("completed_at"),
                         }
                     )
             for child_key, child in value.items():
@@ -294,7 +381,18 @@ def collect_manifest_session_records(manifest: dict[str, Any]) -> list[dict[str,
             for index, child in enumerate(value):
                 visit(child, f"{path}[{index}]")
 
-    visit(manifest, "manifest")
+    # Typed inventories only: a GitHub review thread is not a Codex session.
+    proc = manifest.get("procedure") or {}
+    phases = proc.get("phases") or (manifest.get("control") or {}).get("phases") or []
+    if isinstance(phases, dict):
+        phases = list(phases.values())
+    for index, phase_record in enumerate(phases):
+        if isinstance(phase_record, dict):
+            flat = {key: value for key, value in phase_record.items() if not isinstance(value, (dict, list))}
+            visit(flat, f"manifest.procedure.phases[{index}]")
+    for record in manifest.get("usage_sessions", []):
+        if isinstance(record, dict):
+            visit({key: value for key, value in record.items() if not isinstance(value, (dict, list))}, "manifest.usage_sessions")
     for owner in collect_orchestrator_thread_ids(manifest):
         if THREAD_ID_PATTERN.fullmatch(owner):
             records.append(
@@ -310,10 +408,15 @@ def collect_manifest_session_records(manifest: dict[str, Any]) -> list[dict[str,
                     "manifest_path": "manifest.orchestrator-ownership-history",
                 }
             )
+    for record in records:
+        record["start_at"] = record.get("start_at") or manifest.get("created_at")
+        record["end_at"] = record.get("end_at") or (proc.get("updated_at") if proc.get("run_status") == "COMPLETED" else None)
     return records
 
 
 def collect_orchestrator_thread_ids(manifest: dict[str, Any]) -> list[str]:
+    if manifest.get("orchestration_accounting_reference"):
+        return []
     thread_ids: set[str] = set()
     lease = manifest.get("orchestrator_lease")
     if isinstance(lease, dict) and isinstance(lease.get("owner_thread_id"), str):
@@ -347,8 +450,16 @@ def ledger_session(
         if bounds is None:
             continue
         first_counter, final_counter = bounds
+        starts = [item.get("start_at") for item in metadata if item.get("start_at")]
+        ends = [item.get("end_at") for item in metadata if item.get("end_at")]
+        end = max(ends) if ends and all(item.get("end_at") for item in metadata) else None
+        measurement = measure_session(path, thread_id, min(starts) if starts else None, end)
+        if measurement is None:
+            continue
+        if len({(item.get("start_at"), item.get("end_at")) for item in metadata}) > 1:
+            measurement["measurement_status"] = "partial"
         baseline = empty_usage()
-        delta = subtract_usage(final_counter, baseline)
+        delta = measurement["usage"]
         return {
             "thread_id": thread_id,
             "labels": labels,
@@ -356,7 +467,8 @@ def ledger_session(
             "status": "available",
             "authoritative": not duplicate_marked,
             "duplicate": duplicate_marked,
-            "baseline_mode": "zero-session-baseline",
+            "baseline_mode": "run-interval" if starts else "whole-session",
+            "measurement": measurement,
             "baseline_usage": baseline,
             "first_observed_counter": first_counter,
             "final_usage": final_counter,
@@ -482,13 +594,16 @@ def phase_measurement(
         return unavailable_measurement("invalid session counters", [phase_key])
     if len(session.get("phase_keys", [])) > 1:
         return unavailable_measurement("shared session window was not isolated by phase", [phase_key])
-    return exact_measurement(usage, [phase_key])
+    result = exact_measurement(usage, [phase_key])
+    if session.get("measurement", {}).get("measurement_status") == "partial":
+        result.update(status="partial", missing_reasons=["run boundary falls between counter samples"])
+    return result
 
 
 def expected_transverse_task_ids(manifest: dict[str, Any]) -> list[str]:
     procedure = manifest.get("procedure") if isinstance(manifest.get("procedure"), dict) else {}
     phases = procedure.get("phases") if isinstance(procedure.get("phases"), dict) else {}
-    task_ids = {"run:orchestration", "run:usage-reporting"}
+    task_ids = {"run:orchestration", "run:usage-reporting", "run:unallocated"}
     for phase in phases.values():
         if not isinstance(phase, dict) or phase.get("ticket_id") not in {None, "run"}:
             continue
@@ -629,6 +744,20 @@ def build_usage_matrix(
         **exact_measurement(empty_usage()),
         "accounting_mode": "independent",
         "notes": "Ledger and matrix generation are deterministic; prose publication remains in orchestration.",
+    }
+
+    allocated = sum_usage([
+        row["total"]["usage"] for row in ticket_rows.values() if row["total"].get("usage") is not None
+    ] + [row["usage"] for row in transverse_rows.values()
+         if row.get("accounting_mode") == "independent" and row.get("usage") is not None])
+    residual = {key: aggregate_usage[key] - allocated[key] for key in USAGE_FIELDS}
+    if any(value < 0 for value in residual.values()):
+        raise ValueError("Usage rows overlap or exceed the aggregate; isolate shared session intervals")
+    transverse_rows["run:unallocated"] = {
+        **exact_measurement(residual), "accounting_mode": "independent",
+        "status": "partial" if any(residual.values()) else "complete",
+        "missing_reasons": ["measured usage cannot be assigned to a single responsibility"] if any(residual.values()) else [],
+        "notes": "Measured intervals not allocated above, including shared recovery work. Never silently omitted.",
     }
 
     reported_measurements = [
@@ -1105,6 +1234,8 @@ def ledger_command(args: argparse.Namespace) -> None:
                 "authoritative": None,
                 "duplicate_of": None,
                 "manifest_path": "command-line",
+                "start_at": manifest.get("created_at"),
+                "end_at": (manifest.get("procedure") or {}).get("updated_at") if manifest.get("run_status") == "COMPLETED" else None,
             }
         )
 
@@ -1130,6 +1261,8 @@ def ledger_command(args: argparse.Namespace) -> None:
                         "duplicate_of": None,
                         "manifest_path": "orchestrator-session:sub_agent_activity",
                         "discovered_hidden_session": True,
+                        "start_at": manifest.get("created_at"),
+                        "end_at": (manifest.get("procedure") or {}).get("updated_at") if manifest.get("run_status") == "COMPLETED" else None,
                     }
                 )
             break
@@ -1237,10 +1370,10 @@ def ledger_command(args: argparse.Namespace) -> None:
             continue
         if session.get("thread_id") in orchestrator_thread_ids:
             orchestration_usage = sum_usage([orchestration_usage, usage])
-        for phase_key in session.get("phase_keys", []):
-            phase_usage[phase_key] = usage
-        for ticket_id in session.get("ticket_ids", []):
-            ticket_usage.setdefault(ticket_id, []).append(usage)
+        if len(session.get("phase_keys", [])) == 1:
+            phase_usage[session["phase_keys"][0]] = usage
+        if len(session.get("ticket_ids", [])) == 1:
+            ticket_usage.setdefault(session["ticket_ids"][0], []).append(usage)
 
     unavailable_sessions = sum(
         1 for session in sessions.values() if session.get("status") != "available"
@@ -1277,6 +1410,7 @@ def ledger_command(args: argparse.Namespace) -> None:
                 "status": aggregate_status(
                     len(available_usage),
                     unavailable_sessions
+                    + sum(s.get("measurement", {}).get("measurement_status") == "partial" for s in sessions.values())
                     + len(unmeasured_phases)
                     + len(unmapped_hidden_sessions)
                     + (0 if orchestrator_session_included else 1),
@@ -1305,8 +1439,8 @@ def ledger_command(args: argparse.Namespace) -> None:
                 },
             },
             "warning": (
-                "Session deltas use a zero session baseline. Reused-thread phase "
-                "windows still require explicit capture/diff measurements. Token "
+                "Reset-aware session deltas use recorded run/phase intervals. Shared "
+                "or ambiguous windows remain partial with an unallocated remainder. Token "
                 "counts are not subscription-credit counters."
             ),
         }

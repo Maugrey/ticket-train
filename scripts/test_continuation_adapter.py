@@ -106,7 +106,7 @@ class ContinuationTests(unittest.TestCase):
             event = Path(tmp) / "reply.json"
             event.write_text(json.dumps({"event_id": "reply-1", "type": "INPUT_PROVIDED", "gate_id": "input-1", "revision": "i1",
                                          "response_summary": "User chose A", "response_artifact": "owner:user-message-1"}), encoding="utf-8")
-            args = argparse.Namespace(command="advance", state=run.path, owner="thread-main",
+            args = argparse.Namespace(command="advance", state=run.path, owner="thread-main", owner_epoch=run.state()["orchestrator_lease"]["epoch"],
                                       expected_revision=run.state()["procedure"]["revision"], event=event)
             with patch.object(adapter.runner, "step", side_effect=OSError("simulated interruption")):
                 with self.assertRaises(OSError):
@@ -124,7 +124,7 @@ class ContinuationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))
             self.ask(run)
-            args = argparse.Namespace(command="advance", state=run.path, owner="thread-main",
+            args = argparse.Namespace(command="advance", state=run.path, owner="thread-main", owner_epoch=run.state()["orchestrator_lease"]["epoch"],
                                       expected_revision=run.state()["procedure"]["revision"], event=None)
             result = adapter.advance(args)
             self.assertTrue(result["turn_control"]["may_end_turn"])
@@ -144,12 +144,12 @@ class ContinuationTests(unittest.TestCase):
                 "files_modified": "none", "usage": {"measurement": "unavailable"}, "input_request": request}), 0)
             self.assertEqual(run.apply("GATE_ANNOUNCED", gate_id="phase-question", revision="q1",
                                       decision_summary="Choose value", evidence_summary="Unspecified", blocked_scope="T-1",
-                                      continuing_scope="tests", accepted_replies=["A", "B"]), 0)
+                                      continuing_scope="tests", accepted_replies=["A: preserve current behavior", "B: adopt the proposed behavior"]), 0)
             count = len(run.state()["procedure"]["phases"])
             event = Path(tmp) / "reply.json"
             event.write_text(json.dumps({"event_id": "phase-reply", "type": "INPUT_PROVIDED", "gate_id": "phase-question",
                                          "revision": "q1", "response_summary": "B", "response_artifact": "owner:reply"}), encoding="utf-8")
-            result = adapter.advance(argparse.Namespace(command="advance", state=run.path, owner="thread-main",
+            result = adapter.advance(argparse.Namespace(command="advance", state=run.path, owner="thread-main", owner_epoch=run.state()["orchestrator_lease"]["epoch"],
                                                        expected_revision=run.state()["procedure"]["revision"], event=event))
             action = result["next_actions"][0]
             self.assertEqual(action["action"], "RESUME_VISIBLE_PHASE_WITH_INPUT")
@@ -160,27 +160,6 @@ class ContinuationTests(unittest.TestCase):
             self.assertNotIn("runtime_observation", run.state()["procedure"]["phases"][phase_key])
             self.assertEqual(len(run.state()["procedure"]["phases"]), count)
 
-    def test_handoff_is_bounded_identified_and_has_result_delivery_contract(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run = Harness(root)
-            run.confirm()
-            payload = root / "source.json"
-            payload.write_text('{"task": "Classify the exact supplied tickets"}', encoding="utf-8")
-            descriptor = context_packet.build_packet(payload, root / "context.json", "profile-1", "base", "base")
-            self.assertEqual(run.apply("PHASE_DISPATCHED", kind="triage", phase_key="run:triage:1", base_commit="base",
-                                      model="gpt-5.6-terra", reasoning_effort="medium", routing_conformance="conformant",
-                                      triage_profile="standard", context_packet=descriptor), 0)
-            args = argparse.Namespace(state=run.path, owner="thread-main", expected_revision=run.state()["procedure"]["revision"], phase_key="run:triage:1")
-            result = adapter.handoff(args)
-            for expected in ("run-test", "run:triage:1", "thread-main", "send_message_to_thread", descriptor["sha256"], "usage", "Do not modify the canonical manifest"):
-                self.assertIn(expected, result["prompt"])
-            self.assertTrue(Path(result["callback_contract_reference"]).exists())
-            self.assertEqual(result["required_receipt_event"], "PHASE_LAUNCH_OBSERVED")
-            run.materialize("run:triage:1", "child")
-            args.expected_revision = run.state()["procedure"]["revision"]
-            with self.assertRaises(ValueError):
-                adapter.handoff(args)
 
 
 if __name__ == "__main__":

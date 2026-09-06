@@ -406,116 +406,65 @@ def ready_slot(repository: Path, slot: dict[str, Any], *, skip_cli: bool, attemp
 def acquire_slot(args: argparse.Namespace) -> int:
     require(args.requirement in UNITY_REQUIREMENTS and args.requirement != "none", "acquire requires an editor-backed Unity requirement")
     state_path = args.state.expanduser().resolve()
-    with run_registry.directory_lock(state_path.parent):
-        state = load_state(state_path)
-        repository = canonical_repository(Path(state["repository"]))
-        owned_slot = next(
-            (
-                slot for slot in state["slots"]
-                if isinstance(slot.get("lease"), dict)
-                and slot["lease"].get("phase_key") == args.phase_key
-            ),
-            None,
-        )
-        if isinstance(owned_slot, dict) and owned_slot.get("status") == "LEASED":
-            return emit({"status": "already-acquired", "state": str(state_path), "slot": slot_summary(owned_slot)})
-        if isinstance(owned_slot, dict):
-            candidates = [owned_slot]
-        else:
-            # Preparation can fail simply because the requested commit has not
-            # been fetched yet.  That is a transient repository state, not a
-            # human gate.  Retry these quarantined slots on the next acquire;
-            # genuinely unsafe slots (dirty worktree, MCP/auth failures, etc.)
-            # remain BLOCKED_HUMAN until explicitly repaired.
-            transient_config_error = "target revision does not track the managed Unity MCP config:"
-            candidates = [
-                slot
-                for slot in state["slots"][: int(state["max_editors"])]
-                if (
-                    slot.get("status") in {"IDLE", "READY"}
-                    or (
-                        slot.get("status") == "BLOCKED_HUMAN"
-                        and str(slot.get("last_error") or "").startswith(transient_config_error)
+    operation = state_path.parent / "operations" / (hashlib.sha256(args.phase_key.encode()).hexdigest() + ".lock")
+    failures = []
+    attempted = set()
+    with run_registry.file_lock(operation, 0):
+        while True:
+            # Reserve only under the pool lock. Provisioning and readiness must
+            # not stop unrelated phases from acquiring or releasing other slots.
+            with run_registry.directory_lock(state_path.parent):
+                state = load_state(state_path)
+                repository = canonical_repository(Path(state["repository"]))
+                owned = next((slot for slot in state["slots"] if (slot.get("lease") or {}).get("phase_key") == args.phase_key), None)
+                candidates = [owned] if owned and owned["slot_id"] not in attempted else [
+                    slot for slot in state["slots"][:int(state["max_editors"])]
+                    if slot["slot_id"] not in attempted and not slot.get("lease") and (
+                        slot.get("status") in {"IDLE", "READY"}
+                        or (slot.get("status") == "BLOCKED_HUMAN" and str(slot.get("last_error") or "").startswith("target revision does not track the managed Unity MCP config:"))
                     )
-                )
-                and not slot.get("lease")
-            ]
-            require(candidates, "no Unity editor slot is currently available")
-            if args.branch:
-                candidates.sort(key=lambda candidate: candidate.get("branch") != args.branch)
-        preparation_failures: list[dict[str, str]] = []
-        prepared: tuple[dict[str, Any], str | None, str, str | None, str | None] | None = None
-        for candidate in candidates:
-            slot_path = Path(candidate["path"]).resolve()
-            try:
-                branch, head = position_slot(
-                    slot_path, branch=args.branch, expected_head=args.expected_head
-                )
-                config_reference, config_digest = provision_slot(
-                    repository, slot_path, skip_cli=args.skip_cli
-                )
-                prepared = (candidate, branch, head, config_reference, config_digest)
-                break
-            except (SlotError, subprocess.TimeoutExpired) as error:
-                candidate["status"] = "BLOCKED_HUMAN"
-                candidate["last_error"] = str(error)
-                candidate["recovery_attempts"] = 0
-                preparation_failures.append({
-                    "slot_id": str(candidate["slot_id"]),
-                    "error": str(error),
-                })
+                ]
+                require(candidates, f"no Unity editor slot is currently available; attempts: {failures}")
+                if args.branch:
+                    candidates.sort(key=lambda candidate: candidate.get("branch") != args.branch)
+                slot = candidates[0]
+                reused = slot.get("status") == "LEASED"
+                prior_lease = slot.get("lease") or {}
+                lease_id = prior_lease.get("lease_id") or uuid.uuid4().hex
+                slot.update(status="STARTING", lease={"lease_id": lease_id, "phase_key": args.phase_key,
+                    "requirement": args.requirement, "acquired_at": prior_lease.get("acquired_at") or now_iso()})
                 save_state(state_path, state)
-        require(
-            prepared is not None,
-            f"no Unity slot could prepare the requested revision: {preparation_failures}",
-        )
-        slot, branch, head, config_reference, config_digest = prepared
-        lease_id = (
-            slot["lease"]["lease_id"]
-            if isinstance(slot.get("lease"), dict)
-            else uuid.uuid4().hex
-        )
-        slot["status"] = "STARTING"
-        slot["branch"] = branch
-        slot["head"] = head
-        slot["config_reference"] = config_reference
-        slot["config_profile_sha256"] = config_digest
-        slot["last_error"] = None
-        slot["preparation_failures_before_acquire"] = preparation_failures
-        slot["lease"] = {
-            "lease_id": lease_id,
-            "phase_key": args.phase_key,
-            "requirement": args.requirement,
-            "acquired_at": now_iso(),
-        }
-        save_state(state_path, state)
-        try:
-            evidence = ready_slot(
-                repository,
-                slot,
-                skip_cli=args.skip_cli,
-                attempts=args.recovery_attempts + 1,
-            )
-        except (SlotError, subprocess.TimeoutExpired) as error:
-            slot["status"] = "BLOCKED_HUMAN"
-            slot["last_error"] = str(error)
-            slot["recovery_attempts"] = args.recovery_attempts
-            save_state(state_path, state)
-            raise
-        slot["status"] = "LEASED"
-        slot["last_ready_at"] = now_iso()
-        slot["readiness_evidence"] = evidence
-        slot["recovery_attempts"] = evidence.get("attempt", 1) - 1 if isinstance(evidence, dict) else 0
-        save_state(state_path, state)
-
-    return emit(
-        {
-            "status": "acquired",
-            "state": str(state_path),
-            "slot": slot_summary(slot),
-            "readiness_evidence": evidence,
-        }
-    )
+            attempted.add(slot["slot_id"])
+            try:
+                slot_path = Path(slot["path"]).resolve()
+                if reused:
+                    head = git(slot_path, "rev-parse", "HEAD").stdout.strip()
+                    require(head == args.expected_head, "leased Unity slot no longer has the requested head")
+                    branch, config_reference, config_digest = slot.get("branch"), slot.get("config_reference"), slot.get("config_profile_sha256")
+                else:
+                    branch, head = position_slot(slot_path, branch=args.branch, expected_head=args.expected_head)
+                    config_reference, config_digest = provision_slot(repository, slot_path, skip_cli=args.skip_cli)
+                evidence = ready_slot(repository, slot, skip_cli=args.skip_cli, attempts=args.recovery_attempts + 1)
+            except (SlotError, subprocess.TimeoutExpired) as error:
+                failures.append({"slot_id": str(slot["slot_id"]), "error": str(error)})
+                with run_registry.directory_lock(state_path.parent):
+                    state = load_state(state_path)
+                    current = next(item for item in state["slots"] if item["slot_id"] == slot["slot_id"])
+                    require((current.get("lease") or {}).get("lease_id") == lease_id, "Unity reservation changed during recovery")
+                    current.update(status="BLOCKED_HUMAN", last_error=str(error), recovery_attempts=args.recovery_attempts, lease=None)
+                    save_state(state_path, state)
+                continue
+            with run_registry.directory_lock(state_path.parent):
+                state = load_state(state_path)
+                current = next(item for item in state["slots"] if item["slot_id"] == slot["slot_id"])
+                require((current.get("lease") or {}).get("lease_id") == lease_id, "Unity reservation changed before readiness")
+                current.update(status="LEASED", branch=branch, head=head, config_reference=config_reference,
+                    config_profile_sha256=config_digest, last_error=None, last_ready_at=now_iso(),
+                    preparation_failures_before_acquire=failures, readiness_evidence=evidence,
+                    recovery_attempts=evidence.get("attempt", 1) - 1 if isinstance(evidence, dict) else 0)
+                save_state(state_path, state)
+            return emit({"status": "already-acquired" if reused else "acquired", "state": str(state_path),
+                         "slot": slot_summary(current), "readiness_evidence": evidence})
 
 
 def release_slot(args: argparse.Namespace) -> int:
@@ -554,6 +503,7 @@ def release_slot(args: argparse.Namespace) -> int:
                     "slot": slot_summary(prior),
                 }
             )
+        require(slot.get("status") != "STARTING", "Unity slot acquisition is still running; reconcile it before release")
         if getattr(args, "lease_id", None):
             require(slot["lease"].get("lease_id") == args.lease_id, "Unity slot lease ID mismatch")
         ensure_clean(Path(slot["path"]))

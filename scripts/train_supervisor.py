@@ -1,438 +1,239 @@
 #!/usr/bin/env python3
-"""Deterministically reconcile ticket-train thread, GitHub, and test state."""
+"""Native, receipt-driven effects for the canonical ticket-train controller.
 
+Changes suggested by AI model: GPT-6 (Codex).
+"""
 from __future__ import annotations
-
 import argparse
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
-import re
-import subprocess
-import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+import re
+import sys
+import time
+import uuid
+
+import run_registry
+import thread_runtime
+
+load_json = run_registry.load_json
+save_json = run_registry.save_json
 
 
-ERROR_PATTERN = re.compile(
-    r"(^|\b)(error|failed|failure|exception|fatal|panic|assertion)(\b|:)",
-    re.IGNORECASE,
-)
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def now_iso() -> str:
+def utcnow():
     return datetime.now(timezone.utc).isoformat()
 
 
-def load_json(path: Path) -> dict[str, Any]:
-    with path.expanduser().resolve().open("r", encoding="utf-8") as handle:
-        value = json.load(handle)
-    if not isinstance(value, dict):
-        raise ValueError(f"Expected a JSON object: {path}")
-    return value
+class NativeEffects:
+    """Own worker tasks and durable RPC receipts, never workflow decisions.
+
+    One runner holds the run's driver lock for this object's lifetime. Its
+    filesystem inbox is also usable after a lost model callback or host restart.
+    Only tasks with a recorded creation receipt may be resumed by this server.
+    """
+
+    def __init__(self, root, executable=None, host_factory=thread_runtime.AppServer):
+        self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.instance = str(uuid.uuid4())
+        self.pending_requests = {}
+        self.host = host_factory(thread_runtime.app_server_executable(executable), event_sink=self.notification)
+        self.loaded = set()
+
+    def notification(self, event):
+        # Server-initiated approval/input requests are durable, never approved
+        # by this transport. The supervising conversation handles the request.
+        if "id" in event:
+            key = str(event["id"])
+            self.pending_requests[key] = event
+            save_json(self.root / "requests" / (digest([self.instance, key]) + ".json"),
+                      {"status": "pending", "request": event, "server_instance": self.instance, "received_at": utcnow()})
+
+    def answer(self, event):
+        if event.get("server_instance") != self.instance or not event.get("user_decision_reference"):
+            raise ValueError("Native input response needs its current server instance and actual user answer")
+        key = str(event["request_id"])
+        request = self.pending_requests.get(key)
+        if request is None:
+            raise ValueError("Native request is no longer pending; do not replay approval on another request")
+        self.host.answer_request(request["id"], event["result"])
+        del self.pending_requests[key]
+        save_json(self.root / "requests" / (digest([self.instance, key]) + ".json"), {"status": "answered", "response": event})
+        task_id = (request.get("params") or {}).get("threadId")
+        for path in self.root.glob("*/effect.json"):
+            job = load_json(path)
+            if job.get("thread_id") == task_id and job.get("status") == "needs_input":
+                job["status"] = "running"
+                self.save(job)
+
+    def directory(self, key):
+        return self.root / digest(key)[:24]
+
+    def read(self, key):
+        path = self.directory(key) / "effect.json"
+        return load_json(path) if path.exists() else None
+
+    def save(self, job):
+        save_json(self.directory(job["key"]) / "effect.json", job)
+
+    def receipt(self, directory, name):
+        path = directory / (name + ".json")
+        if not path.exists():
+            return None
+        value = load_json(path)
+        if "error" in value:
+            raise thread_runtime.HostError(json.dumps(value["error"]))
+        return value["result"]
+
+    def prepare(self, spec):
+        directory = self.directory(spec["key"])
+        directory.mkdir(parents=True, exist_ok=True)
+        job = self.read(spec["key"])
+        if job:
+            if job["spec_sha256"] != digest(spec):
+                raise ValueError("Worker specification changed after dispatch")
+        else:
+            job = {"key": spec["key"], "spec": spec, "spec_sha256": digest(spec),
+                   "created_at": utcnow(), "status": "creating", "attempt": 0,
+                   "client_message_id": str(uuid.uuid4())}
+            self.save(job)
+        return job
+
+    def submit(self, spec):
+        job = self.prepare(spec)
+        directory = self.directory(spec["key"])
+        creation = self.receipt(directory, "create-response")
+        if not creation:
+            armed = directory / "create-request.json"
+            if armed.exists():
+                # The cwd is exclusive to this operation, also for read-only
+                # workers. Reconcile an actual persisted task, never absence.
+                found, cursor = [], None
+                for _ in range(20):
+                    listing = self.host.call("thread/list", {"cwd": spec["cwd"], "limit": 100, "cursor": cursor})
+                    earliest = datetime.fromisoformat(job["created_at"]).timestamp() - 5
+                    found.extend(x for x in listing.get("data", []) if x.get("cwd") == spec["cwd"] and x.get("createdAt", 0) >= earliest)
+                    cursor = listing.get("nextCursor")
+                    if not cursor:
+                        break
+                if cursor or len(found) != 1:
+                    raise thread_runtime.HostError("Creation outcome unknown: exact operation cwd did not identify one task; no duplicate was started")
+                creation = self.host.call("thread/read", {"threadId": found[0]["id"], "includeTurns": False})
+                save_json(directory / "create-response.json", {"result": creation, "reconciled": True})
+            else:
+                request = {"cwd": spec["cwd"], "ephemeral": False}
+                if spec.get("model"):
+                    request["model"] = spec["model"]
+                save_json(armed, request)
+                creation = self.host.call("thread/start", request, receipt_path=directory / "create-response.json")
+                self.loaded.add(creation["thread"]["id"])
+        job["thread_id"] = creation["thread"]["id"]
+        job["actual_model"] = creation.get("model") or job.get("actual_model")
+        self.save(job)
+        if not job.get("named"):
+            self.host.call("thread/name/set", {"threadId": job["thread_id"], "name": spec.get("title", "Ticket Train — " + spec["key"])})
+            job["named"] = True
+            self.save(job)
+        if job.get("pending_prompt") or job["status"] == "creating":
+            self.start_turn(job, job.get("pending_prompt") or spec["prompt"])
+        return self.read(spec["key"])
+
+    def start_turn(self, job, prompt):
+        job.update(status="starting_turn", pending_prompt=prompt)
+        self.save(job)
+        directory = self.directory(job["key"])
+        name = "turn-" + str(job["attempt"])
+        receipt = self.receipt(directory, name + "-response")
+        if not receipt:
+            if job["thread_id"] not in self.loaded:
+                resumed = self.host.call("thread/resume", {"threadId": job["thread_id"], "excludeTurns": True},
+                                         receipt_path=directory / (name + "-resume-response.json"))
+                job["actual_model"] = resumed.get("model") or job.get("actual_model")
+                self.save(job)
+                self.loaded.add(job["thread_id"])
+            request_path = directory / (name + "-request.json")
+            if request_path.exists():
+                observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
+                turns = observed["thread"].get("turns", [])
+                # On this run-owned task only this runner starts turns. A
+                # count mismatch is ambiguous and must never trigger a repeat.
+                if len(turns) != job["attempt"] + 1:
+                    raise thread_runtime.HostError("Turn outcome unknown; no duplicate prompt was submitted")
+                receipt = {"turn": turns[-1]}
+                save_json(directory / (name + "-response.json"), {"result": receipt, "reconciled": True})
+            else:
+                request = {"threadId": job["thread_id"], "clientUserMessageId": job["client_message_id"],
+                           "input": [{"type": "text", "text": prompt, "text_elements": []}]}
+                if job["spec"].get("effort"):
+                    request["effort"] = job["spec"]["effort"]
+                save_json(request_path, request)
+                receipt = self.host.call("turn/start", request, receipt_path=directory / (name + "-response.json"))
+        job.update(turn_id=receipt["turn"]["id"], status="running", started_at=utcnow())
+        job.pop("pending_prompt", None)
+        self.save(job)
+
+    def observe(self, job):
+        if job.get("pending_prompt"):
+            self.start_turn(job, job["pending_prompt"])
+            return self.read(job["key"])
+        if job["status"] in {"completed", "blocked"}:
+            return job
+        if job["status"] == "creating":
+            return self.submit(job["spec"])
+        if job.get("retry_at", 0) > time.time():
+            return job
+        task_id = job["thread_id"]
+        if task_id not in self.loaded:
+            self.host.call("thread/resume", {"threadId": task_id, "excludeTurns": True})
+            self.loaded.add(task_id)
+        observation = self.host.call("thread/read", {"threadId": task_id, "includeTurns": True})
+        directory = self.directory(job["key"])
+        save_json(directory / "observation.json", {"format": "ticket-train-native-observation-v1", "captured_at": utcnow(), "responses": [observation]})
+        task = observation["thread"]
+        turn = next((x for x in task.get("turns", []) if x["id"] == job.get("turn_id")), None)
+        if not turn:
+            raise thread_runtime.HostError("Recorded turn is absent; preserve task identity")
+        flags = (task.get("status") or {}).get("activeFlags", [])
+        if any(x in flags for x in ("waitingOnApproval", "waitingOnUserInput")):
+            job["status"] = "needs_input"
+        elif turn["status"] == "completed":
+            messages = [x.get("text", "") for x in turn.get("items", []) if x.get("type") == "agentMessage"]
+            text = messages[-1] if messages else ""
+            save_json(directory / "result.json", {"thread_id": task_id, "turn_id": turn["id"],
+                                                   "text": text, "completed_at": utcnow()})
+            job.update(status="completed", result_reference=str(directory / "result.json"), completed_at=utcnow())
+        elif turn["status"] in {"failed", "interrupted"}:
+            job["error"] = turn.get("error") or {"message": turn["status"]}
+            if job["attempt"] >= 2:
+                job["status"] = "blocked"
+            elif job.get("retry_at"):
+                job["attempt"] += 1
+                job.pop("retry_at", None)
+                job["client_message_id"] = str(uuid.uuid4())
+                self.save(job)
+                self.start_turn(job, "Resume this same authorized phase after the host interruption. Reconcile existing files and results before repeating any work.\n" + job["spec"]["prompt"])
+                return self.read(job["key"])
+            else:
+                job["retry_at"] = time.time() + (15, 60)[job["attempt"]]
+        self.save(job)
+        return job
+
+    def close(self):
+        self.host.close()
 
 
-def save_json(path: Path, value: dict[str, Any]) -> None:
-    resolved = path.expanduser().resolve()
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    temporary = resolved.with_suffix(resolved.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, resolved)
+def verification_event(args):
+    raise ValueError("Legacy state writers were retired; use the canonical verification adapter")
 
 
-def control(state: dict[str, Any]) -> dict[str, Any]:
-    value = state.get("control")
-    if not isinstance(value, dict):
-        raise ValueError("Manifest is missing control object")
-    return value
-
-
-def append_event(state: dict[str, Any], event: dict[str, Any]) -> None:
-    events = state.setdefault("supervisor_events", [])
-    if not isinstance(events, list):
-        raise ValueError("supervisor_events must be a list")
-    event = dict(event)
-    event.setdefault("observed_at", now_iso())
-    events.append(event)
-    if len(events) > 500:
-        del events[:-500]
-
-
-def find_phase(state: dict[str, Any], phase_key: str) -> dict[str, Any]:
-    phases = control(state).get("phases")
-    if not isinstance(phases, list):
-        raise ValueError("control.phases must be a list")
-    matches = [phase for phase in phases if isinstance(phase, dict) and phase.get("phase_key") == phase_key]
-    if len(matches) != 1:
-        raise ValueError(f"Expected one phase for {phase_key!r}, found {len(matches)}")
-    return matches[0]
-
-
-def finalize_update(state: dict[str, Any], transition: str) -> None:
-    timestamp = now_iso()
-    ctl = control(state)
-    ctl["manifest_updated_at"] = timestamp
-    ctl["manifest_reconciled"] = True
-    state["manifest_updated_at"] = timestamp
-    state["last_state_transition"] = transition
-    ctl["last_state_transition"] = transition
-
-
-def thread_event(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    if args.event_json is not None:
-        event = json.loads(args.event_json)
-        if not isinstance(event, dict):
-            raise ValueError("Thread event JSON must be an object")
-    else:
-        event = load_json(args.event)
-    phase_key = event.get("phase_key")
-    if not isinstance(phase_key, str) or not phase_key:
-        raise ValueError("Thread event requires phase_key")
-    phase = find_phase(state, phase_key)
-    allowed = {
-        "client_thread_id",
-        "thread_id",
-        "host_id",
-        "wait_cursor",
-        "launch_state",
-        "last_observed_at",
-        "final_report_captured",
-        "usage_captured",
-        "actual_model",
-        "actual_reasoning_effort",
-        "visibility_verified",
-        "visibility_verified_at",
-    }
-    changed: list[str] = []
-    for key in allowed:
-        if key in event and phase.get(key) != event[key]:
-            phase[key] = event[key]
-            changed.append(key)
-    if not changed:
-        sys.stdout.write(json.dumps({"status": "unchanged", "changed_fields": []}) + "\n")
-        return
-    phase["last_observed_at"] = event.get("observed_at") or now_iso()
-    append_event(
-        state,
-        {
-            "type": "thread",
-            "phase_key": phase_key,
-            "changed_fields": changed,
-            "launch_state": phase.get("launch_state"),
-        },
-    )
-    finalize_update(state, f"thread:{phase_key}:{phase.get('launch_state')}")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "changed_fields": changed}) + "\n")
-
-
-def supervision_event(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    event = json.loads(args.event_json)
-    if not isinstance(event, dict):
-        raise ValueError("Supervision event JSON must be an object")
-    allowed = {
-        "mode",
-        "status",
-        "watcher_id",
-        "last_check_at",
-        "next_check_at",
-        "max_internal_poll_seconds",
-        "max_user_silence_seconds",
-        "last_user_update_at",
-    }
-    unknown = sorted(set(event) - allowed)
-    if unknown:
-        raise ValueError("Unsupported supervision fields: " + ", ".join(unknown))
-    supervision = state.setdefault("supervision", {})
-    if not isinstance(supervision, dict):
-        raise ValueError("supervision must be an object")
-    changed: list[str] = []
-    for key, value in event.items():
-        if supervision.get(key) != value:
-            supervision[key] = value
-            changed.append(key)
-    if not changed:
-        sys.stdout.write(json.dumps({"status": "unchanged", "changed_fields": []}) + "\n")
-        return
-    append_event(state, {"type": "supervision", "changed_fields": changed})
-    finalize_update(state, "supervision:updated")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "changed_fields": changed}) + "\n")
-
-
-def human_gate_event(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    event = json.loads(args.event_json)
-    if not isinstance(event, dict):
-        raise ValueError("Human-gate event JSON must be an object")
-    required = {
-        "gate_id",
-        "gate_type",
-        "ticket_id",
-        "revision",
-        "reason",
-        "decision_summary",
-        "evidence_summary",
-        "blocked_scope",
-        "continuing_scope",
-        "accepted_replies",
-        "notification_status",
-        "announced_at",
-    }
-    missing = sorted(field for field in required if event.get(field) in (None, "", []))
-    if missing:
-        raise ValueError("Human-gate event is missing: " + ", ".join(missing))
-    if event.get("notification_status") != "ANNOUNCED":
-        raise ValueError("Human gate must be announced before it is persisted as pending")
-    if not isinstance(event.get("accepted_replies"), list):
-        raise ValueError("accepted_replies must be a list")
-    state["pending_human_action"] = dict(event)
-    state["run_status"] = "AWAITING_USER"
-    ctl = control(state)
-    ctl["pending_human_gates"] = [event["gate_id"]]
-    ctl["terminal_reason"] = "AWAITING_REQUIRED_USER_INPUT"
-    ctl["next_automatic_action"] = "await_user"
-    append_event(
-        state,
-        {"type": "human-gate", "gate_id": event["gate_id"], "ticket_id": event["ticket_id"]},
-    )
-    finalize_update(state, f"human-gate:{event['gate_id']}:announced")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "gate_id": event["gate_id"]}) + "\n")
-
-
-def clear_human_gate(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    action = state.get("pending_human_action")
-    if not isinstance(action, dict) or action.get("gate_id") != args.gate_id:
-        raise ValueError(f"Pending gate not found: {args.gate_id}")
-    history = state.setdefault("human_gate_history", [])
-    if not isinstance(history, list):
-        raise ValueError("human_gate_history must be a list")
-    action = dict(action)
-    action.update({"resolved_at": now_iso(), "decision": args.decision})
-    history.append(action)
-    state["pending_human_action"] = None
-    state["run_status"] = "ACTIVE"
-    ctl = control(state)
-    ctl["pending_human_gates"] = []
-    ctl["terminal_reason"] = None
-    ctl["next_automatic_action"] = args.next_action
-    append_event(state, {"type": "human-gate-resolved", "gate_id": args.gate_id})
-    finalize_update(state, f"human-gate:{args.gate_id}:resolved")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "gate_id": args.gate_id}) + "\n")
-
-
-def analysis_artifact(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    event = json.loads(args.event_json)
-    if not isinstance(event, dict):
-        raise ValueError("Analysis artifact JSON must be an object")
-    required = {
-        "ticket_id",
-        "analysis_revision",
-        "analysis_base_commit",
-        "source_revision",
-        "profile_revision",
-        "report_thread_id",
-        "report_digest",
-        "valid_if",
-        "invalid_if",
-        "completion_status",
-    }
-    missing = sorted(field for field in required if event.get(field) in (None, "", []))
-    if missing:
-        raise ValueError("Analysis artifact is missing: " + ", ".join(missing))
-    artifacts = state.setdefault("analysis_artifacts", {})
-    if not isinstance(artifacts, dict):
-        raise ValueError("analysis_artifacts must be an object")
-    ticket_id = str(event["ticket_id"])
-    previous = artifacts.get(ticket_id)
-    if previous == event:
-        sys.stdout.write(json.dumps({"status": "unchanged", "ticket_id": ticket_id}) + "\n")
-        return
-    artifacts[ticket_id] = dict(event)
-    append_event(state, {"type": "analysis-artifact", "ticket_id": ticket_id})
-    finalize_update(state, f"analysis-artifact:{ticket_id}:captured")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "ticket_id": ticket_id}) + "\n")
-
-
-def github_snapshot(args: argparse.Namespace) -> None:
-    command = [
-        "gh",
-        "pr",
-        "view",
-        str(args.pr),
-        "--repo",
-        args.repo,
-        "--json",
-        "number,url,state,baseRefName,headRefName,headRefOid,mergeStateStatus,statusCheckRollup",
-    ]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise ValueError(f"gh pr view failed: {completed.stderr.strip()}")
-    snapshot = json.loads(completed.stdout)
-    if not isinstance(snapshot, dict):
-        raise ValueError("GitHub snapshot was not an object")
-
-    state = load_json(args.state)
-    ctl = control(state)
-    snapshots = ctl.setdefault("github_snapshots", {})
-    if not isinstance(snapshots, dict):
-        raise ValueError("control.github_snapshots must be an object")
-    key = str(snapshot.get("number") or args.pr)
-    previous = snapshots.get(key)
-    previous_comparable = dict(previous) if isinstance(previous, dict) else previous
-    if isinstance(previous_comparable, dict):
-        previous_comparable.pop("observed_at", None)
-    changed = previous_comparable != snapshot
-    if not changed:
-        sys.stdout.write(json.dumps({"status": "unchanged", "changed": False}) + "\n")
-        return
-    snapshot["observed_at"] = now_iso()
-    snapshots[key] = snapshot
-    append_event(
-        state,
-        {"type": "github", "pull_request": key, "changed": changed, "head": snapshot.get("headRefOid")},
-    )
-    finalize_update(state, f"github:pr-{key}:{'changed' if changed else 'unchanged'}")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "changed": changed, "snapshot": snapshot}) + "\n")
-
-
-def concise_errors(lines: list[str], limit: int = 200) -> list[str]:
-    matches = [line.rstrip("\n") for line in lines if ERROR_PATTERN.search(line)]
-    if matches:
-        return matches[-limit:]
-    return [line.rstrip("\n") for line in lines[-min(limit, 40):]]
-
-
-def test_result(args: argparse.Namespace) -> None:
-    log_path = args.log.expanduser().resolve()
-    data = log_path.read_bytes()
-    lines = data.decode("utf-8", errors="replace").splitlines()
-    artifact = {
-        "phase_key": args.phase_key,
-        "command": args.command,
-        "exit_code": args.exit_code,
-        "head_commit": args.head,
-        "duration_seconds": args.duration_seconds,
-        "log_path": str(log_path),
-        "log_sha256": hashlib.sha256(data).hexdigest(),
-        "log_bytes": len(data),
-        "observed_at": now_iso(),
-        "status": "passed" if args.exit_code == 0 else "failed",
-        "error_excerpt": concise_errors(lines),
-    }
-    state = load_json(args.state)
-    ctl = control(state)
-    artifacts = ctl.setdefault("log_artifacts", [])
-    if not isinstance(artifacts, list):
-        raise ValueError("control.log_artifacts must be a list")
-    artifacts.append(artifact)
-    append_event(
-        state,
-        {"type": "test", "phase_key": args.phase_key, "status": artifact["status"], "head": args.head},
-    )
-    finalize_update(state, f"test:{args.phase_key}:{artifact['status']}")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps(artifact, ensure_ascii=False) + "\n")
-
-
-def verification_event(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    event = json.loads(args.event_json)
-    if not isinstance(event, dict):
-        raise ValueError("Verification event JSON must be an object")
-    ctl = control(state)
-    gates = ctl.setdefault("verification_gates", {})
-    if not isinstance(gates, dict):
-        raise ValueError("control.verification_gates must be an object")
-    gate = gates.setdefault(args.ticket, {})
-    if not isinstance(gate, dict):
-        raise ValueError(f"Verification gate must be an object: {args.ticket}")
-
-    allowed = {
-        "implementation_contract_revision",
-        "verification_contract_revision",
-        "execution_pair_base",
-        "implementation_thread_id",
-        "implementation_branch",
-        "acceptance_test_thread_id",
-        "acceptance_test_branch",
-        "acceptance_test_commit",
-        "acceptance_test_pull_request",
-        "independent_test_authorship",
-        "implementation_disclosed_before_test_commit",
-        "acceptance_coverage_status",
-        "baseline_red_status",
-        "baseline_red_base",
-        "baseline_red_not_applicable_reason",
-        "acceptance_tests_integrated",
-        "integrated_green_status",
-        "integrated_green_head",
-        "ticket_head",
-        "environment_parity_status",
-        "environment_fingerprint",
-        "supabase_auth_applicable",
-        "supabase_auth_verification_status",
-        "privileged_credentials_setup_only",
-        "automatable_manual_scenarios",
-        "unresolved_validation_failures",
-        "logs_captured",
-    }
-    unknown = sorted(set(event) - allowed)
-    if unknown:
-        raise ValueError("Unsupported verification fields: " + ", ".join(unknown))
-
-    changed: list[str] = []
-    for key, value in event.items():
-        if gate.get(key) != value:
-            gate[key] = value
-            changed.append(key)
-    if not changed:
-        sys.stdout.write(json.dumps({"status": "unchanged", "changed_fields": []}) + "\n")
-        return
-    append_event(
-        state,
-        {"type": "verification", "ticket_id": args.ticket, "changed_fields": changed},
-    )
-    finalize_update(state, f"verification:{args.ticket}:updated")
-    save_json(args.state, state)
-    sys.stdout.write(json.dumps({"status": "updated", "changed_fields": changed}) + "\n")
-
-
-def status(args: argparse.Namespace) -> None:
-    state = load_json(args.state)
-    ctl = control(state)
-    phases = ctl.get("phases") if isinstance(ctl.get("phases"), list) else []
-    active = [
-        phase.get("phase_key")
-        for phase in phases
-        if isinstance(phase, dict)
-        and phase.get("launch_state") in {"INTENT_RECORDED", "LAUNCH_REQUESTED", "LAUNCH_UNKNOWN", "QUEUED", "RUNNING"}
-    ]
-    document = {
-        "manifest_updated_at": ctl.get("manifest_updated_at"),
-        "active_phase_keys": active,
-        "next_automatic_action": ctl.get("next_automatic_action"),
-        "pending_human_gates": ctl.get("pending_human_gates", []),
-        "blocking_conditions": ctl.get("blocking_conditions", []),
-        "cost_anomaly_status": ctl.get("cost_anomaly_status"),
-        "train_size_budget": ctl.get("train_size_budget"),
-        "supervision": state.get("supervision"),
-        "pending_human_action": state.get("pending_human_action"),
-        "orchestrator_lease": state.get("orchestrator_lease"),
-    }
-    sys.stdout.write(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+def human_gate_event(args):
+    raise ValueError("Legacy state writers were retired; use a canonical human-gate event")
 
 
 def phase_candidates(args: argparse.Namespace) -> None:
@@ -503,84 +304,3 @@ def phase_candidates(args: argparse.Namespace) -> None:
         "scanned_headers": scanned, "scan_incomplete": incomplete or len(candidates) > 8,
         "visibility_requires_product_read": True, "may_create_replacement": False,
     }, ensure_ascii=False, indent=2) + "\n")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command_name", required=True)
-
-    resolve = subparsers.add_parser("phase-candidates")
-    resolve.add_argument("--state", type=Path, required=True)
-    resolve.add_argument("--phase-key", required=True)
-    resolve.add_argument("--sessions-root", type=Path)
-    resolve.set_defaults(handler=phase_candidates)
-
-    thread = subparsers.add_parser("thread-event")
-    thread.add_argument("--state", type=Path, required=True)
-    event_source = thread.add_mutually_exclusive_group(required=True)
-    event_source.add_argument("--event", type=Path)
-    event_source.add_argument("--event-json")
-    thread.set_defaults(handler=thread_event)
-
-    github = subparsers.add_parser("github-snapshot")
-    github.add_argument("--state", type=Path, required=True)
-    github.add_argument("--repo", required=True)
-    github.add_argument("--pr", required=True)
-    github.set_defaults(handler=github_snapshot)
-
-    test = subparsers.add_parser("test-result")
-    test.add_argument("--state", type=Path, required=True)
-    test.add_argument("--phase-key", required=True)
-    test.add_argument("--command", required=True)
-    test.add_argument("--exit-code", type=int, required=True)
-    test.add_argument("--head", required=True)
-    test.add_argument("--duration-seconds", type=float, required=True)
-    test.add_argument("--log", type=Path, required=True)
-    test.set_defaults(handler=test_result)
-
-    verification = subparsers.add_parser("verification-event")
-    verification.add_argument("--state", type=Path, required=True)
-    verification.add_argument("--ticket", required=True)
-    verification.add_argument("--event-json", required=True)
-    verification.set_defaults(handler=verification_event)
-
-    supervision = subparsers.add_parser("supervision-event")
-    supervision.add_argument("--state", type=Path, required=True)
-    supervision.add_argument("--event-json", required=True)
-    supervision.set_defaults(handler=supervision_event)
-
-    gate = subparsers.add_parser("human-gate")
-    gate.add_argument("--state", type=Path, required=True)
-    gate.add_argument("--event-json", required=True)
-    gate.set_defaults(handler=human_gate_event)
-
-    clear_gate = subparsers.add_parser("clear-human-gate")
-    clear_gate.add_argument("--state", type=Path, required=True)
-    clear_gate.add_argument("--gate-id", required=True)
-    clear_gate.add_argument("--decision", required=True)
-    clear_gate.add_argument("--next-action", required=True)
-    clear_gate.set_defaults(handler=clear_human_gate)
-
-    analysis = subparsers.add_parser("analysis-artifact")
-    analysis.add_argument("--state", type=Path, required=True)
-    analysis.add_argument("--event-json", required=True)
-    analysis.set_defaults(handler=analysis_artifact)
-
-    show = subparsers.add_parser("status")
-    show.add_argument("--state", type=Path, required=True)
-    show.set_defaults(handler=status)
-    return parser
-
-
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-    try:
-        args.handler(args)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        parser.error(str(error))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

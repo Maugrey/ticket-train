@@ -253,7 +253,7 @@ class RunRegistryTests(unittest.TestCase):
                 run_registry.init_run(self.init_args(root))
             path = root / "test-run" / "manifest.json"
             args = argparse.Namespace(
-                state=path,
+                state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"),
                 orchestrator_thread="thread-b",
                 lease_minutes=30,
                 takeover=False,
@@ -310,7 +310,7 @@ class RunRegistryTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(
                     run_registry.prepare_handoff(argparse.Namespace(
-                        state=path,
+                        state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"),
                         from_thread="thread-a",
                         reason="budget",
                         packet=packet,
@@ -338,7 +338,7 @@ class RunRegistryTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(
                     run_registry.accept_handoff(argparse.Namespace(
-                        state=path,
+                        state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"),
                         to_thread="thread-b",
                         handoff_token=token,
                         lease_minutes=30,
@@ -367,7 +367,8 @@ class ControlPlaneRunnerTests(unittest.TestCase):
         path = root / "test-run" / "manifest.json"
         with contextlib.redirect_stdout(io.StringIO()):
             train_controller.bootstrap(argparse.Namespace(
-                state=path,
+                owner_thread_id=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"],
+                state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"),
                 base_branch="main",
                 approval_mode="standard",
             ))
@@ -380,13 +381,13 @@ class ControlPlaneRunnerTests(unittest.TestCase):
             first = io.StringIO()
             with contextlib.redirect_stdout(first):
                 self.assertEqual(
-                    control_plane_runner.step(argparse.Namespace(state=path, output_dir=None)),
+                    control_plane_runner.step(argparse.Namespace(state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"), output_dir=None, owner_thread_id=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"])),
                     0,
                 )
             second = io.StringIO()
             with contextlib.redirect_stdout(second):
                 self.assertEqual(
-                    control_plane_runner.step(argparse.Namespace(state=path, output_dir=None)),
+                    control_plane_runner.step(argparse.Namespace(state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"), output_dir=None, owner_thread_id=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"])),
                     0,
                 )
             self.assertEqual(json.loads(first.getvalue())["status"], "packet-written")
@@ -402,7 +403,7 @@ class ControlPlaneRunnerTests(unittest.TestCase):
             path = self.create_manifest(root)
             with contextlib.redirect_stdout(io.StringIO()):
                 control_plane_runner.record_activity(argparse.Namespace(
-                    state=path,
+                    state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"),
                     thread_id="thread-a",
                     baseline_total_tokens=1_000,
                     latest_total_tokens=25_001_000,
@@ -412,7 +413,7 @@ class ControlPlaneRunnerTests(unittest.TestCase):
                 ))
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                control_plane_runner.step(argparse.Namespace(state=path, output_dir=None))
+                control_plane_runner.step(argparse.Namespace(state=path, owner=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"], owner_epoch=run_registry.load_json(path)["orchestrator_lease"].get("epoch"), output_dir=None, owner_thread_id=run_registry.load_json(path)["orchestrator_lease"]["owner_thread_id"]))
             result = json.loads(output.getvalue())
             self.assertEqual(result["wake_kind"], "ROTATE_ORCHESTRATOR")
             packet = json.loads(Path(result["packet_reference"]).read_text(encoding="utf-8"))
@@ -433,6 +434,7 @@ class OrchestrationMetricsTests(unittest.TestCase):
             root = Path(directory)
             manifest = root / "manifest.json"
             manifest.write_text(json.dumps({
+                "orchestrator_lease": {"owner_thread_id": "fixture", "epoch": "fixture-epoch"},
                 "control_plane": {
                     "suppressed_unchanged_observations": 3,
                     "segments": [{"model_wakes": 3}],
@@ -440,7 +442,7 @@ class OrchestrationMetricsTests(unittest.TestCase):
             }), encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
                 orchestration_metrics.start_action(argparse.Namespace(
-                    state=manifest,
+                    state=manifest, owner="fixture", owner_epoch="fixture-epoch",
                     action_id="action-1",
                     action_name="WAIT_FOR_PHASE_TRANSITION",
                     ticket_id="T-1",
@@ -450,7 +452,7 @@ class OrchestrationMetricsTests(unittest.TestCase):
                     baseline_total_tokens=100,
                 ))
                 orchestration_metrics.finish_action(argparse.Namespace(
-                    state=manifest,
+                    state=manifest, owner="fixture", owner_epoch="fixture-epoch",
                     action_id="action-1",
                     actual_executor_kind=None,
                     ended_at="2026-08-01T10:00:05+00:00",
@@ -459,7 +461,7 @@ class OrchestrationMetricsTests(unittest.TestCase):
                     outcome="completed",
                 ))
                 orchestration_metrics.record_wake(argparse.Namespace(
-                    state=manifest,
+                    state=manifest, owner="fixture", owner_epoch="fixture-epoch",
                     wake_id="wake-1",
                     reason="liveness-only",
                     model_woken=True,
@@ -468,7 +470,7 @@ class OrchestrationMetricsTests(unittest.TestCase):
                     recorded_at="2026-08-01T10:00:05+00:00",
                 ))
                 orchestration_metrics.record_wake(argparse.Namespace(
-                    state=manifest,
+                    state=manifest, owner="fixture", owner_epoch="fixture-epoch",
                     wake_id="wake-2",
                     reason="transition",
                     model_woken=True,
@@ -477,7 +479,7 @@ class OrchestrationMetricsTests(unittest.TestCase):
                     recorded_at="2026-08-01T10:00:06+00:00",
                 ))
                 orchestration_metrics.record_wake(argparse.Namespace(
-                    state=manifest,
+                    state=manifest, owner="fixture", owner_epoch="fixture-epoch",
                     wake_id="wake-3",
                     reason="callback",
                     model_woken=False,
@@ -758,54 +760,15 @@ class VerificationGateTests(unittest.TestCase):
         issues = control_guard.verification_gate_issues("T-1", gate)
         self.assertTrue(any("reused one thread" in issue for issue in issues))
 
-    def test_supervisor_records_verification_event(self) -> None:
-        state = valid_state()
+    def test_retired_writers_cannot_change_a_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.json"
-            path.write_text(json.dumps(state), encoding="utf-8")
-            args = argparse.Namespace(
-                state=path,
-                ticket="T-1",
-                event_json=json.dumps(
-                    {
-                        "verification_contract_revision": "verification-1",
-                        "baseline_red_status": "demonstrated",
-                    }
-                ),
-            )
-            with contextlib.redirect_stdout(io.StringIO()):
-                train_supervisor.verification_event(args)
-            updated = json.loads(path.read_text(encoding="utf-8"))
-            gate = updated["control"]["verification_gates"]["T-1"]
-            self.assertEqual(gate["verification_contract_revision"], "verification-1")
-            self.assertEqual(gate["baseline_red_status"], "demonstrated")
-
-    def test_supervisor_records_complete_human_gate(self) -> None:
-        state = valid_state()
-        event = {
-            "gate_id": "gate-1",
-            "gate_type": "pre-merge",
-            "ticket_id": "T-1",
-            "revision": "head-sha",
-            "reason": "human matrix gate",
-            "decision_summary": "Approve integration into the train",
-            "evidence_summary": "Review clean and exact-head checks passed",
-            "blocked_scope": "T-1 train merge",
-            "continuing_scope": "none",
-            "accepted_replies": ["approve", "reject with feedback"],
-            "notification_status": "ANNOUNCED",
-            "announced_at": "2026-07-30T12:00:00+00:00",
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "manifest.json"
-            path.write_text(json.dumps(state), encoding="utf-8")
-            args = argparse.Namespace(state=path, event_json=json.dumps(event))
-            with contextlib.redirect_stdout(io.StringIO()):
-                train_supervisor.human_gate_event(args)
-            updated = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(updated["run_status"], "AWAITING_USER")
-            self.assertEqual(updated["pending_human_action"]["gate_id"], "gate-1")
-            self.assertEqual(updated["control"]["terminal_reason"], "AWAITING_REQUIRED_USER_INPUT")
+            original = json.dumps(valid_state())
+            path.write_text(original, encoding="utf-8")
+            for operation in (train_supervisor.verification_event, train_supervisor.human_gate_event):
+                with self.assertRaisesRegex(ValueError, "retired"):
+                    operation(argparse.Namespace(state=path))
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":

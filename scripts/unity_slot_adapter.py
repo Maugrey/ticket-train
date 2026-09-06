@@ -55,7 +55,7 @@ def manager_command(*arguments: str) -> list[str]:
     return [sys.executable, str(SCRIPT_DIR / "unity_slot_manager.py"), *arguments]
 
 
-def apply_event(state_path: Path, event: dict[str, Any]) -> dict[str, Any]:
+def apply_event(state_path: Path, event: dict[str, Any], owner: str, epoch: str) -> dict[str, Any]:
     state = run_registry.load_json(state_path)
     return run_json(
         [
@@ -66,13 +66,14 @@ def apply_event(state_path: Path, event: dict[str, Any]) -> dict[str, Any]:
             str(state_path),
             "--expected-revision",
             str(state["procedure"]["revision"]),
+            "--owner-thread-id", owner, "--owner-epoch", epoch,
             "--event-json",
             json.dumps(event, ensure_ascii=False, separators=(",", ":")),
         ]
     )
 
 
-def initialize(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
+def initialize(state_path: Path, action: dict[str, Any], owner: str, epoch: str) -> dict[str, Any]:
     result = run_json(
         manager_command(
             "init",
@@ -105,7 +106,7 @@ def initialize(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
         "plugin_package": f"com.ivanmurzak.unity.mcp@{unity_slot_manager.plugin_version(Path(result['repository']))}",
         "slots": slots,
     }
-    apply_event(state_path, event)
+    apply_event(state_path, event, owner, epoch)
     return {
         "operation": "initialized",
         "registry_reference": result["state"],
@@ -115,7 +116,7 @@ def initialize(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def acquire(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
+def acquire(state_path: Path, action: dict[str, Any], owner: str, epoch: str) -> dict[str, Any]:
     arguments = [
         "acquire",
         "--state",
@@ -147,7 +148,7 @@ def acquire(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
         "observed_head": slot["head"],
         "readiness_evidence_reference": f"{action['registry_reference']}#{slot['slot_id']}:readiness",
     }
-    apply_event(state_path, event)
+    apply_event(state_path, event, owner, epoch)
     return {
         "operation": "acquired",
         "slot_id": slot["slot_id"],
@@ -157,7 +158,7 @@ def acquire(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def release(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
+def release(state_path: Path, action: dict[str, Any], owner: str, epoch: str) -> dict[str, Any]:
     result = run_json(
         manager_command(
             "release",
@@ -179,7 +180,7 @@ def release(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
         "slot_status": slot["status"],
         "release_evidence_reference": f"{action['registry_reference']}#{action['slot_id']}:release",
     }
-    apply_event(state_path, event)
+    apply_event(state_path, event, owner, epoch)
     return {
         "operation": "released",
         "slot_id": action["slot_id"],
@@ -192,16 +193,17 @@ def release(state_path: Path, action: dict[str, Any]) -> dict[str, Any]:
 def step(args: argparse.Namespace) -> int:
     state_path = args.state.expanduser().resolve()
     state = run_registry.load_json(state_path)
+    run_registry.require_owner(state, args.owner, args.owner_epoch)
     actions = train_controller.next_actions(state)
     require(actions, "controller returned no action")
     action = actions[0]
     action_name = action.get("action")
     if action_name == "INITIALIZE_UNITY_SLOTS_DETERMINISTICALLY":
-        result = initialize(state_path, action)
+        result = initialize(state_path, action, args.owner, args.owner_epoch)
     elif action_name == "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY":
-        result = acquire(state_path, action)
+        result = acquire(state_path, action, args.owner, args.owner_epoch)
     elif action_name == "RELEASE_UNITY_SLOT_DETERMINISTICALLY":
-        result = release(state_path, action)
+        result = release(state_path, action, args.owner, args.owner_epoch)
     else:
         raise AdapterError(
             "next action is not a deterministic Unity slot transition: "
@@ -222,6 +224,8 @@ def step(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--owner-epoch", required=True)
     return parser
 
 

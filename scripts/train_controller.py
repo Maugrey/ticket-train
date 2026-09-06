@@ -8,6 +8,7 @@ responsible for technical judgment and return structured evidence as events.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import sys
@@ -23,7 +24,7 @@ CRITICALITIES = ("LOW", "NORMAL", "HIGH", "CRITICAL")
 COMPLEXITIES = ("LOW", "MEDIUM", "HIGH", "MAXIMUM")
 ACTIVE_PHASE_STATES = {"INTENT_RECORDED", "QUEUED", "RUNNING", "LAUNCH_UNKNOWN"}
 INPUT_PHASE_STATES = {"NEEDS_INPUT", "INPUT_READY"}
-TERMINAL_TICKET_STATES = {"ANALYSIS_REPORTED", "MERGED_INTO_TRAIN", "BLOCKED", "FAILED", "CANCELLED"}
+TERMINAL_TICKET_STATES = {"ANALYSIS_REPORTED", "MERGED_INTO_TRAIN", "VALIDATED", "BLOCKED", "FAILED", "CANCELLED"}
 MAX_COMPACT_CONTEXT_BYTES = 65_536
 SHA256_HEX_LENGTH = 64
 AUTOMATIC_REMEDIATION_CYCLE_LIMIT = 2
@@ -163,12 +164,13 @@ def require(condition: bool, message: str) -> None:
 
 
 def require_fields(value: dict[str, Any], fields: tuple[str, ...], label: str) -> None:
-    missing = [field for field in fields if value.get(field) in (None, "", [])]
+    missing = [field for field in fields if value.get(field) in (None, "", [])
+               and not (field == "files_modified" and value.get(field) == [])]
     require(not missing, f"{label} is missing: {', '.join(missing)}")
 
 
 def expected_usage_transverse_task_ids(proc: dict[str, Any]) -> list[str]:
-    task_ids = {"run:orchestration", "run:usage-reporting"}
+    task_ids = {"run:orchestration", "run:usage-reporting", "run:unallocated"}
     phases = proc.get("phases") if isinstance(proc.get("phases"), dict) else {}
     for phase_value in phases.values():
         if not isinstance(phase_value, dict) or phase_value.get("ticket_id") not in {None, "run"}:
@@ -230,6 +232,33 @@ def validate_usage_matrix_evidence(
         and event["usage_matrix_unreported_cell_count"] == 0,
         f"{label} contains unreported cells",
     )
+
+    validate_usage_artifacts(proc, event)
+
+
+def validate_usage_artifacts(proc, event):
+    """Completion checks bytes and arithmetic, not caller-supplied ready flags."""
+    import token_usage
+    documents = {}
+    for stem in ("ledger", "orchestration_metrics", "usage_matrix"):
+        path = Path(event.get(stem + "_reference", ""))
+        require(path.is_file(), f"{stem} artifact does not exist")
+        raw = path.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == event.get(stem + "_sha256"), f"{stem} artifact hash mismatch")
+        documents[stem] = json.loads(raw)
+    ledger, matrix = documents["ledger"], documents["usage_matrix"]
+    require(ledger["usage_matrix"] == matrix, "published matrix differs from its ledger")
+    require(matrix["aggregate_usage"] == ledger["aggregate"]["usage"], "matrix aggregate differs from ledger")
+    allocated = token_usage.sum_usage([
+        row["total"]["usage"] for row in matrix["ticket_rows"].values() if row["total"].get("usage") is not None
+    ] + [row["usage"] for row in matrix["transverse_rows"].values()
+         if row.get("accounting_mode") == "independent" and row.get("usage") is not None])
+    require(allocated == matrix["aggregate_usage"], "usage rows do not sum to the aggregate")
+    require(event["authoritative_phase_count"] == len(proc["phases"]) == ledger["aggregate"]["authoritative_phase_count"], "phase inventory count mismatch")
+    require(event["measured_phase_count"] == ledger["aggregate"]["measured_phase_count"], "measured phase count mismatch")
+    require(event["token_reporting_status"] == ledger["aggregate"]["status"], "usage measurement status mismatch")
+    require(event["usage_matrix_status"] == matrix["coverage_status"], "matrix coverage status mismatch")
+    require(event["orchestration_metrics_status"] == documents["orchestration_metrics"]["status"], "orchestration measurement status mismatch")
 
 
 def procedure(state: dict[str, Any]) -> dict[str, Any]:
@@ -924,7 +953,10 @@ def create_gate(
 ) -> dict[str, Any]:
     gates = proc.setdefault("human_gates", {})
     require(isinstance(gates, dict), "procedure.human_gates must be an object")
-    require(gate_id not in gates, f"gate already exists: {gate_id}")
+    if gate_id in gates:
+        prior = gates[gate_id]
+        require((prior["kind"], prior["ticket_id"], prior["revision"]) == (kind, ticket_id, revision), "gate identity collision")
+        return prior
     gates[gate_id] = {
         "gate_id": gate_id,
         "kind": kind,
@@ -935,6 +967,12 @@ def create_gate(
         "status": "PENDING_UNANNOUNCED",
     }
     return gates[gate_id]
+
+
+def scope_decision_key(ticket_id, source_revision, assessment):
+    material = {"ticket_id": ticket_id, "source_revision": source_revision,
+                "proposals": assessment.get("proposals", []), "deviations": assessment.get("specification_deviations", [])}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def input_gate_resume_mode(proc: dict[str, Any], gate: dict[str, Any]) -> str:
@@ -1265,6 +1303,96 @@ def reclassify_acceptance_authoring(event: dict[str, Any], proc: dict[str, Any])
 def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     proc = procedure(state)
     event_type = str(event.get("type") or "")
+    if unresolved_cost_anomalies(proc) and event_type not in {"COST_ANOMALY_RESOLVED", "RUNTIME_OBSERVED"}:
+        raise ControllerError("resolve the open cost anomaly checkpoint before another transition")
+
+    if event_type == "VALIDATION_ONLY_DISPATCHED":
+        item = ticket(proc, event.get("ticket_id", ""))
+        require(item["status"] == "READY_FOR_IMPLEMENTATION", "validation requires approved analysis")
+        require_authorized_scope(item, event, "validation")
+        require_fields(event, ("base_commit", "plan_reference", "evidence_reference", "source_reference"), "validation-only contract")
+        item["execution_mode"] = "validation-only"
+        item["validation_operation"] = dict(event)
+        item["status"] = "AWAITING_VALIDATION"
+        return
+
+    if event_type == "VALIDATION_ONLY_RECORDED":
+        item = ticket(proc, event.get("ticket_id", ""))
+        require(item["status"] == "AWAITING_VALIDATION", "no validation-only operation is pending")
+        require(event.get("head_commit") == item["validation_operation"]["base_commit"], "validation commit changed")
+        validate_deterministic_verification(event, "validation-only result")
+        require(event.get("status") in {"passed", "failed"}, "invalid validation result")
+        if event["status"] == "passed":
+            require(event.get("acceptance_coverage_status") == "complete", "validation coverage is incomplete")
+            require(all(c["status"] == "passed" for c in event["command_results"]), "validation contains failed commands")
+        item["validation_result"] = dict(event)
+        item["status"] = "VALIDATED" if event["status"] == "passed" else "FAILED"
+        return
+
+    if event_type == "SPLIT_RUNS_COMPLETED":
+        require(proc.get("run_status") == "SPLIT", "run was not split")
+        require_fields(event, ("completion_report_reference", "completion_report_sha256"), "split report")
+        require(hashlib.sha256(Path(event["completion_report_reference"]).read_bytes()).hexdigest() == event["completion_report_sha256"], "split report hash mismatch")
+        for batch in proc["split_plan"]["batches"]:
+            path = proc["split_plan"]["manifests"][batch["batch_id"]]
+            child = run_registry.load_json(Path(path))
+            require(child.get("run_id") == state["run_id"] + ":" + batch["batch_id"], "split child identity changed")
+            require(child["run_identity"]["train_branch"] == batch["train_branch"] and set(child["procedure"]["tickets"]) == set(batch["tickets"]), "split delivery differs from approved scope")
+            require(child["procedure"]["run_status"] == "COMPLETED" and not completion_issues(child), "split delivery is incomplete")
+            for key in batch["tickets"]:
+                proc["tickets"][key]["status"] = child["procedure"]["tickets"][key]["status"]
+        proc["split_plan"]["status"] = "COMPLETED"
+        proc["split_plan"]["completion_report_reference"] = event["completion_report_reference"]
+        proc["split_plan"]["completion_report_sha256"] = event["completion_report_sha256"]
+        proc["run_status"] = "COMPLETED"
+        return
+
+    if event_type == "TRAIN_SPLIT_RECORDED":
+        require_fields(event, ("batches", "user_decision_reference"), "train split")
+        require(not any(p["launch_state"] in ACTIVE_PHASE_STATES for p in proc["phases"].values()), "split requires an idle boundary")
+        require(not any(v.get("execution") for v in proc["tickets"].values()), "split before implementation; reconcile existing changes first")
+        batches = event["batches"]
+        require(isinstance(batches, list) and len(batches) >= 2, "split requires at least two concrete batches")
+        ids, branches, covered = set(), set(), []
+        for batch in batches:
+            require_fields(batch, ("batch_id", "tickets", "train_branch"), "split batch")
+            require(batch["batch_id"] not in ids and batch["train_branch"] not in branches, "split batch identities and branches must be distinct")
+            require(batch["train_branch"] != state["run_identity"]["train_branch"], "split deliveries require distinct train branches")
+            ids.add(batch["batch_id"]); branches.add(batch["train_branch"])
+            covered.extend(batch["tickets"])
+        require(len(covered) == len(set(covered)) and set(covered) == set(proc["tickets"]), "split must assign every ticket exactly once")
+        for batch in batches:
+            for ticket_id in batch["tickets"]:
+                require(set(proc["tickets"][ticket_id].get("hard_dependencies", [])).issubset(batch["tickets"]),
+                        "dependent tickets must stay in one batch; propose a dependency-safe split")
+        proc["split_plan"] = {"status": "APPROVED", "batches": batches, "user_decision_reference": event["user_decision_reference"]}
+        return
+
+    if event_type == "SPLIT_RUNS_MATERIALIZED":
+        plan = proc.get("split_plan")
+        require(isinstance(plan, dict) and plan["status"] == "APPROVED", "no approved split")
+        require(set(event.get("manifests", {})) == {b["batch_id"] for b in plan["batches"]}, "every approved batch needs a canonical run")
+        plan.update(status="MATERIALIZED", manifests=event["manifests"])
+        proc["run_status"] = "SPLIT"
+        return
+
+    if event_type == "TECHNICAL_DECISION_DISPATCHED":
+        require_fields(event, ("phase_key", "action", "base_commit", "context_packet"), "technical decision")
+        allowed = {"CONSOLIDATE_DEPENDENCIES", "CLASSIFY_VERIFICATION_FAILURE", "CLASSIFY_FINAL_VERIFICATION_FAILURE",
+                   "RECONCILE_CODEX_CI_COPILOT_FINDINGS", "RECONCILE_FINAL_CODEX_CI_COPILOT_FINDINGS",
+                   "DISPATCH_FRESH_BATCHED_REMEDIATION", "RECORD_FINAL_REMEDIATION_DISPATCH_INTENT",
+                   "RECORD_FINAL_REVIEW_DISPATCH_INTENT", "DISPATCH_FOCUSED_FOLLOWUP_REVIEW", "BLOCKED_OR_INCONSISTENT_STATE"}
+        require(event["action"] in allowed, "this action is not a technical decision")
+        if event["action"] == "BLOCKED_OR_INCONSISTENT_STATE":
+            require(any(t.get("status") in {"ANALYSIS_RECONCILIATION_REQUIRED", "NEEDS_CONTRACT_AMENDMENT"} for t in proc["tickets"].values()),
+                    "only a failed technical contract can use this reconciliation worker")
+        require(any(a["action"] == event["action"] and a.get("ticket_id") == event.get("ticket_id") for a in next_actions(state)),
+                "technical decision is not a current action")
+        context = validate_compact_context(event, "technical decision")
+        add_phase(proc, key=event["phase_key"], ticket_id=event.get("ticket_id"), kind="technical_decision",
+                  model="gpt-5.6-terra", effort="high", branch=None, base=event["base_commit"], context_packet=context)
+        proc["phases"][event["phase_key"]]["decision_action"] = event["action"]
+        return
 
     if event_type == "RUNTIME_OBSERVED":
         require_fields(event, ("owner_thread_id", "snapshot_reference", "snapshot_sha256"), "runtime observation")
@@ -1290,9 +1418,6 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 matched += 1
         require(matched > 0, "snapshot contains no current running phase; preserve existing identities")
         return
-
-    if unresolved_cost_anomalies(proc) and event_type != "COST_ANOMALY_RESOLVED":
-        raise ControllerError("resolve the open cost anomaly checkpoint before another transition")
 
     if event_type == "REASONING_OVERRIDE_AUTHORIZED":
         require_fields(
@@ -1681,11 +1806,23 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "analysis result routing differs from its completed phase",
         )
         assessment = validate_scope_assessment(event)
+        binding = scope_decision_key(event["ticket_id"], event["source_revision"], assessment)
+        prior = proc.get("decisions", {}).get(binding)
+        if assessment["status"] == "APPROVAL_REQUIRED" and prior:
+            # The source and concrete options are identical. Preserve the
+            # selected behavior and its user reference across analysis retries.
+            assessment = copy.deepcopy(prior["resolved_assessment"])
+            for field in ("implementation_contract_revision", "verification_contract_revision"):
+                event[field] = prior[field]
+            approved = prior.get("classification", {})
+            for field in ("criticality", "complexity", "residual_implementation_complexity", "verification_complexity"):
+                if approved.get(field):
+                    event[field] = higher_classification(event[field], approved[field], CRITICALITIES if field == "criticality" else COMPLEXITIES)
         item["analysis"] = dict(event)
         item["analysis"]["scope_assessment"] = assessment
         require(event["report_thread_id"] == source_phase.get("thread_id"), "analysis report thread does not match the visible phase")
         if assessment["status"] == "APPROVAL_REQUIRED":
-            gate_id = f"{event['ticket_id']}:specification:{assessment['assessment_revision']}"
+            gate_id = f"{event['ticket_id']}:specification:{assessment['assessment_revision']}:{binding[:12]}"
             gate = create_gate(
                 proc,
                 gate_id=gate_id,
@@ -1694,6 +1831,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                 revision=assessment["assessment_revision"],
             )
             gate["bypassable"] = False
+            gate["decision_key"] = binding
             gate["proposals"] = assessment["proposals"]
             gate["specification_deviations"] = assessment["specification_deviations"]
             gate["reason"] = (
@@ -1853,6 +1991,15 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         assessment["specification_alignment"] = "resolved"
         assessment["user_decision_reference"] = event["user_decision_reference"]
         assessment["active_scope_revision"] = event["active_scope_revision"]
+        binding = gate.get("decision_key")
+        if binding:
+            proc.setdefault("decisions", {})[binding] = {
+                "resolved_assessment": copy.deepcopy(assessment),
+                "implementation_contract_revision": event["implementation_contract_revision"],
+                "verification_contract_revision": event["verification_contract_revision"],
+                "user_decision_reference": event["user_decision_reference"],
+                "classification": {key: analysis[key] for key in ("criticality", "complexity", "residual_implementation_complexity", "verification_complexity")},
+            }
         gate["status"] = "RESOLVED"
         gate["resolved_at"] = now_iso()
         gate["user_decision_reference"] = event["user_decision_reference"]
@@ -2078,6 +2225,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "gate announcement",
         )
         require(event["revision"] == gate["revision"], "gate revision mismatch")
+        require(all(not (isinstance(reply, str) and len(reply.strip()) == 1) for reply in event["accepted_replies"]),
+                "Choice labels need their full meaning; bare A/B options are ambiguous")
+        gate["choices"] = [{"choice_id": hashlib.sha256((gate["gate_id"] + str(reply)).encode()).hexdigest()[:20],
+                            "meaning": reply} for reply in event["accepted_replies"]]
         gate.update({key: event[key] for key in (
             "decision_summary", "evidence_summary", "blocked_scope", "continuing_scope", "accepted_replies"
         )})
@@ -3226,8 +3377,11 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         final["status"] = "DELIVERED_IN_BASE"
         return
 
-    if event_type == "DRY_RUN_EVIDENCE_RECORDED":
-        require(state.get("execution_mode") == "dry-run", "dry-run evidence is only valid in dry-run mode")
+    if event_type in {"DRY_RUN_EVIDENCE_RECORDED", "NO_DELIVERY_EVIDENCE_RECORDED"}:
+        no_delivery = event_type == "NO_DELIVERY_EVIDENCE_RECORDED"
+        require(no_delivery or state.get("execution_mode") == "dry-run", "dry-run evidence is only valid in dry-run mode")
+        if no_delivery:
+            require(all(t["status"] in TERMINAL_TICKET_STATES and t["status"] != "MERGED_INTO_TRAIN" for t in proc["tickets"].values()), "implementation deliveries remain")
         require(proc.get("dependencies_consolidated") is True, "dependency consolidation is incomplete")
         require(
             not any(gate.get("status", "").startswith("PENDING") for gate in proc["human_gates"].values()),
@@ -3276,8 +3430,11 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             require(event[field] is True, f"{field} must be true")
         for value in proc["tickets"].values():
             require(value.get("analysis"), "every dry-run ticket requires analysis")
-            value["status"] = "ANALYSIS_REPORTED"
+            if not no_delivery:
+                value["status"] = "ANALYSIS_REPORTED"
         proc["finalization"] = {"status": "READY_FOR_COMPLETION", "dry_run_evidence": dict(event)}
+        if no_delivery:
+            proc["finalization"]["no_delivery"] = True
         return
 
     if event_type == "FINALIZATION_STARTED":
@@ -3866,11 +4023,14 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
 
 def completion_issues(state: dict[str, Any]) -> list[str]:
     proc = procedure(state)
+    if proc.get("split_plan", {}).get("status") == "COMPLETED":
+        return [] if all(run_registry.load_json(Path(path))["procedure"]["run_status"] == "COMPLETED"
+                         for path in proc["split_plan"]["manifests"].values()) else ["split delivery is incomplete"]
     issues: list[str] = []
     allowed_terminal = (
         TERMINAL_TICKET_STATES
         if state.get("execution_mode") == "dry-run"
-        else {"MERGED_INTO_TRAIN", "BLOCKED", "FAILED", "CANCELLED"}
+        else {"MERGED_INTO_TRAIN", "VALIDATED", "BLOCKED", "FAILED", "CANCELLED"}
     )
     if not all(value.get("status") in allowed_terminal for value in proc["tickets"].values()):
         issues.append("requested tickets are not terminal")
@@ -3884,7 +4044,7 @@ def completion_issues(state: dict[str, Any]) -> list[str]:
     # controller reports its own successfully completed run as incomplete.
     if final.get("status") not in {"READY_FOR_COMPLETION", "COMPLETED"}:
         issues.append("finalization evidence is incomplete")
-    if state.get("execution_mode") == "dry-run":
+    if state.get("execution_mode") == "dry-run" or final.get("no_delivery"):
         evidence = final.get("dry_run_evidence") or {}
         if not evidence.get("completion_report_ready"):
             issues.append("dry-run completion report is missing")
@@ -4009,9 +4169,8 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         item = {"phase_key": value["phase_key"], "thread_id": value.get("thread_id"),
                 "host_id": value.get("host_id"), "runtime_status": status, "reason": reason}
         if status in {"completed", "failed", "interrupted", "needs_input"}:
-            if value.get("kind") == "plan_contract_validation" and status == "completed":
-                item["collector"] = {"script": "scripts/continuation_adapter.py", "command": "collect-contract",
-                                     "requires_collection_spec": False, "result_source": "existing child result_reference"}
+            item["collector"] = {"script": "scripts/control_plane_runner.py", "command": "drive",
+                                 "result_source": "native task result and durable receipts"}
             outcomes.append(item)
         elif status != "running":
             unverified.append(item)
@@ -4020,16 +4179,20 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER", "CONFIGURE_SUPERVISION_BEFORE_DISPATCH"}
     if outcomes and not any(x["action"] in priority for x in actions):
         return [{"action": "COLLECT_OBSERVED_PHASE_RESULTS", "phases": outcomes,
-                 "may_relaunch": False, "instruction": "Read existing results; apply validated completion/input events before scheduling."}] + [x for x in actions if x["action"] == "AWAIT_HUMAN_GATE"]
+                 "may_relaunch": False, "instruction": "Collect existing results; independent authorized actions may continue while input is pending."}] + [x for x in actions if x["action"] not in {"WAIT_FOR_PHASE_TRANSITION", "COLLECT_OBSERVED_PHASE_RESULTS"}]
     waits = {"WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"}
     if unverified and all(x["action"] in waits for x in actions) and proc.get("supervision", {}).get("mode") != "FOREGROUND_WAIT":
         return [{"action": "OBSERVE_ACTIVE_PHASES", "phases": unverified,
-                 "may_relaunch": False, "instruction": "Capture fresh wait_threads polls; omitted targets remain unobserved."}] + [x for x in actions if x["action"] == "AWAIT_HUMAN_GATE"]
+                 "may_relaunch": False, "instruction": "Read the owned native tasks; omitted targets remain unobserved."}] + [x for x in actions if x["action"] == "AWAIT_HUMAN_GATE"]
     return actions
 
 
 def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     proc = procedure(state)
+    if proc.get("run_status") == "SPLIT":
+        return [{"action": "DRIVE_SPLIT_RUNS", "manifests": proc["split_plan"]["manifests"]}]
+    if proc.get("split_plan", {}).get("status") == "APPROVED":
+        return [{"action": "MATERIALIZE_SPLIT_RUNS"}]
     if proc.get("run_status") == "COMPLETED":
         return []
     pending_handoff = state.get("pending_orchestrator_handoff")
@@ -4409,7 +4572,9 @@ def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     available_unity = max(0, int(proc["limits"].get("max_unity_editors", 0)) - active_unity_leases(proc))
     for ticket_id, value in proc["tickets"].items():
         status = value["status"]
-        if status == "AWAITING_EXECUTION_INTEGRATION":
+        if status == "AWAITING_VALIDATION":
+            actions.append({"action": "RUN_VALIDATION_ONLY_VERIFICATION", "ticket_id": ticket_id})
+        elif status == "AWAITING_EXECUTION_INTEGRATION":
             actions.append({
                 "action": "INTEGRATE_EXECUTION_PAIR_DETERMINISTICALLY",
                 "ticket_id": ticket_id,
@@ -4473,6 +4638,8 @@ def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
 
     if all(value["status"] in TERMINAL_TICKET_STATES for value in proc["tickets"].values()):
         final = proc["finalization"]
+        if not any(v["status"] == "MERGED_INTO_TRAIN" for v in proc["tickets"].values()):
+            return [{"action": "COMPLETE_RUN"}] if final.get("no_delivery") else [{"action": "RECORD_NO_DELIVERY_REPORT"}]
         if final.get("status") == "NOT_STARTED":
             return [{
                 "action": "START_FINALIZATION",
@@ -4768,11 +4935,8 @@ def bootstrap(args: argparse.Namespace) -> int:
     path = args.state.expanduser().resolve()
     with run_registry.directory_lock(path.parent):
         state = run_registry.load_json(path)
+        run_registry.require_owner(state, getattr(args, "owner_thread_id", None), getattr(args, "owner_epoch", None))
         if isinstance(state.get("procedure"), dict):
-            if migrate_procedure(state):
-                procedure(state)["updated_at"] = now_iso()
-                state["manifest_updated_at"] = procedure(state)["updated_at"]
-                run_registry.save_json(path, state)
             output = {"status": "already-bootstrapped", "state": str(path), **compact_status(state)}
             sys.stdout.write(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
             return 0
@@ -4868,8 +5032,7 @@ def apply_event(args: argparse.Namespace) -> int:
         state = run_registry.load_json(path)
         proc = procedure(state)
         applied = proc.setdefault("applied_events", {})
-        if getattr(args, "owner_thread_id", None):
-            require(args.owner_thread_id == (state.get("orchestrator_lease") or {}).get("owner_thread_id"), "event adapter no longer owns the run")
+        run_registry.require_owner(state, getattr(args, "owner_thread_id", None), getattr(args, "owner_epoch", None))
         prior = applied.get(event["event_id"])
         if prior:
             require(prior == digest, "event_id collision with different payload")
@@ -4886,6 +5049,7 @@ def apply_event(args: argparse.Namespace) -> int:
             "ticket_id": event.get("ticket_id"), "phase_key": event.get("phase_key"), "applied_at": proc["updated_at"],
         })
         state["manifest_updated_at"] = proc["updated_at"]
+        run_registry.renew_lease(state)
         run_registry.save_json(path, state)
     output = {"status": "applied", "event": event["type"], **compact_status(state), "next_actions": next_actions(state), "turn_control": turn_control(state)}
     sys.stdout.write(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
@@ -5062,6 +5226,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("bootstrap")
     start.add_argument("--state", type=Path, required=True)
+    start.add_argument("--owner-thread-id", required=True)
+    start.add_argument("--owner-epoch", required=True)
     start.add_argument("--base-branch", required=True)
     start.add_argument("--approval-mode", choices=("standard", "auto-analysis", "auto-merge", "full-auto"), required=True)
     start.add_argument("--environment-profile", choices=ENVIRONMENT_PROFILES, default="generic")
@@ -5072,6 +5238,8 @@ def build_parser() -> argparse.ArgumentParser:
     event = commands.add_parser("apply")
     event.add_argument("--state", type=Path, required=True)
     event.add_argument("--expected-revision", type=int, required=True)
+    event.add_argument("--owner-thread-id", required=True)
+    event.add_argument("--owner-epoch", required=True)
     source = event.add_mutually_exclusive_group(required=True)
     source.add_argument("--event", type=Path)
     source.add_argument("--event-json")

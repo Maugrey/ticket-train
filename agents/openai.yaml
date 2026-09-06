@@ -1,7 +1,7 @@
 interface:
   display_name: "Ticket Train"
   short_description: "Run verified, cost-controlled ticket trains"
-  default_prompt: "Use $ticket-train with an explicit source and selection to run a visible train with deterministic control packets, budgeted orchestrator handoffs, independent acceptance tests, strict gates, durable recovery, token accounting, and scripted-versus-AI orchestration metrics."
+  default_prompt: "Use $ticket-train with an explicit source and selection to run a visible train with a deterministic native runner, independent acceptance tests and reviews, durable recovery, explicit scope decisions, and measured token usage."
 
 policy:
   allow_implicit_invocation: false

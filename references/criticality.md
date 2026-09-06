@@ -38,7 +38,7 @@ Apply the same rule to any unresolved specification precision or
 interpretation: it is not active scope until the user selects an option.
 
 Apply the train's versioned proportionality profile from
-[efficiency-policy.md](efficiency-policy.md). Severity must reflect the actual
+[analysis policy](analysis-policy.md). Severity must reflect the actual
 assets, actors, credible threats, containment, recovery, and protected
 boundaries recorded for the product. Generic enterprise threats do not raise
 confirmed criticality without a credible causal path; MVP scope never lowers
@@ -222,7 +222,7 @@ one-line authorization change can be low-complexity and critical; a large
 visual refactor can be maximum-complexity and low-criticality.
 
 `MAXIMUM` complexity triggers the size-and-risk checkpoint in
-[efficiency-policy.md](efficiency-policy.md), not an automatic separate train.
+[analysis policy](analysis-policy.md), not an automatic separate train.
 Decompose only when the ticket is an epic or the cumulative review surface is
 no longer coherent.
 

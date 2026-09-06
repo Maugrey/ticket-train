@@ -3,9 +3,165 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
+import queue
+import shutil
+import subprocess
+import threading
+import time
 from typing import Any
 
 MAX_AGE_SECONDS = 120
+
+
+class HostError(RuntimeError):
+    """An observed host error, never evidence that creation did not happen."""
+
+
+class AppServer:
+    """One owned stdio connection; notifications are consumed without a model.
+
+    Existing desktop-owned active tasks must not be resumed through this server.
+    Only tasks recorded as managed by this run may be started or resumed here.
+    """
+
+    def __init__(self, executable: str, event_sink=None, timeout: float = 30):
+        self.timeout = timeout
+        self.events = queue.Queue()
+        self.responses = queue.Queue()
+        self.event_sink = event_sink or (lambda event: None)
+        self.serial = 0
+        self.receipts = {}
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.process = subprocess.Popen(
+            [executable, "app-server", "--stdio"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", creationflags=flags,
+        )
+        self.stderr_tail = []
+        threading.Thread(target=self._read, daemon=True).start()
+        threading.Thread(target=self._read_errors, daemon=True).start()
+        try:
+            self.identity = self.call("initialize", {
+                "clientInfo": {"name": "ticket_train", "version": "2"},
+            })
+            self._send({"method": "initialized", "params": {}})
+        except Exception:
+            self.close()
+            raise
+
+    def _read_errors(self):
+        for line in self.process.stderr:
+            self.stderr_tail.append(line.rstrip())
+            del self.stderr_tail[:-20]
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                event = json.loads(line)
+                if "method" in event:
+                    self.events.put(event)
+                else:
+                    receipt = self.receipts.pop(event.get("id"), None)
+                    if receipt:
+                        # Persist the actual response before exposing it to the
+                        # scheduler. A restart can replay this external receipt.
+                        import run_registry
+                        run_registry.save_json(receipt, event)
+                    self.responses.put(event)
+        except (OSError, ValueError) as error:
+            self.responses.put({"transport_error": str(error)})
+        finally:
+            self.responses.put({"transport_error": "App Server connection closed"})
+
+    def _send(self, value):
+        if self.process.poll() is not None:
+            raise HostError("App Server process has exited")
+        self.process.stdin.write(json.dumps(value, ensure_ascii=False) + "\n")
+        self.process.stdin.flush()
+
+    def call(self, method: str, params: dict, receipt_path: Path | None = None) -> dict:
+        self.serial += 1
+        serial = self.serial
+        if receipt_path:
+            self.receipts[serial] = receipt_path
+        self._send({"id": serial, "method": method, "params": params})
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            self.drain()
+            try:
+                response = self.responses.get(timeout=min(0.1, max(0.001, deadline-time.monotonic())))
+            except queue.Empty:
+                continue
+            if response.get("transport_error"):
+                raise HostError(response["transport_error"])
+            if response.get("id") != serial:
+                raise HostError("Unexpected RPC response; reconcile the pending operation")
+            if "error" in response:
+                raise HostError(json.dumps(response["error"], ensure_ascii=False))
+            return response.get("result", {})
+        raise HostError(f"Timed out awaiting {method}; outcome is unknown, do not repeat a mutation")
+
+    def drain(self):
+        events = []
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            events.append(event)
+            self.event_sink(event)
+        return events
+
+    def answer_request(self, request_id, result):
+        self._send({"id": request_id, "result": result})
+
+    def wait(self, seconds: float = 1):
+        """Wait on the actual event queue. No model turn, status fiction or sleep loop."""
+        try:
+            event = self.events.get(timeout=seconds)
+        except queue.Empty:
+            if self.process.poll() is not None:
+                raise HostError("App Server stopped while waiting")
+            return []
+        self.event_sink(event)
+        return [event, *self.drain()]
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.stdin.close()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                self.process.wait(timeout=5)
+        for handle in (self.process.stdout, self.process.stderr):
+            handle.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+def app_server_executable(explicit: str | None = None) -> str:
+    if explicit:
+        path = Path(explicit).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError("Configured App Server executable is missing")
+        return str(path)
+    # Desktop supplies its actual native binary next to the code-mode host.
+    if os.name == "nt":
+        root = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
+        candidates = list(root.glob("*/codex.exe")) if root.is_dir() else []
+        if candidates:
+            return str(max(candidates, key=lambda p: p.stat().st_mtime))
+    command = shutil.which("codex")
+    if command and Path(command).suffix.lower() not in {".cmd", ".ps1", ".bat"}:
+        return command
+    raise ValueError("Provide the native Codex executable with --host-executable")
 
 
 def timestamp(value: str) -> datetime:
@@ -21,6 +177,23 @@ def parse_wait_result(raw: dict[str, Any]) -> list[dict[str, Any]]:
     A multi-target wait may return only one poll. Omitted targets are NOT
     finished, missing, or safe to restart. Never infer them from the wake item.
     """
+    if raw.get("format") == "ticket-train-native-observation-v1":
+        result = []
+        for response in raw.get("responses", []):
+            task = response["thread"]
+            turn = (task.get("turns") or [{}])[-1]
+            status = turn.get("status", "unknown")
+            flags = (task.get("status") or {}).get("activeFlags", [])
+            if any(x in flags for x in ("waitingOnApproval", "waitingOnUserInput")):
+                status = "needs_input"
+            elif status == "inProgress":
+                status = "running" if (task.get("status") or {}).get("type") != "notLoaded" else "unknown"
+            result.append({"thread_id": task["id"], "host_id": "local", "runtime_status": status,
+                           "turn_id": turn.get("id"), "turn_status": turn.get("status"),
+                           "product_status": (task.get("status") or {}).get("type"), "cursor": None})
+        if not result:
+            raise ValueError("Native observation contains no actual task responses")
+        return result
     if raw.get("isError"):
         raise ValueError("product task observation failed; do not relaunch")
     if "polls" not in raw:

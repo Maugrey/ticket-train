@@ -19,6 +19,7 @@ EXECUTOR_KINDS = ("deterministic", "adapter", "technical-model")
 WAIT_ACTIONS = {"AWAIT_HUMAN_GATE", "WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT"}
 
 DETERMINISTIC_ACTIONS = {
+    "DRIVE_SPLIT_RUNS", "MATERIALIZE_SPLIT_RUNS", "RUN_VALIDATION_ONLY_VERIFICATION", "RECORD_NO_DELIVERY_REPORT",
     "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY",
     "AWAIT_HUMAN_GATE",
     "COMPLETE_RUN",
@@ -175,6 +176,7 @@ def start_action(args: argparse.Namespace) -> None:
     path = args.state.expanduser().resolve()
     with run_registry.directory_lock(path.parent):
         state = run_registry.load_json(path)
+        run_registry.require_owner(state, getattr(args, "owner", None), getattr(args, "owner_epoch", None))
         metrics = ensure_metrics(state)
         actions = metrics["actions"]
         if args.action_id in actions:
@@ -204,6 +206,7 @@ def finish_action(args: argparse.Namespace) -> None:
     path = args.state.expanduser().resolve()
     with run_registry.directory_lock(path.parent):
         state = run_registry.load_json(path)
+        run_registry.require_owner(state, getattr(args, "owner", None), getattr(args, "owner_epoch", None))
         metrics = ensure_metrics(state)
         record = metrics["actions"].get(args.action_id)
         if not isinstance(record, dict):
@@ -253,6 +256,7 @@ def record_wake(args: argparse.Namespace) -> None:
     path = args.state.expanduser().resolve()
     with run_registry.directory_lock(path.parent):
         state = run_registry.load_json(path)
+        run_registry.require_owner(state, getattr(args, "owner", None), getattr(args, "owner_epoch", None))
         metrics = ensure_metrics(state)
         wakes = metrics["wakes"]
         if args.wake_id in wakes:
@@ -345,10 +349,12 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
     suppressed = int(control_plane.get("suppressed_unchanged_observations", 0))
     segments = control_plane.get("segments") if isinstance(control_plane.get("segments"), list) else []
     segment_model_wakes = sum(
-        int(item.get("model_wakes", 0)) for item in segments if isinstance(item, dict)
+        int(item.get("model_wakes") or 0) for item in segments if isinstance(item, dict)
     )
     status = "complete"
     if running or missing_tokens or not completed:
+        status = "partial"
+    if any(item.get("measurement_status") in {"partial", "unavailable"} for item in segments if isinstance(item, dict)):
         status = "partial"
     if not completed and not wakes and suppressed == 0:
         status = "unavailable"
@@ -407,6 +413,7 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
             "adapter_share": "Codex/application bridge without technical judgment",
             "technical_model_share": "reasoning required for a technical decision",
             "token_caveat": "Only non-overlapping recorded action deltas are allocated; session totals remain authoritative.",
+            "duration_caveat": "Driver event durations measure registration or the worker phase lifetime; they do not measure every external command and may overlap.",
         },
     }
 
@@ -425,10 +432,6 @@ def report(args: argparse.Namespace) -> None:
                 "status": document["status"],
                 "generated_at": document["generated_at"],
             }
-            metrics = ensure_metrics(state)
-            metrics["last_report"] = descriptor
-            metrics["updated_at"] = now_iso()
-            run_registry.save_json(path, state)
             write_json({"status": "written", **descriptor})
             return
     write_json(document)
@@ -493,6 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
     check = commands.add_parser("taxonomy")
     check.add_argument("--action-name", action="append")
     check.set_defaults(handler=taxonomy)
+    for command in (start, finish, wake):
+        command.add_argument("--owner", required=True)
+        command.add_argument("--owner-epoch", required=True)
     return parser
 
 

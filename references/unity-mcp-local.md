@@ -44,6 +44,7 @@ Bootstrap the controller with the local checkout:
 ```powershell
 python scripts/train_controller.py bootstrap `
   --state <run-manifest.json> `
+  --owner-thread-id <owner> --owner-epoch <epoch> `
   --base-branch <main-or-master> `
   --approval-mode <mode> `
   --environment-profile unity-mcp-local `
@@ -132,37 +133,18 @@ WAIT_FOR_UNITY_SLOT
 RELEASE_UNITY_SLOT_DETERMINISTICALLY
 ```
 
-Execute initialization, acquisition, and release through the adapter:
+The canonical runner executes initialization, acquisition and release through
+`unity_slot_adapter.py`; the conversation does not dispatch these transitions.
+For a diagnostic invocation use `--state MANIFEST --owner OWNER --owner-epoch
+EPOCH`. The adapter checks the current controller action before any effect.
 
-```powershell
-python scripts/unity_slot_adapter.py --state <run-manifest.json>
-```
-
-One invocation performs exactly one authorized Unity resource transition and
-records its idempotent controller event. Repeat only when the returned
-`next_actions` authorizes another deterministic Unity transition.
-
-Do not invoke this adapter for `RECORD_*`, `DISPATCH_*`, gate, review, or other
-controller actions. In particular, record a phase dispatch intent before the
-controller can authorize slot acquisition. A refusal naming a non-Unity next
-action means the orchestrator called the wrong handler; execute that named
-action instead of treating the refusal as an environment failure.
-
-On acquisition, the manager:
-
-1. obtains an exclusive registry lock;
-2. rejects project dirt while preserving the exact managed Codex MCP override;
-3. checks out the required branch, or an exact detached head for read-only and
-   final verification;
-4. verifies that the observed head equals the controller-authorized head;
-5. reapplies the stable AI Game Dev configuration;
-6. opens the Unity Editor;
-7. waits for local MCP readiness and records status evidence;
-8. retries close/open/readiness at most twice after the initial attempt;
-9. quarantines a slot that cannot prepare the requested revision and tries the
-   next eligible slot;
-10. records `BLOCKED_HUMAN` with diagnostics only after the bounded eligible
-    pool or readiness recovery is exhausted.
+Acquisition holds an operation lock while reserving a `STARTING` slot under the
+short registry lock. Provisioning, checkout, editor startup and readiness run
+outside that registry lock. Other slots remain usable. The manager verifies the
+exact revision and managed configuration, bounds close/open/readiness recovery,
+then commits a lease or quarantines the failed slot and tries another candidate.
+Release cannot race an unfinished acquisition. Persistent lock files are normal;
+process-owned OS locks release after a crash.
 
 A missing managed MCP config at an expected Git revision is retried on the
 next acquisition because it can be caused by a revision that had not yet been

@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,6 +51,7 @@ class Harness:
         self.path = root / "runs" / "run-test" / "manifest.json"
         bootstrap = argparse.Namespace(
             state=self.path,
+            owner_thread_id="thread-main", owner_epoch=self.state()["orchestrator_lease"]["epoch"],
             base_branch="main",
             approval_mode=approval_mode,
             environment_profile=environment_profile,
@@ -75,10 +77,14 @@ class Harness:
         args = argparse.Namespace(
             state=self.path,
             expected_revision=revision,
+            owner_thread_id=self.state()["orchestrator_lease"]["owner_thread_id"],
+            owner_epoch=self.state()["orchestrator_lease"].get("epoch"),
             event_json=json.dumps(event),
             event=None,
         )
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        # This harness tests lifecycle decisions using symbolic external
+        # artifacts. Native-runtime tests exercise real artifact bytes/hashes.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), patch.object(train_controller, "validate_usage_artifacts"):
             try:
                 return train_controller.apply_event(args)
             except (train_controller.ControllerError, ValueError):
@@ -712,7 +718,7 @@ class TrainControllerTests(unittest.TestCase):
             "usage_matrix_transverse_task_ids": [
                 "phase:run:run:triage:1",
                 "run:orchestration",
-                "run:usage-reporting",
+                "run:unallocated", "run:usage-reporting",
             ],
             "usage_matrix_unreported_cell_count": 0,
         }
@@ -1379,7 +1385,7 @@ class TrainControllerTests(unittest.TestCase):
             packet_output = io.StringIO()
             with contextlib.redirect_stdout(packet_output):
                 self.assertEqual(
-                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None)),
+                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None, owner_thread_id="thread-main", owner_epoch=run.state()["orchestrator_lease"].get("epoch"))),
                     0,
                 )
             packet_result = json.loads(packet_output.getvalue())
@@ -2431,6 +2437,7 @@ class TrainControllerTests(unittest.TestCase):
                         state=run.path,
                         thread_id="thread-main",
                         baseline_total_tokens=0,
+                        owner_epoch=run.state()["orchestrator_lease"].get("epoch"),
                         latest_total_tokens=25_000_000,
                         model_wakes=50,
                         tool_calls=500,
@@ -2441,14 +2448,14 @@ class TrainControllerTests(unittest.TestCase):
             first_step = io.StringIO()
             with contextlib.redirect_stdout(first_step):
                 self.assertEqual(
-                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None)),
+                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None, owner_thread_id="thread-main", owner_epoch=run.state()["orchestrator_lease"].get("epoch"))),
                     0,
                 )
             self.assertEqual(json.loads(first_step.getvalue())["wake_kind"], "NO_MODEL_WAKE")
             repeated_step = io.StringIO()
             with contextlib.redirect_stdout(repeated_step):
                 self.assertEqual(
-                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None)),
+                    control_plane_runner.step(argparse.Namespace(state=run.path, output_dir=None, owner_thread_id="thread-main", owner_epoch=run.state()["orchestrator_lease"].get("epoch"))),
                     0,
                 )
             repeated = json.loads(repeated_step.getvalue())
@@ -2978,7 +2985,8 @@ class TrainControllerTests(unittest.TestCase):
                 **run.orchestrator_confirmation_fields(),
             }
             args = argparse.Namespace(
-                state=run.path, expected_revision=0, event_json=json.dumps(event), event=None
+                state=run.path, expected_revision=0, event_json=json.dumps(event), event=None,
+                owner_thread_id="thread-main", owner_epoch=run.state()["orchestrator_lease"]["epoch"],
             )
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(train_controller.apply_event(args), 0)
@@ -3117,7 +3125,7 @@ class TrainControllerTests(unittest.TestCase):
                         "phase:run:run:triage:1",
                         "run:dependency-consolidation",
                         "run:orchestration",
-                        "run:usage-reporting",
+                        "run:unallocated", "run:usage-reporting",
                     ],
                     usage_matrix_unreported_cell_count=0,
                 ),
@@ -3296,7 +3304,7 @@ class TrainControllerTests(unittest.TestCase):
                         "run:final-verification",
                         "run:github-feedback",
                         "run:orchestration",
-                        "run:usage-reporting",
+                        "run:unallocated", "run:usage-reporting",
                     ],
                     usage_matrix_unreported_cell_count=0,
                 ),

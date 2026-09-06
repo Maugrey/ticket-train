@@ -53,7 +53,7 @@ class ContinuityRegressions(unittest.TestCase):
     def step(self, run):
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
-            runner.step(argparse.Namespace(state=run.path, output_dir=None))
+            runner.step(argparse.Namespace(state=run.path, output_dir=None, owner_thread_id="thread-main", owner_epoch=run.state()["orchestrator_lease"].get("epoch")))
         return json.loads(stream.getvalue())
 
     def test_repeated_verification_and_remediation_actions_are_not_waits(self):
@@ -196,12 +196,20 @@ class ContinuityRegressions(unittest.TestCase):
 
 
 class VerificationAdapterRegressions(unittest.TestCase):
+    def setUp(self):
+        detached = patch.object(verification_runner, "run_detached_plan", side_effect=verification_runner.run_plan)
+        detached.start()
+        self.addCleanup(detached.stop)
+        # These adapter tests use a synthetic Git head. Real filesystem and
+        # interruption behavior is covered by the runtime integration tests.
+        self.enterContext(patch.object(verification_runner, "worktree_fingerprint", return_value="fixture-state"))
+
     def test_execution_lock_excludes_duplicates_and_releases_on_error(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "execution.lock"
             with self.assertRaisesRegex(RuntimeError, "simulated"):
                 with verification_adapter.execution_lock(path):
-                    with self.assertRaisesRegex(ValueError, "already active"):
+                    with self.assertRaisesRegex(ValueError, "locked"):
                         with verification_adapter.execution_lock(path):
                             self.fail("duplicate entered")
                     raise RuntimeError("simulated crash")
@@ -226,7 +234,7 @@ class VerificationAdapterRegressions(unittest.TestCase):
             "independent_test_commit": "tests-sha", "environment_status": "not-applicable",
             "acceptance_coverage_status": "complete", "operational_change_applicable": False,
         }), encoding="utf-8")
-        return run, argparse.Namespace(state=run.path, plan=plan, evidence=evidence, output=root / "result.json", logs_dir=root / "logs")
+        return run, argparse.Namespace(state=run.path, plan=plan, evidence=evidence, output=root / "result.json", logs_dir=root / "logs", owner="thread-main", owner_epoch=run.state()["orchestrator_lease"]["epoch"])
 
     def test_run_records_success_and_returns_successor_without_another_model_turn(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(verification_runner, "git_head", return_value="ticket-sha"):
@@ -235,7 +243,7 @@ class VerificationAdapterRegressions(unittest.TestCase):
             self.assertEqual(result["status"], "recorded")
             self.assertEqual(run.state()["procedure"]["tickets"]["T-1"]["status"], "FUNCTIONAL_READY")
             self.assertFalse(result["next"]["turn_control"]["may_end_turn"])
-            with patch.object(verification_runner, "run_plan", side_effect=AssertionError("must not rerun")):
+            with patch.object(verification_runner, "run_detached_plan", side_effect=AssertionError("must not rerun")):
                 self.assertEqual(verification_adapter.execute(args)["status"], "recorded")
 
     def test_failed_command_is_recorded_and_its_stdout_is_not_lost(self):
@@ -253,7 +261,7 @@ class VerificationAdapterRegressions(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     verification_adapter.execute(args)
             self.assertTrue(args.output.exists())
-            with patch.object(verification_runner, "run_plan", side_effect=AssertionError("must not rerun")):
+            with patch.object(verification_runner, "run_detached_plan", side_effect=AssertionError("must not rerun")):
                 self.assertEqual(verification_adapter.execute(args)["status"], "recorded")
 
     def test_reuse_rejects_changed_plan_or_checkout(self):

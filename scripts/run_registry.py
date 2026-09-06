@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import time
 from contextlib import contextmanager
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-ACTIVE_RUN_STATES = {"ACTIVE", "AWAITING_USER", "BLOCKED", "CHECKPOINT"}
+ACTIVE_RUN_STATES = {"ACTIVE", "AWAITING_USER", "BLOCKED", "CHECKPOINT", "SPLIT"}
 DEFAULT_LEASE_MINUTES = 30
 DEFAULT_HANDOFF_MINUTES = 15
 
@@ -72,7 +73,7 @@ def slug(value: str) -> str:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.expanduser().resolve().open("r", encoding="utf-8") as handle:
+    with Path(path).expanduser().resolve().open("r", encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object: {path}")
@@ -80,38 +81,127 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def save_json(path: Path, value: dict[str, Any]) -> None:
-    resolved = path.expanduser().resolve()
+    if isinstance(value.get("procedure"), dict):
+        project_control(value)
+    resolved = Path(path).expanduser().resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    temporary = resolved.with_suffix(resolved.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, resolved)
+    temporary = resolved.with_suffix(resolved.suffix + "." + secrets.token_hex(8) + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, resolved)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @contextmanager
-def directory_lock(root: Path, timeout_seconds: float = 10.0) -> Iterator[None]:
-    root.mkdir(parents=True, exist_ok=True)
-    lock = root / ".registry.lock"
+def file_lock(lock: Path, timeout_seconds: float = 10.0) -> Iterator[None]:
+    """Process-owned lock. Keep the inode: unlinking it allows two owners."""
+    lock.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout_seconds
-    while True:
+    with lock.open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        while True:
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise ValueError(f"Resource is locked by a live process: {lock}") from error
+                time.sleep(0.05)
         try:
-            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(descriptor, f"{os.getpid()} {now_iso()}\n".encode("utf-8"))
-            os.close(descriptor)
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise ValueError(f"Run registry is locked: {lock}")
-            time.sleep(0.05)
-    try:
-        yield
-    finally:
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def directory_lock(root: Path, timeout_seconds: float = 10.0):
+    return file_lock(root / ".registry.lock", timeout_seconds)
+
+
+def require_owner(state: dict[str, Any], owner: str | None, epoch: str | None = None) -> None:
+    current = state.get("orchestrator_lease") or {}
+    if not owner or owner != current.get("owner_thread_id"):
+        raise ValueError("Only the canonical owner may write this run")
+    if current.get("epoch") and epoch != current["epoch"]:
+        raise ValueError("Ownership generation changed; reopen the run before writing")
+
+
+def renew_lease(state: dict[str, Any]) -> None:
+    current = state["orchestrator_lease"]
+    current["heartbeat_at"] = now_iso()
+    current["expires_at"] = (now() + timedelta(minutes=DEFAULT_LEASE_MINUTES)).isoformat()
+
+
+def project_control(state: dict[str, Any]) -> None:
+    """Compatibility view only; procedure is the sole writable workflow state."""
+    proc = state["procedure"]
+    old = state.get("control") or {}
+    state["run_status"] = proc.get("run_status", state.get("run_status"))
+    state["supervision"] = dict(proc.get("supervision", {}))
+    state["control"] = {
+        "derived_from": "procedure", "revision": proc.get("revision"),
+        "manifest_updated_at": proc.get("updated_at"), "manifest_reconciled": True,
+        "terminal_reason": "COMPLETED" if state["run_status"] == "COMPLETED" else None,
+        "next_automatic_action": "derived-by-controller",
+        "requested_ticket_states": {k: v.get("status") for k, v in proc.get("tickets", {}).items()},
+        "phases": list(proc.get("phases", {}).values()),
+        "pending_human_gates": [v for v in proc.get("human_gates", {}).values() if v.get("status", "").startswith("PENDING")],
+        "train_size_budget": proc.get("train_size_budget", {}),
+        "finalization": proc.get("finalization", {}),
+        "launch_unknown_phase_keys": [k for k, v in proc.get("phases", {}).items() if v.get("launch_state") == "LAUNCH_UNKNOWN"],
+        "blocking_conditions": [],
+        "duplicate_session_inventory": old.get("duplicate_session_inventory", []),
+        "cost_anomaly_status": old.get("cost_anomaly_status", "unknown"),
+    }
+
+
+def pin_release(run_directory: Path) -> dict[str, Any]:
+    """Freeze the executable skill used by this run, outside the installed skill."""
+    source = Path(__file__).resolve().parent.parent
+    files = sorted(p for p in source.rglob("*") if p.is_file()
+                   and p.suffix in {".py", ".js", ".md", ".yaml"}
+                   and ".git" not in p.parts and "__pycache__" not in p.parts
+                   and not p.name.startswith("test_"))
+    hashes = {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+    release_id = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+    destination = run_directory / "runtime" / release_id
+    if not destination.exists():
+        staged = destination.with_name(".preparing-" + secrets.token_hex(12))
+        for name in hashes:
+            target = staged / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source / name, target)
+            if hashlib.sha256(target.read_bytes()).hexdigest() != hashes[name]:
+                raise ValueError("Installed runtime changed during pinning; retry from a stable release")
+        os.replace(staged, destination)
+    return {"id": release_id, "path": str(destination), "files": hashes, "pinned_at": now_iso()}
+
+
+def verify_release(state: dict[str, Any]) -> Path:
+    release = state.get("runtime_release")
+    if not isinstance(release, dict):
+        raise ValueError("This legacy run has no pinned runtime; migrate it explicitly while idle")
+    root = Path(release["path"]).resolve()
+    for name, expected in release["files"].items():
+        path = (root / name).resolve()
+        if not path.is_relative_to(root) or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise ValueError("Pinned runtime was changed or is incomplete: " + name)
+    return root
 
 
 def manifest_paths(root: Path) -> list[Path]:
@@ -218,6 +308,7 @@ def lease(owner_thread_id: str, lease_minutes: int) -> dict[str, Any]:
     timestamp = now()
     return {
         "owner_thread_id": owner_thread_id,
+        "epoch": secrets.token_hex(16),
         "claimed_at": timestamp.isoformat(),
         "heartbeat_at": timestamp.isoformat(),
         "expires_at": (timestamp + timedelta(minutes=lease_minutes)).isoformat(),
@@ -337,6 +428,7 @@ def init_run(args: argparse.Namespace) -> int:
                 "finalization": {},
             },
         }
+        state["runtime_release"] = pin_release(path.parent)
         save_json(path, state)
     sys.stdout.write(
         json.dumps(
@@ -370,7 +462,7 @@ def discover(args: argparse.Namespace) -> int:
 def claim(args: argparse.Namespace) -> int:
     path = args.state.expanduser().resolve()
     root = path.parent.parent
-    with directory_lock(root):
+    with file_lock(path.parent / "driver" / "driver.lock", 0), directory_lock(path.parent):
         state = load_json(path)
         pending_handoff = state.get("pending_orchestrator_handoff")
         if isinstance(pending_handoff, dict) and pending_handoff.get("status") == "PREPARED":
@@ -424,6 +516,29 @@ def claim(args: argparse.Namespace) -> int:
     return 0
 
 
+def migrate_runtime(args: argparse.Namespace) -> int:
+    import train_controller
+    path = args.state.expanduser().resolve()
+    with file_lock(path.parent / "driver" / "driver.lock", 0), directory_lock(path.parent):
+        state = load_json(path)
+        require_owner(state, args.owner_thread_id, args.owner_epoch)
+        phases = (state.get("procedure") or {}).get("phases", {})
+        if any(p.get("launch_state") in train_controller.ACTIVE_PHASE_STATES for p in phases.values()):
+            raise ValueError("Runtime migration requires all technical tasks to be idle")
+        from contextlib import ExitStack
+        with ExitStack() as probes:
+            for lock in path.parent.rglob("*.runner.lock"):
+                probes.enter_context(file_lock(lock, 0))
+            previous = state.get("runtime_release")
+            release = pin_release(path.parent)
+            train_controller.migrate_procedure(state)
+            state.setdefault("runtime_migrations", []).append({"from": previous, "to": release["id"], "at": now_iso(), "owner": args.owner_thread_id})
+            state["runtime_release"] = release
+            save_json(path, state)
+    print(json.dumps({"status": "migrated", "release": release["id"], "state": str(path)}))
+    return 0
+
+
 def prepare_handoff(args: argparse.Namespace) -> int:
     """Prepare a single-use controlled handoff without creating a second run."""
     path = args.state.expanduser().resolve()
@@ -431,8 +546,9 @@ def prepare_handoff(args: argparse.Namespace) -> int:
     packet_path = args.packet.expanduser().resolve()
     if not packet_path.is_file():
         raise ValueError(f"handoff decision packet does not exist: {packet_path}")
-    with directory_lock(root):
+    with file_lock(path.parent / "driver" / "driver.lock", timeout_seconds=0), directory_lock(path.parent):
         state = load_json(path)
+        require_owner(state, args.from_thread, args.owner_epoch)
         current = state.get("orchestrator_lease")
         owner = current.get("owner_thread_id") if isinstance(current, dict) else None
         if owner != args.from_thread:
@@ -446,6 +562,7 @@ def prepare_handoff(args: argparse.Namespace) -> int:
         handoff = {
             "status": "PREPARED",
             "from_thread_id": args.from_thread,
+            "owner_epoch": args.owner_epoch,
             "reason": args.reason,
             "packet_reference": str(packet_path),
             "token_sha256": token_sha256,
@@ -486,13 +603,14 @@ def accept_handoff(args: argparse.Namespace) -> int:
     """Atomically transfer the lease to the prepared visible successor."""
     path = args.state.expanduser().resolve()
     root = path.parent.parent
-    with directory_lock(root):
+    with file_lock(path.parent / "driver" / "driver.lock", timeout_seconds=0), directory_lock(path.parent):
         state = load_json(path)
         pending = state.get("pending_orchestrator_handoff")
         if not isinstance(pending, dict) or pending.get("status") != "PREPARED":
             raise ValueError("no prepared orchestrator handoff exists")
         if datetime.fromisoformat(str(pending["expires_at"]).replace("Z", "+00:00")) <= now():
             raise ValueError("prepared orchestrator handoff has expired")
+        require_owner(state, pending["from_thread_id"], pending.get("owner_epoch"))
         supplied = hashlib.sha256(args.handoff_token.encode("utf-8")).hexdigest()
         if not secrets.compare_digest(supplied, str(pending.get("token_sha256") or "")):
             raise ValueError("invalid orchestrator handoff token")
@@ -539,8 +657,9 @@ def cancel_handoff(args: argparse.Namespace) -> int:
     """Cancel a prepared handoff when visible successor creation failed."""
     path = args.state.expanduser().resolve()
     root = path.parent.parent
-    with directory_lock(root):
+    with file_lock(path.parent / "driver" / "driver.lock", timeout_seconds=0), directory_lock(path.parent):
         state = load_json(path)
+        require_owner(state, args.from_thread, args.owner_epoch)
         pending = state.get("pending_orchestrator_handoff")
         if not isinstance(pending, dict) or pending.get("status") != "PREPARED":
             raise ValueError("no prepared orchestrator handoff exists")
@@ -567,6 +686,12 @@ def cancel_handoff(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command_name", required=True)
+
+    migration = subparsers.add_parser("migrate-runtime")
+    migration.add_argument("--state", type=Path, required=True)
+    migration.add_argument("--owner-thread-id", required=True)
+    migration.add_argument("--owner-epoch", required=True)
+    migration.set_defaults(handler=migrate_runtime)
 
     initialize = subparsers.add_parser("init")
     initialize.add_argument("--root", type=Path, default=default_root())
@@ -601,6 +726,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = subparsers.add_parser("prepare-handoff")
     prepare.add_argument("--state", type=Path, required=True)
     prepare.add_argument("--from-thread", required=True)
+    prepare.add_argument("--owner-epoch", required=True)
     prepare.add_argument("--reason", choices=("budget", "compaction", "manual"), required=True)
     prepare.add_argument("--packet", type=Path, required=True)
     prepare.add_argument("--handoff-minutes", type=int, default=DEFAULT_HANDOFF_MINUTES)
@@ -616,6 +742,7 @@ def build_parser() -> argparse.ArgumentParser:
     cancel = subparsers.add_parser("cancel-handoff")
     cancel.add_argument("--state", type=Path, required=True)
     cancel.add_argument("--from-thread", required=True)
+    cancel.add_argument("--owner-epoch", required=True)
     cancel.add_argument("--handoff-token", required=True)
     cancel.set_defaults(handler=cancel_handoff)
     return parser
