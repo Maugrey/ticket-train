@@ -10,6 +10,24 @@ for technical judgment. A deterministic runner emits bounded decision packets,
 suppresses unchanged waits, and rotates the replaceable main adapter before its
 conversation becomes a dominant cost center.
 
+Resumption is an explicit adapter operation: apply the user's actual decision
+or a child's result and return the next allowed action together. Worker prompts
+are generated with exact context and a result-delivery contract. Before an
+orchestrator yields with active workers, the controller requires fresh product
+task observations; stale `RUNNING` manifest flags are insufficient. The scripts
+do not themselves expose a desktop task-launch API or intercept native final
+responses: the active Codex adapter must execute the prescribed tool calls.
+See [the continuation protocol](references/control-plane-runner.md).
+
+The desktop phase-dispatch bridge bundles authorized intent, visible task
+creation, raw receipt persistence and fresh runtime observation in one tool
+invocation. Interrupted launches recover saved receipts instead of creating
+duplicate tasks; ambiguous outcomes require reconciliation.
+
+Contract-result collection has a separate command: it consumes the existing
+artifact, records completion and verdict atomically, and returns the next action.
+It never launches a task or requires a hand-written collection specification.
+
 The skill is designed for multi-ticket work where sequencing, dependency
 management, verification quality, human approval, context growth, and token
 cost all need explicit control.
@@ -474,6 +492,14 @@ The bundled deterministic tools support this control plane:
 After an interruption, the orchestrator reconstructs current state from the
 manifest, Git, threads, and pull requests before scheduling more work.
 
+An unchanged automatic action remains `action-pending` until its outcome is
+recorded; only true waits are suppressed. Each runner response includes the
+authoritative turn-exit guard. `verification_adapter.py` combines test execution,
+durable result registration and successor retrieval, reusing an existing result
+after interruption instead of repeating tests. Sequential tickets remain
+serialized through validation and merge; independent authorized work remains
+visible even while another ticket waits for input.
+
 ## Reports
 
 The main conversation receives concise but self-sufficient reports for:
@@ -523,17 +549,22 @@ ticket-train/
     ├── control_guard.py
     ├── control_plane_runner.py
     ├── context_packet.py
+    ├── continuation_adapter.py
     ├── merge_pull_request.py
     ├── orchestration_metrics.py
     ├── run_registry.py
     ├── test_ticket_train_tools.py
+    ├── test_continuity_regressions.py
+    ├── test_continuation_adapter.py
     ├── test_train_controller.py
     ├── test_unity_slot_manager.py
     ├── token_usage.py
+    ├── thread_runtime.py
     ├── train_controller.py
     ├── train_supervisor.py
     ├── unity_slot_adapter.py
     ├── unity_slot_manager.py
+    ├── verification_adapter.py
     └── verification_runner.py
 ```
 
@@ -556,6 +587,10 @@ accounting checks.
   active main conversation still performs tool calls, but it no longer decides
   their order or whether lifecycle gates passed. This host adapter is awakened
   only for changed state and rotated under a hard context budget.
+  A skill is not a host-enforced stop hook: the adapter must obey the returned
+  turn-exit guard. Scripts cannot guarantee recovery after the app is closed
+  or after an agent ignores that guard; no periodic model heartbeat is added
+  to hide that limitation.
 
 ## License
 

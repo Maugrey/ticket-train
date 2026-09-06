@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import run_registry
+import thread_runtime
 
 
 CRITICALITIES = ("LOW", "NORMAL", "HIGH", "CRITICAL")
@@ -27,6 +28,7 @@ MAX_COMPACT_CONTEXT_BYTES = 65_536
 SHA256_HEX_LENGTH = 64
 AUTOMATIC_REMEDIATION_CYCLE_LIMIT = 2
 EXCEPTIONAL_REMEDIATION_CYCLE_INCREMENT = 1
+FINAL_TEST_ONLY_REMEDIATION_CYCLE_LIMIT = 3
 ENVIRONMENT_PROFILES = ("generic", "unity-mcp-local")
 UNITY_REQUIREMENTS = ("none", "editor-read", "editor-write", "playmode-ui", "build")
 UNITY_REQUIREMENT_ORDER = {value: index for index, value in enumerate(UNITY_REQUIREMENTS)}
@@ -728,8 +730,13 @@ def validate_deterministic_verification(event: dict[str, Any], label: str) -> No
     require(isinstance(commands, list) and commands, f"{label} command_results must be non-empty")
     for command in commands:
         require(isinstance(command, dict), f"{label} command result must be an object")
-        require_fields(command, ("command_id", "status", "exit_code", "duration_seconds", "log_reference"), label)
+        require_fields(command, ("command_id", "status", "duration_seconds", "log_reference"), label)
         require(command["status"] in {"passed", "failed", "timed_out"}, f"{label} command status is invalid")
+        require("exit_code" in command, f"{label} command must record exit_code, including null when unavailable")
+        code = command["exit_code"]
+        require(code is None or (isinstance(code, int) and not isinstance(code, bool)), f"{label} invalid exit_code")
+        require(command["status"] != "passed" or code == 0, f"{label} passed command needs exit_code 0")
+        require(command["status"] != "failed" or code != 0, f"{label} failed command cannot have exit_code 0")
 
 
 def open_cost_anomaly(proc: dict[str, Any], *, phase_item: dict[str, Any], reason: str) -> None:
@@ -848,17 +855,16 @@ def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str,
         )
         head = None
         branch = execution.get("implementation_branch")
-        if item.get("status") == "AWAITING_REMEDIATION_VERIFICATION":
-            remediations = [
-                value for value in proc.get("phases", {}).values()
-                if value.get("ticket_id") == ticket_id
-                and value.get("kind") == "remediation"
-                and value.get("launch_state") == "COMPLETED"
-            ]
-            if remediations:
-                latest = remediations[-1]
-                head = ((latest.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
-                branch = latest.get("branch")
+        remediations = [
+            value for value in proc.get("phases", {}).values()
+            if value.get("ticket_id") == ticket_id
+            and value.get("kind") == "remediation"
+            and value.get("launch_state") == "COMPLETED"
+        ]
+        if remediations:
+            latest = remediations[-1]
+            head = ((latest.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
+            branch = latest.get("branch")
         if not head and item.get("status") == "AWAITING_VERIFICATION":
             head = execution.get("integrated_head")
         if not head:
@@ -965,6 +971,89 @@ def active_execution_pairs(proc: dict[str, Any]) -> int:
 def dependencies_satisfied(proc: dict[str, Any], item: dict[str, Any]) -> bool:
     for dependency in item.get("hard_dependencies", []):
         if ticket(proc, dependency).get("status") != "MERGED_INTO_TRAIN":
+            return False
+    return True
+
+
+def parallel_execution_proven(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Only the same validated, collision-free parallel group may overlap."""
+    a, b = left.get("schedule", {}), right.get("schedule", {})
+    if not (
+        a.get("mode") == b.get("mode") == "parallel-safe"
+        and a.get("parallel_group")
+        and a.get("parallel_group") == b.get("parallel_group")
+    ):
+        return False
+    if set(left.get("collision_domains", [])) & set(right.get("collision_domains", [])):
+        return False
+    for field in ("planned_material_files", "structural_domains"):
+        if set(left.get("scope_inventory", {}).get(field, [])) & set(right.get("scope_inventory", {}).get(field, [])):
+            return False
+    return True
+
+
+def ordered_execution_tickets(proc: dict[str, Any]) -> list[str]:
+    """Stable topological order avoids priority/dependency deadlocks."""
+    ordered: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(ticket_id: str) -> None:
+        require(ticket_id not in visiting, "execution dependency cycle requires reconciliation")
+        if ticket_id in visited:
+            return
+        visiting.add(ticket_id)
+        for dependency in ticket(proc, ticket_id).get("hard_dependencies", []):
+            visit(dependency)
+        visiting.remove(ticket_id)
+        visited.add(ticket_id)
+        ordered.append(ticket_id)
+
+    priority = proc.get("execution_order", list(proc["tickets"]))
+    require(set(priority) == set(proc["tickets"]), "execution order must cover all selected tickets")
+    for ticket_id in priority:
+        visit(ticket_id)
+    return ordered
+
+
+def execution_schedule_satisfied(proc: dict[str, Any], ticket_id: str) -> bool:
+    """Serialize the entire ticket lifecycle, not just active coding threads.
+
+    Consolidation order is retained separately from sorted JSON keys. A hard-dependent
+    predecessor may appear later in that order; let it run first. Already
+    started work is never invalidated when upgrading an interrupted run.
+    """
+    item = ticket(proc, ticket_id)
+    if not dependencies_satisfied(proc, item):
+        return False
+    predecessors = set(item.get("hard_dependencies", []))
+    earlier = True
+    for other_id in ordered_execution_tickets(proc):
+        other = ticket(proc, other_id)
+        if other_id == ticket_id:
+            earlier = False
+            continue
+        if other.get("status") == "MERGED_INTO_TRAIN" or other_id in predecessors:
+            continue
+        # A blocked ticket remains terminal.  It can be excluded from the
+        # sequential barrier only by the narrow, audited continuation-isolation
+        # transition below.  That transition records the exact successor,
+        # merged dependency head and every shared resource that was proven
+        # quiescent; it never reopens or reclassifies the blocked ticket.
+        isolation = other.get("continuation_isolation")
+        if (
+            other.get("status") == "BLOCKED"
+            and isinstance(isolation, dict)
+            and isolation.get("released_ticket_id") == ticket_id
+            and not any(
+                value.get("ticket_id") == other_id
+                and value.get("launch_state") in ACTIVE_PHASE_STATES
+                for value in proc.get("phases", {}).values()
+                if isinstance(value, dict)
+            )
+        ):
+            continue
+        if (earlier or other.get("execution")) and not parallel_execution_proven(item, other):
             return False
     return True
 
@@ -1115,9 +1204,92 @@ def terminate_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, An
     return item
 
 
+def reclassify_acceptance_authoring(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, Any]:
+    """Close a narrowly-scoped acceptance-authoring lifecycle gap.
+
+    An independently authored acceptance suite can legitimately stop as
+    ``blocked`` only because its production binding does not exist on the
+    reserved base.  Once its paired implementation has completed, that is no
+    longer a product/input block: the authored test commit must enter the
+    normal exact-head integration and verification path.  This transition
+    deliberately preserves the original blocked evidence and never marks the
+    tests themselves green.
+    """
+    require_fields(
+        event,
+        (
+            "ticket_id", "phase_key", "acceptance_commit", "result_reference",
+            "result_sha256", "reason",
+        ),
+        "acceptance-authoring reclassification",
+    )
+    item = phase(proc, str(event["phase_key"]))
+    require(item.get("kind") == "acceptance_tests", "only acceptance-test authoring may be reclassified")
+    require(item.get("ticket_id") == str(event["ticket_id"]), "acceptance reclassification ticket mismatch")
+    require(item.get("launch_state") == "BLOCKED", "only a blocked acceptance authoring phase may be reclassified")
+    envelope = item.get("completion_envelope")
+    require(isinstance(envelope, dict) and envelope.get("phase_status") == "blocked",
+            "reclassification requires the original blocked envelope")
+    artifacts = envelope.get("artifacts") if isinstance(envelope.get("artifacts"), dict) else {}
+    require(artifacts.get("commit") == event["acceptance_commit"], "acceptance reclassification commit mismatch")
+    require(artifacts.get("result_reference") == event["result_reference"], "acceptance result reference mismatch")
+    require(artifacts.get("result_sha256") == event["result_sha256"], "acceptance result hash mismatch")
+    ticket_item = ticket(proc, str(event["ticket_id"]))
+    execution = ticket_item.get("execution") or {}
+    require(execution.get("acceptance_phase_key") == item.get("phase_key"), "phase is not the ticket acceptance phase")
+    implementation = phase(proc, str(execution.get("implementation_phase_key") or ""))
+    require(implementation.get("launch_state") == "COMPLETED",
+            "paired implementation must complete before acceptance authoring can be reclassified")
+    item["launch_state"] = "COMPLETED"
+    item["acceptance_authoring_reclassified_at"] = now_iso()
+    item["acceptance_authoring_reclassification_reason"] = str(event["reason"])
+    item["acceptance_authoring_original_status"] = "blocked"
+    item["completion_envelope"] = {
+        **envelope,
+        "phase_status": "completed",
+        "result_summary": (
+            f"{envelope.get('result_summary', '')} "
+            "Acceptance authoring is complete; execution remains pending exact-head binding and verification."
+        ).strip(),
+        "residual_risks": (
+            f"{envelope.get('residual_risks', '')} "
+            "This reclassification does not claim any oracle result or green verification."
+        ).strip(),
+        "authoring_reclassified_from": "blocked",
+        "verification_pending_reason": "The independently authored suite requires binding and execution on the integrated implementation head.",
+    }
+    ticket_item["status"] = "AWAITING_EXECUTION_INTEGRATION"
+    return item
+
+
 def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     proc = procedure(state)
     event_type = str(event.get("type") or "")
+
+    if event_type == "RUNTIME_OBSERVED":
+        require_fields(event, ("owner_thread_id", "snapshot_reference", "snapshot_sha256"), "runtime observation")
+        owner = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+        require(event["owner_thread_id"] == owner, "runtime observation must target the current owner")
+        source = Path(event["snapshot_reference"]).expanduser().resolve()
+        raw = source.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == event["snapshot_sha256"], "runtime snapshot hash mismatch")
+        observed_at = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc)
+        age = (datetime.now(timezone.utc) - observed_at).total_seconds()
+        require(0 <= age <= thread_runtime.MAX_AGE_SECONDS, "capture a fresh product task snapshot")
+        observations = thread_runtime.parse_wait_result(json.loads(raw))
+        matched = 0
+        for observation in observations:
+            for value in proc.get("phases", {}).values():
+                if value.get("launch_state") != "RUNNING" or value.get("thread_id") != observation["thread_id"]:
+                    continue
+                require(observed_at >= parse_iso(value["last_observed_at"], "phase launch time"), "runtime snapshot predates phase launch/resume")
+                value["runtime_observation"] = {
+                    **observation, "owner_thread_id": owner, "observed_at": observed_at.isoformat(),
+                    "snapshot_reference": str(source), "snapshot_sha256": event["snapshot_sha256"],
+                }
+                matched += 1
+        require(matched > 0, "snapshot contains no current running phase; preserve existing identities")
+        return
 
     if unresolved_cost_anomalies(proc) and event_type != "COST_ANOMALY_RESOLVED":
         raise ControllerError("resolve the open cost anomaly checkpoint before another transition")
@@ -1795,6 +1967,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         schedule = event.get("schedule")
         budget = event.get("train_size_budget")
         require(isinstance(schedule, dict), "dependency consolidation requires an implementation schedule")
+        require(set(schedule) == set(proc["tickets"]), "schedule must contain every selected ticket exactly once")
+        proc["execution_order"] = list(schedule)
         require(isinstance(budget, dict), "dependency consolidation requires a train size budget")
         require_fields(
             budget,
@@ -1853,6 +2027,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
                         not shared_domains and not shared_files,
                         f"parallel group {group} has an unproven collision between {left_id} and {right_id}",
                     )
+        proc["execution_order"] = ordered_execution_tickets(proc)
         proc["dependencies_consolidated"] = True
         proc["dependency_revision"] = event.get("dependency_revision") or f"dependencies-r{proc['revision'] + 1}"
         proc["train_size_budget"] = dict(budget)
@@ -2007,6 +2182,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(event.get("visibility_verified") is True, "resumed phase visibility must be verified")
         value["launch_state"] = "RUNNING"
         value["last_observed_at"] = now_iso()
+        value.pop("runtime_observation", None)
         gate = next(
             (gate for gate in proc.get("human_gates", {}).values() if gate.get("phase_key") == value["phase_key"]),
             None,
@@ -2033,6 +2209,31 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             "reason": event["reason"],
             "recorded_at": now_iso(),
         }
+        return
+
+    if event_type == "PLAN_CONTRACT_RESULT_COLLECTED":
+        # One apply/save boundary: malformed verdicts cannot strand a phase
+        # between COMPLETED and its domain result, including after a crash.
+        value = phase(proc, str(event.get("phase_key") or ""))
+        require(value.get("kind") == "plan_contract_validation", "collection requires a contract validation phase")
+        source = Path(event["result_reference"])
+        raw = source.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == event["result_sha256"], "contract result hash mismatch")
+        result = json.loads(raw)
+        validation = event["validation"]
+        for field in ("status", "ticket_id", "phase_key", "analysis_complexity", "residual_implementation_complexity",
+                      "verification_complexity", "complexity_reduction_evidence", "unresolved_implementation_difficulty"):
+            require(validation.get(field) == result.get(field), f"collected contract {field} differs from the actual result")
+        require(event["ticket_id"] == value.get("ticket_id") == result["ticket_id"], "collected contract ticket mismatch")
+        require(event["phase_key"] == result["phase_key"], "collected contract phase mismatch")
+        require(validation["validation_reference"] == event["result_reference"], "collected validation reference mismatch")
+        handle_event(state, {**event, "type": "RUNTIME_OBSERVED"})
+        observed = value.get("runtime_observation", {})
+        require(observed.get("host_id") == value.get("host_id"), "contract runtime host mismatch")
+        require(observed.get("runtime_status") == "completed" and observed.get("snapshot_sha256") == event["snapshot_sha256"],
+                "contract collection requires this task's observed completed turn")
+        handle_event(state, {**event, "type": "PHASE_COMPLETED"})
+        handle_event(state, {**validation, "type": "PLAN_CONTRACT_VALIDATION_RECORDED"})
         return
 
     if event_type == "PLAN_CONTRACT_VALIDATION_RECORDED":
@@ -2139,6 +2340,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(item.get("status") == "READY_FOR_IMPLEMENTATION", "ticket is not ready for implementation")
         require_authorized_scope(item, event, "execution pair")
         require(dependencies_satisfied(proc, item), "hard dependencies are not merged into the train")
+        require(execution_schedule_satisfied(proc, event["ticket_id"]), "execution schedule requires the preceding ticket lifecycle to merge first")
         require(active_execution_pairs(proc) < int(proc["limits"]["max_active_execution_pairs"]), "execution-pair concurrency limit reached")
         require_fields(
             event,
@@ -2278,9 +2480,11 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         value.update({key: event.get(key) for key in (
             "client_thread_id", "thread_id", "host_id", "visibility_verified", "visibility_verified_at",
             "visibility_evidence_reference", "execution_visibility", "hidden_authorization_id", "agent_session_id",
+            "callback_target_thread_id", "callback_contract_reference",
         ) if key in event})
         value["launch_state"] = launch_state
         value["last_observed_at"] = now_iso()
+        value.pop("runtime_observation", None)
         return
 
     if event_type == "PHASE_COMPLETED":
@@ -2300,6 +2504,10 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
 
     if event_type == "PHASE_TERMINATED":
         terminate_phase(event, proc)
+        return
+
+    if event_type == "ACCEPTANCE_AUTHORING_RECLASSIFIED":
+        reclassify_acceptance_authoring(event, proc)
         return
 
     if event_type == "EXECUTION_PAIR_INTEGRATED":
@@ -2393,6 +2601,77 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         }[event["next_step"]]
         return
 
+    if event_type == "BLOCKED_TICKET_CONTINUATION_ISOLATED":
+        item = ticket(proc, str(event.get("ticket_id") or ""))
+        require(item.get("status") == "BLOCKED", "only a blocked ticket can be isolated")
+        require(proc.get("dependencies_consolidated") is True, "continuation isolation requires consolidated dependencies")
+        require(not item.get("continuation_isolation"), "blocked ticket already has a continuation isolation")
+        require_fields(
+            event,
+            (
+                "isolation_id", "released_ticket_id", "blocked_failure_event_id",
+                "train_head", "dependency_evidence_reference",
+                "collision_assessment", "user_decision_reference",
+            ),
+            "blocked-ticket continuation isolation",
+        )
+        released_ticket_id = str(event["released_ticket_id"])
+        released = ticket(proc, released_ticket_id)
+        require(released_ticket_id != event["ticket_id"], "a blocked ticket cannot release itself")
+        require(released.get("status") == "READY_FOR_IMPLEMENTATION", "released ticket is not ready for implementation")
+        require(event["train_head"] == proc.get("train_head") and bool(event["train_head"]), "continuation isolation train head mismatch")
+        failure = item.get("verification_failure")
+        require(isinstance(failure, dict) and failure.get("next_step") == "block", "blocked ticket lacks preserved failure evidence")
+        require(
+            event["blocked_failure_event_id"] == failure.get("event_id"),
+            "continuation isolation does not target the preserved failure",
+        )
+        require(isinstance(event["isolation_id"], str) and bool(event["isolation_id"]), "continuation isolation id is required")
+        require(isinstance(event["dependency_evidence_reference"], str) and bool(event["dependency_evidence_reference"]), "dependency evidence reference is required")
+        require(isinstance(event["user_decision_reference"], str) and bool(event["user_decision_reference"]), "explicit user decision reference is required")
+        require(
+            not any(
+                isinstance(value, dict) and value.get("launch_state") in ACTIVE_PHASE_STATES
+                for value in proc.get("phases", {}).values()
+            ),
+            "continuation isolation requires no active phase",
+        )
+        require(
+            event["ticket_id"] not in released.get("hard_dependencies", []),
+            "released ticket has a hard dependency on the blocked ticket",
+        )
+        require(dependencies_satisfied(proc, released), "released ticket has unmerged hard dependencies")
+        assessment = event["collision_assessment"]
+        require(isinstance(assessment, dict), "continuation isolation collision assessment must be an object")
+        require_fields(assessment, ("shared_domains", "quiescent_resources"), "continuation isolation collision assessment")
+        shared_domains = sorted(set(item.get("collision_domains", [])) & set(released.get("collision_domains", [])))
+        reported_domains = assessment["shared_domains"]
+        resources = assessment["quiescent_resources"]
+        require(isinstance(reported_domains, list) and sorted(reported_domains) == shared_domains, "continuation isolation shared collision domains mismatch")
+        require(isinstance(resources, list), "continuation isolation quiescent resources must be a list")
+        resource_domains: list[str] = []
+        for resource in resources:
+            require(isinstance(resource, dict), "continuation isolation resource must be an object")
+            require_fields(resource, ("domain", "state", "evidence_reference"), "continuation isolation resource")
+            require(resource["state"] == "quiescent", "shared collision resource is not quiescent")
+            require(isinstance(resource["evidence_reference"], str) and bool(resource["evidence_reference"]), "quiescent resource evidence is required")
+            resource_domains.append(str(resource["domain"]))
+        require(sorted(resource_domains) == shared_domains and len(set(resource_domains)) == len(resource_domains), "continuation isolation resources do not cover shared domains exactly")
+        item["continuation_isolation"] = {
+            "isolation_id": event["isolation_id"],
+            "released_ticket_id": released_ticket_id,
+            "blocked_failure_event_id": event["blocked_failure_event_id"],
+            "train_head": event["train_head"],
+            "dependency_evidence_reference": event["dependency_evidence_reference"],
+            "collision_assessment": {
+                "shared_domains": list(reported_domains),
+                "quiescent_resources": [dict(resource) for resource in resources],
+            },
+            "user_decision_reference": event["user_decision_reference"],
+            "recorded_at": now_iso(),
+        }
+        return
+
     if event_type == "TICKET_PR_RECORDED":
         item = ticket(proc, str(event.get("ticket_id") or ""))
         require(item.get("status") in {"FUNCTIONAL_READY", "NEEDS_REMEDIATION", "AUTO_REVIEW_CLEAN"}, "ticket is not ready for a PR")
@@ -2446,6 +2725,73 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         if isinstance(reviews, list) and reviews:
             reviews[-1]["stale_due_to_head_drift"] = True
             reviews[-1]["superseded_by_head"] = event["head_commit"]
+        return
+
+    if event_type == "FINAL_PR_HEAD_DRIFT_RECORDED":
+        final = proc["finalization"]
+        require(
+            final.get("status") in {
+                "FINAL_PR_OPEN", "FINAL_PR_REVIEW", "AWAITING_FINAL_FEEDBACK_COLLECTION",
+                "FINAL_FEEDBACK_COLLECTION", "AWAITING_FINAL_FINDING_RECONCILIATION",
+                "FINAL_PR_REVIEW_CLEAN",
+            },
+            "final PR head drift cannot be recorded in the current state",
+        )
+        pull_request = final.get("pull_request")
+        require(isinstance(pull_request, dict), "final pull request has not been recorded")
+        require_fields(
+            event,
+            (
+                "previous_head_commit", "head_commit", "relationship",
+                "relationship_evidence_reference", "observed_at", "source",
+                "reason",
+            ),
+            "final pull request head drift",
+        )
+        require(
+            event["previous_head_commit"] == pull_request.get("head_commit"),
+            "final head drift previous head mismatch",
+        )
+        require(event["head_commit"] != event["previous_head_commit"], "final head drift must change the head")
+        require(event["relationship"] == "descendant", "final head drift must be a proven descendant")
+        parse_iso(str(event["observed_at"]), "final head drift observation time")
+        active_final_reviews = [
+            value for value in proc.get("phases", {}).values()
+            if value.get("kind") == "final_review"
+            and value.get("launch_state") in ACTIVE_PHASE_STATES
+        ]
+        require(
+            not any(value.get("launch_state") in {"RUNNING", "NEEDS_INPUT"} for value in active_final_reviews),
+            "cannot supersede a running final review; collect or terminate it first",
+        )
+        for value in active_final_reviews:
+            value["launch_state"] = "SUPERSEDED"
+            value["superseded_by_head"] = event["head_commit"]
+            value["superseded_at"] = now_iso()
+        drift = {
+            "previous_head_commit": event["previous_head_commit"],
+            "head_commit": event["head_commit"],
+            "relationship": event["relationship"],
+            "relationship_evidence_reference": event["relationship_evidence_reference"],
+            "observed_at": event["observed_at"],
+            "source": event["source"],
+            "reason": event["reason"],
+            "superseded_review_evidence_reference": event.get("superseded_review_evidence_reference"),
+        }
+        pull_request.setdefault("head_drift_history", []).append(drift)
+        pull_request["head_commit"] = event["head_commit"]
+        proc["train_head"] = event["head_commit"]
+        if isinstance(final.get("verification"), dict):
+            stale_verification = dict(final["verification"])
+            stale_verification["stale_due_to_head_drift"] = True
+            stale_verification["superseded_by_head"] = event["head_commit"]
+            final.setdefault("verification_history", []).append(stale_verification)
+        for key in (
+            "verification", "review", "review_phase_key", "feedback_collection",
+            "feedback_snapshot", "finding_ledger", "evidence",
+        ):
+            final.pop(key, None)
+        final["status"] = "FINAL_PR_OPEN"
         return
 
     if event_type == "TICKET_PR_READY_RECORDED":
@@ -2546,7 +2892,18 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         return
 
     if event_type == "REVIEW_RECORDED":
-        completed = complete_phase(event, proc)
+        review_phase = phase(proc, str(event.get("phase_key") or ""))
+        # A recovered desktop review may already have had its validated
+        # completion envelope recorded by the generic collector before the
+        # specialized finding inventory arrives.  Preserve that durable
+        # completion rather than making the run unrecoverable; the remainder
+        # of this handler still requires the exact review head and complete
+        # finding inventory.
+        completed = (
+            review_phase
+            if review_phase.get("launch_state") == "COMPLETED"
+            else complete_phase(event, proc)
+        )
         require(completed.get("kind") == "review", "phase is not a review")
         require_fields(event, ("reviewed_head", "status", "finding_inventory_complete"), "review result")
         require(event["status"] in {"clean", "changes_requested"}, "invalid review status")
@@ -2990,6 +3347,35 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         proc["train_head"] = event["train_head"]
         return
 
+    if event_type == "FINAL_PR_METADATA_REMEDIATION_RECORDED":
+        final = proc["finalization"]
+        require(final.get("status") == "AWAITING_FINAL_PR_UPDATE", "metadata remediation is not awaiting final PR update")
+        require_fields(
+            event,
+            ("phase_key", "url", "head_commit", "evidence_reference", "repository_files_modified"),
+            "final PR metadata remediation",
+        )
+        require(event.get("repository_files_modified") is False, "metadata remediation must not change repository files")
+        remediation_phase = phase(proc, str(event["phase_key"]))
+        require(remediation_phase.get("kind") == "final_remediation", "metadata remediation phase kind mismatch")
+        require(remediation_phase.get("launch_state") == "COMPLETED", "metadata remediation phase is not completed")
+        pull_request = final.get("pull_request") or {}
+        require(event["url"] == pull_request.get("url"), "metadata remediation PR URL mismatch")
+        require(event["head_commit"] == pull_request.get("head_commit"), "metadata remediation must preserve the final PR head")
+        require(event["head_commit"] == remediation_phase.get("base"), "metadata remediation phase base mismatch")
+        final["metadata_remediation"] = dict(event)
+        # PR text can alter the final review surface without altering the Git
+        # head. Keep exact-head code verification, but require a new focused
+        # final review and feedback/ledger collection.
+        final.pop("review", None)
+        final.pop("review_phase_key", None)
+        final.pop("feedback_collection", None)
+        final.pop("feedback_snapshot", None)
+        final.pop("finding_ledger", None)
+        final.pop("evidence", None)
+        final["status"] = "FINAL_PR_OPEN"
+        return
+
     if event_type == "FINAL_PR_READY_RECORDED":
         final = proc["finalization"]
         require(final.get("status") == "FINAL_PR_OPEN", "final pull request is not open")
@@ -3157,7 +3543,12 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         final = proc["finalization"]
         require(isinstance(final.get("pull_request"), dict), "final PR must exist before final review")
         require(isinstance(final.get("verification"), dict), "final verification must pass before final review")
-        completed = complete_phase(event, proc)
+        review_phase = phase(proc, str(event.get("phase_key") or ""))
+        if review_phase.get("launch_state") == "COMPLETED":
+            completed = review_phase
+            require(event.get("envelope") == review_phase.get("completion_envelope"), "final review envelope differs from captured completion")
+        else:
+            completed = complete_phase(event, proc)
         require(completed.get("kind") == "final_review", "phase is not the final train review")
         require(event.get("review_kind") == completed.get("review_kind"), "final review kind mismatch")
         require(event.get("status") in {"clean", "changes_requested"}, "invalid final review status")
@@ -3326,8 +3717,21 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         final = proc["finalization"]
         require(final.get("status") == "NEEDS_FINAL_REMEDIATION", "final remediation requires requested changes")
         cycles = int(final.get("remediation_cycles", 0))
-        require(cycles < 2, "final remediation cycle limit reached")
         require_fields(event, ("phase_key", "base_commit", "branch", "criticality", "complexity", "model", "reasoning_effort"), "final remediation dispatch")
+        test_only_extension = (
+            cycles == AUTOMATIC_REMEDIATION_CYCLE_LIMIT
+            and final.get("verification_failure", {}).get("failure_class") == "test-defect"
+            and event.get("criticality") == "LOW"
+            and event.get("complexity") == "LOW"
+            and event.get("test_only_remediation") is True
+            and event.get("production_files_modified") is False
+        )
+        cycle_limit = (
+            FINAL_TEST_ONLY_REMEDIATION_CYCLE_LIMIT
+            if test_only_extension
+            else AUTOMATIC_REMEDIATION_CYCLE_LIMIT
+        )
+        require(cycles < cycle_limit, "final remediation cycle limit reached")
         require(
             event.get("scope_conformance") == "within-authorized-scope",
             "final remediation must remain within the authorized ticket scopes",
@@ -3359,6 +3763,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         final.pop("remediation_pull_request", None)
         final.pop("remediation_merge", None)
         final["remediation_cycles"] = cycles + 1
+        if test_only_extension:
+            final["test_only_remediation_extension_used"] = True
         final["status"] = "FINAL_PR_FIXING"
         return
 
@@ -3590,6 +3996,39 @@ def unity_acquire_action(
 
 
 def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = _next_actions(state)
+    proc = procedure(state)
+    if proc.get("run_status") == "COMPLETED":
+        return actions
+    owner = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+    outcomes, unverified = [], []
+    for value in proc.get("phases", {}).values():
+        if value.get("launch_state") != "RUNNING" or value.get("execution_visibility") != "user-visible":
+            continue
+        status, reason = thread_runtime.phase_observation(value, owner)
+        item = {"phase_key": value["phase_key"], "thread_id": value.get("thread_id"),
+                "host_id": value.get("host_id"), "runtime_status": status, "reason": reason}
+        if status in {"completed", "failed", "interrupted", "needs_input"}:
+            if value.get("kind") == "plan_contract_validation" and status == "completed":
+                item["collector"] = {"script": "scripts/continuation_adapter.py", "command": "collect-contract",
+                                     "requires_collection_spec": False, "result_source": "existing child result_reference"}
+            outcomes.append(item)
+        elif status != "running":
+            unverified.append(item)
+    priority = {"COMPLETE_CONTROLLED_ORCHESTRATOR_HANDOFF", "REQUEST_ORCHESTRATOR_CONFIRMATION",
+                "RESOLVE_COST_ANOMALY_CHECKPOINT", "ANNOUNCE_HUMAN_GATE",
+                "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER", "CONFIGURE_SUPERVISION_BEFORE_DISPATCH"}
+    if outcomes and not any(x["action"] in priority for x in actions):
+        return [{"action": "COLLECT_OBSERVED_PHASE_RESULTS", "phases": outcomes,
+                 "may_relaunch": False, "instruction": "Read existing results; apply validated completion/input events before scheduling."}] + [x for x in actions if x["action"] == "AWAIT_HUMAN_GATE"]
+    waits = {"WAIT_FOR_PHASE_TRANSITION", "WAIT_FOR_UNITY_SLOT", "AWAIT_HUMAN_GATE"}
+    if unverified and all(x["action"] in waits for x in actions) and proc.get("supervision", {}).get("mode") != "FOREGROUND_WAIT":
+        return [{"action": "OBSERVE_ACTIVE_PHASES", "phases": unverified,
+                 "may_relaunch": False, "instruction": "Capture fresh wait_threads polls; omitted targets remain unobserved."}] + [x for x in actions if x["action"] == "AWAIT_HUMAN_GATE"]
+    return actions
+
+
+def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     proc = procedure(state)
     if proc.get("run_status") == "COMPLETED":
         return []
@@ -3618,7 +4057,17 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     if (
         supervision.get("status") == "ACTIVE"
         and supervision.get("mode") == "EVENT_CALLBACK"
-        and supervision.get("callback_target_thread_id") != current_owner_thread_id
+        and (
+            supervision.get("callback_target_thread_id") != current_owner_thread_id
+            or any(
+                value.get("launch_state") == "RUNNING"
+                and value.get("execution_visibility") == "user-visible"
+                and (
+                    value.get("callback_target_thread_id") != current_owner_thread_id
+                    or not value.get("callback_contract_reference")
+                ) for value in proc.get("phases", {}).values()
+            )
+        )
     ):
         return [{
             "action": "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER",
@@ -3941,7 +4390,7 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     ready = [
         ticket_id for ticket_id, value in proc["tickets"].items()
         if value["status"] == "READY_FOR_IMPLEMENTATION"
-        and dependencies_satisfied(proc, value)
+        and execution_schedule_satisfied(proc, ticket_id)
         and (
             value.get("analysis", {}).get("complexity") not in {"HIGH", "MAXIMUM"}
             or value.get("plan_contract_validation", {}).get("status") == "passed"
@@ -3956,11 +4405,6 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         if active:
             actions.append({"action": "WAIT_FOR_PHASE_TRANSITION", "phase_keys": [value["phase_key"] for value in active]})
         return actions + gate_actions
-    if active:
-        return [{"action": "WAIT_FOR_PHASE_TRANSITION", "phase_keys": [value["phase_key"] for value in active]}] + gate_actions
-    if waiting_gates:
-        return [{"action": "AWAIT_HUMAN_GATE", "gate": gate} for gate in waiting_gates]
-
     actions: list[dict[str, Any]] = []
     available_unity = max(0, int(proc["limits"].get("max_unity_editors", 0)) - active_unity_leases(proc))
     for ticket_id, value in proc["tickets"].items():
@@ -4019,7 +4463,13 @@ def next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
         elif status == "READY_TO_MERGE":
             actions.append({"action": "MERGE_TICKET_PR_INTO_TRAIN", "ticket_id": ticket_id})
     if actions:
-        return actions
+        if active:
+            actions.append({"action": "WAIT_FOR_PHASE_TRANSITION", "phase_keys": [value["phase_key"] for value in active]})
+        return actions + gate_actions
+    if active:
+        return [{"action": "WAIT_FOR_PHASE_TRANSITION", "phase_keys": [value["phase_key"] for value in active]}] + gate_actions
+    if waiting_gates:
+        return gate_actions
 
     if all(value["status"] in TERMINAL_TICKET_STATES for value in proc["tickets"].values()):
         final = proc["finalization"]
@@ -4098,6 +4548,7 @@ def active_phase_inventory(state: dict[str, Any]) -> list[dict[str, Any]]:
         )
         ticket_id = value.get("ticket_id") or "train"
         kind = value.get("kind") or "phase"
+        runtime_status, _ = thread_runtime.phase_observation(value, (state.get("orchestrator_lease") or {}).get("owner_thread_id"))
         inventory.append({
             "phase_key": value.get("phase_key"),
             "ticket_id": value.get("ticket_id"),
@@ -4109,6 +4560,8 @@ def active_phase_inventory(state: dict[str, Any]) -> list[dict[str, Any]]:
             "execution_visibility": value.get("execution_visibility"),
             "visibility_verified": value.get("visibility_verified") is True,
             "user_visible": user_visible,
+            "runtime_status": runtime_status,
+            "runtime_observed_at": (value.get("runtime_observation") or {}).get("observed_at"),
         })
     return inventory
 
@@ -4121,6 +4574,7 @@ def supervision_projection(
     inventory = active_phase_inventory(state)
     visible = [item for item in inventory if item["user_visible"]]
     invisible = [item for item in inventory if not item["user_visible"]]
+    runtime_unverified = [item for item in visible if item["runtime_status"] != "running"]
     pending = state.get("pending_human_action")
     automatic = [
         action for action in resolved_actions
@@ -4141,6 +4595,8 @@ def supervision_projection(
         activity_state = "AWAITING_HUMAN_ONLY"
     elif invisible:
         activity_state = "ACTIVE_WITH_VISIBILITY_GAP"
+    elif runtime_unverified:
+        activity_state = "ACTIVITY_REQUIRES_OBSERVATION_OR_COLLECTION"
     elif visible:
         activity_state = "ACTIVE_VISIBLE_TASKS"
     elif automatic:
@@ -4153,6 +4609,8 @@ def supervision_projection(
         "active_unverified_or_hidden_phases": invisible,
         "active_phase_count": len(inventory),
         "visible_task_count": len(visible),
+        "runtime_confirmed_active_count": len(visible) - len(runtime_unverified),
+        "runtime_unverified_task_count": len(runtime_unverified),
         "pending_human_action": bool(pending),
         "automatic_action_count": len(automatic),
         "orchestrator_status_required": bool(invisible),
@@ -4160,7 +4618,7 @@ def supervision_projection(
         "may_pause_or_delete_watcher": completed or human_only,
         "watcher_action": "PAUSE_OR_DELETE" if human_only else ("DELETE" if completed else "KEEP"),
         "user_signal": (
-            "visible-child-tasks" if visible
+            "visible-child-tasks" if visible and not runtime_unverified
             else "single-action-required-message" if human_only
             else "orchestrator-transition"
         ),
@@ -4410,10 +4868,12 @@ def apply_event(args: argparse.Namespace) -> int:
         state = run_registry.load_json(path)
         proc = procedure(state)
         applied = proc.setdefault("applied_events", {})
+        if getattr(args, "owner_thread_id", None):
+            require(args.owner_thread_id == (state.get("orchestrator_lease") or {}).get("owner_thread_id"), "event adapter no longer owns the run")
         prior = applied.get(event["event_id"])
         if prior:
             require(prior == digest, "event_id collision with different payload")
-            sys.stdout.write(json.dumps({"status": "duplicate-idempotent", **compact_status(state)}, indent=2) + "\n")
+            sys.stdout.write(json.dumps({"status": "duplicate-idempotent", **compact_status(state), "turn_control": turn_control(state)}, indent=2) + "\n")
             return 0
         require(args.expected_revision == proc.get("revision"), f"revision conflict: expected {args.expected_revision}, current {proc.get('revision')}")
         handle_event(state, event)
@@ -4427,7 +4887,7 @@ def apply_event(args: argparse.Namespace) -> int:
         })
         state["manifest_updated_at"] = proc["updated_at"]
         run_registry.save_json(path, state)
-    output = {"status": "applied", "event": event["type"], **compact_status(state), "next_actions": next_actions(state)}
+    output = {"status": "applied", "event": event["type"], **compact_status(state), "next_actions": next_actions(state), "turn_control": turn_control(state)}
     sys.stdout.write(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
     return 0
 
@@ -4440,10 +4900,10 @@ def show(args: argparse.Namespace) -> int:
     return 0
 
 
-def check(args: argparse.Namespace) -> int:
-    state = run_registry.load_json(args.state)
-    issues = completion_issues(state) if args.mode == "completion" else []
-    if args.mode == "yield":
+def yield_issues(state: dict[str, Any]) -> list[str]:
+    """Shared by the CLI gate and every decision packet; no transcript needed."""
+    issues: list[str] = []
+    if procedure(state).get("run_status") != "COMPLETED":
         actions = next_actions(state)
         automatic = [
             action for action in actions
@@ -4452,6 +4912,12 @@ def check(args: argparse.Namespace) -> int:
         if automatic:
             issues.append("automatic actions remain: " + ", ".join(action["action"] for action in automatic))
         active = compact_status(state)["active_phases"]
+        owner = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+        for value in procedure(state).get("phases", {}).values():
+            if value.get("launch_state") == "RUNNING" and value.get("execution_visibility") == "user-visible":
+                _, runtime_issue = thread_runtime.phase_observation(value, owner)
+                if runtime_issue:
+                    issues.append(f"{value['phase_key']}: {runtime_issue}")
         supervision = procedure(state).get("supervision", {})
         if active and supervision.get("status") != "ACTIVE":
             issues.append("active phases have no deterministic supervision")
@@ -4463,6 +4929,16 @@ def check(args: argparse.Namespace) -> int:
             issues.append("background supervision is not verified as a zero-model process")
         if active and supervision.get("mode") == "EVENT_CALLBACK" and supervision.get("callback_verified") is not True:
             issues.append("event-callback supervision is not verified")
+        if active and supervision.get("mode") not in {"FOREGROUND_WAIT", "EVENT_CALLBACK", "BACKGROUND_WATCHER"}:
+            issues.append("active phases have an unsupported supervision mode")
+        if any(
+            not item["user_visible"] and not (
+                item.get("execution_visibility") == "hidden-authorized"
+                and supervision.get("mode") == "BACKGROUND_WATCHER"
+                and supervision.get("watcher_consumes_model_tokens") is False
+            ) for item in active_phase_inventory(state)
+        ):
+            issues.append("active launch has no verified visible task; reconcile before yielding")
         if (
             active
             and supervision.get("mode") == "EVENT_CALLBACK"
@@ -4473,6 +4949,21 @@ def check(args: argparse.Namespace) -> int:
         pending_handoff = state.get("pending_orchestrator_handoff")
         if isinstance(pending_handoff, dict) and pending_handoff.get("status") == "PREPARED":
             issues.append("controlled orchestrator handoff is prepared but not accepted")
+    return issues
+
+
+def turn_control(state: dict[str, Any]) -> dict[str, Any]:
+    issues = yield_issues(state)
+    return {
+        "may_end_turn": not issues,
+        "disposition": "CONTINUE_IN_CURRENT_TURN" if issues else "MAY_YIELD",
+        "reasons": issues,
+    }
+
+
+def check(args: argparse.Namespace) -> int:
+    state = run_registry.load_json(args.state)
+    issues = completion_issues(state) if args.mode == "completion" else yield_issues(state)
     output = {"status": "pass" if not issues else "fail", "mode": args.mode, "issues": issues}
     sys.stdout.write(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
     return 0 if not issues else 2

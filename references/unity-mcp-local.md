@@ -164,6 +164,12 @@ On acquisition, the manager:
 10. records `BLOCKED_HUMAN` with diagnostics only after the bounded eligible
     pool or readiness recovery is exhausted.
 
+A missing managed MCP config at an expected Git revision is retried on the
+next acquisition because it can be caused by a revision that had not yet been
+fetched locally. Once the revision is available, that transient quarantine is
+cleared by successful preparation. Dirty worktrees, MCP/authentication errors,
+and other unsafe failures remain `BLOCKED_HUMAN` and are not silently retried.
+
 The controller refuses to launch or resume an MCP-backed phase without its
 matching active lease. A completed, failed, blocked, or input-waiting phase
 releases the slot deterministically. User silence never consumes an editor

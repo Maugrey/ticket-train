@@ -188,6 +188,33 @@ worktree, expected Git head, and argv list for every command. The runner writes
 full stdout/stderr logs outside the repository, verifies that the head did not
 change, and returns a hashed structured result with `model_tokens = 0`.
 
+For ticket and final integrated verification, invoke that runner through:
+
+```powershell
+python scripts/verification_adapter.py --state <manifest.json> --plan <plan.json> --evidence <event-template.json> --output <unique-result.json> --logs-dir <external-logs>
+```
+
+The evidence template is a `VERIFICATION_RECORDED` or
+`FINAL_VERIFICATION_RECORDED` event containing the contract's baseline,
+independent-test, coverage, environment and applicable boundary attestations.
+Do not predeclare attestations without evidence. The adapter fills only the
+measured result, exact head, commands, logs and hash; it applies the controller
+event and returns the next decision packet in the same invocation, on success
+AND failure. It does not classify defects or weaken verification gates.
+
+If recording fails, the result remains on disk. Repeating the same invocation
+retries registration idempotently without repeating tests. Changed plan bytes
+or a changed checkout head are rejected; reconcile explicitly and use a fresh
+result path for a genuinely new verification attempt. Legacy results without
+a plan hash must be reconciled through the controller, not overwritten.
+The caller retains the foreground process session until this invocation
+finishes; a tool's output-yield interval is not a process timeout. Progress
+messages must identify a real process/task, not just a prepared action.
+
+Failures retain bounded stdout as well as stderr, because test runners often
+write assertions to stdout. Launch failures and timeouts produce durable
+failed results even when no process exit code exists.
+
 When a verification plan includes Unity Editor, Play Mode, UI, or build tools,
 first acquire the controller-authorized slot at the exact tested head. Invoke
 the local MCP through that editor only. The slot lease is execution evidence;
@@ -255,7 +282,12 @@ change invalidates affected green evidence.
 
 ## Functional-readiness gate
 
-Before dispatching automated code review, run:
+For procedural runs, `VERIFICATION_RECORDED` must transition the ticket to
+`FUNCTIONAL_READY` before automated review is dispatched. The procedural
+controller is authoritative; do not populate a duplicate `control` object
+just to satisfy a legacy guard.
+
+For legacy-manifest diagnostics only, run:
 
 ```powershell
 python scripts/control_guard.py check-verification --state <run-manifest.json> --ticket <ticket-id>

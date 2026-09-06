@@ -22,7 +22,7 @@ import train_controller
 import orchestration_metrics
 
 
-RUNNER_VERSION = "1.0"
+RUNNER_VERSION = "1.2"
 PACKET_FORMAT = "ticket-train-decision-v1"
 DEFAULT_PACKET_MAX_BYTES = 16_384
 DEFAULT_SOFT_TOKEN_LIMIT = 10_000_000
@@ -36,6 +36,10 @@ UNITY_SLOT_ACTIONS = {
     "INITIALIZE_UNITY_SLOTS_DETERMINISTICALLY",
     "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY",
     "RELEASE_UNITY_SLOT_DETERMINISTICALLY",
+}
+VERIFICATION_ACTIONS = {
+    "RUN_DETERMINISTIC_TICKET_VERIFICATION",
+    "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY",
 }
 
 
@@ -187,16 +191,6 @@ def refresh_rotation(control_plane: dict[str, Any], owner: str) -> dict[str, Any
     return rotation
 
 
-def compact_gate(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    return {
-        key: value.get(key)
-        for key in ("gate_id", "kind", "ticket_id", "revision", "status")
-        if value.get(key) is not None
-    }
-
-
 def compact_context_packet(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -208,28 +202,24 @@ def compact_context_packet(value: Any) -> dict[str, Any] | None:
 
 
 def compact_action(action: dict[str, Any]) -> dict[str, Any]:
-    allowed = (
-        "action", "phase_key", "phase_keys", "kind", "ticket_id", "tickets",
-        "model", "reasoning_effort", "base", "branch", "thread_id",
-        "head_commit", "collection_id", "deadline_at", "model_tokens",
-        "required_visibility", "completion_callback", "target_thread_id",
-        "watcher_id", "allowed_replacements",
-    )
-    result = {key: action.get(key) for key in allowed if action.get(key) is not None}
+    # Actions are executable contracts, not narrative summaries. A whitelist
+    # silently dropped Unity leases, input answers and reconciliation routes.
+    # Preserve all controller fields; the packet byte limit still fails closed.
+    result = dict(action)
     action_name = str(action.get("action"))
     executor_kind = orchestration_metrics.classify_action(action_name)
     result["executor_kind"] = executor_kind
     result["authorized_handler"] = (
         "scripts/unity_slot_adapter.py"
         if action_name in UNITY_SLOT_ACTIONS
+        else "scripts/verification_adapter.py"
+        if action_name in VERIFICATION_ACTIONS
         else "main-thread-controller-adapter"
         if executor_kind == "adapter"
         else "named-deterministic-command"
         if executor_kind == "deterministic"
         else "fresh-technical-model-task"
     )
-    if "gate" in action:
-        result["gate"] = compact_gate(action.get("gate"))
     if "context_packet" in action:
         result["context_packet"] = compact_context_packet(action.get("context_packet"))
     if "anomalies" in action and isinstance(action["anomalies"], list):
@@ -281,7 +271,7 @@ def build_packet(state: dict[str, Any], control_plane: dict[str, Any]) -> dict[s
             for key in (
                 "gate_id", "gate_type", "ticket_id", "revision", "reason",
                 "decision_summary", "blocked_scope", "continuing_scope",
-                "accepted_replies", "notification_status",
+                "accepted_replies", "notification_status", "question",
             )
             if pending_action.get(key) is not None
         }
@@ -314,6 +304,7 @@ def build_packet(state: dict[str, Any], control_plane: dict[str, Any]) -> dict[s
         },
         "pending_orchestrator_handoff": state.get("pending_orchestrator_handoff"),
         "next_actions": actions,
+        "turn_control": train_controller.turn_control(state),
     }
     return packet
 
@@ -321,12 +312,24 @@ def build_packet(state: dict[str, Any], control_plane: dict[str, Any]) -> dict[s
 def write_packet(state_path: Path, control_plane: dict[str, Any], packet: dict[str, Any], output_dir: Path | None) -> dict[str, Any]:
     semantic_hash = sha256_json(packet)
     if semantic_hash == control_plane.get("last_semantic_hash"):
+        if packet["wake_kind"] != "NO_MODEL_WAKE":
+            # Delivery is not execution. Reuse the same packet until the
+            # controller observes an outcome; never launch a duplicate blindly.
+            return {
+                "status": "action-pending",
+                "wake_kind": packet["wake_kind"],
+                "semantic_hash": semantic_hash,
+                "packet_reference": control_plane.get("last_packet_reference"),
+                "controller_revision": packet["controller_revision"],
+                "turn_control": packet["turn_control"],
+            }
         control_plane["suppressed_unchanged_observations"] = int(control_plane.get("suppressed_unchanged_observations", 0)) + 1
         return {
             "status": "unchanged-suppressed",
             "wake_kind": "NO_MODEL_WAKE",
             "semantic_hash": semantic_hash,
             "packet_reference": control_plane.get("last_packet_reference"),
+            "turn_control": packet["turn_control"],
         }
     sequence = int(control_plane.get("packet_sequence", 0)) + 1
     stamped = {**packet, "packet_sequence": sequence, "generated_at": now_iso(), "semantic_hash": semantic_hash}
@@ -351,6 +354,7 @@ def write_packet(state_path: Path, control_plane: dict[str, Any], packet: dict[s
         "packet_reference": str(destination),
         "packet_bytes": len(encoded),
         "controller_revision": packet["controller_revision"],
+        "turn_control": packet["turn_control"],
     }
 
 
@@ -358,6 +362,8 @@ def step(args: argparse.Namespace) -> int:
     path = args.state.expanduser().resolve()
     with run_registry.directory_lock(path.parent):
         state = run_registry.load_json(path)
+        if getattr(args, "owner_thread_id", None):
+            require(current_owner(state) == args.owner_thread_id, "adapter no longer owns the run")
         train_controller.migrate_procedure(state)
         control_plane = ensure_control_plane(state)
         packet = build_packet(state, control_plane)

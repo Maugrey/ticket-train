@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -435,9 +435,85 @@ def status(args: argparse.Namespace) -> None:
     sys.stdout.write(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
 
 
+def phase_candidates(args: argparse.Namespace) -> None:
+    """Bounded read-only fallback when the task list omits a new worktree task.
+
+    Local session records only suggest IDs. The product read_task operation
+    must still verify identity/visibility; absence never authorizes a retry.
+    """
+    state = load_json(args.state)
+    phase = state["procedure"]["phases"][args.phase_key]
+    created = datetime.fromisoformat(phase["created_at"].replace("Z", "+00:00"))
+    owner = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+    root = args.sessions_root
+    if root is None:
+        root = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "sessions"
+    # Include the preceding local-calendar day to tolerate timezone boundaries.
+    start = created.astimezone(timezone.utc).date() - timedelta(days=1)
+    end = datetime.now(timezone.utc).date()
+    days = min((end - start).days + 1, 8)
+    paths = []
+    for offset in range(max(0, days)):
+        day = start + timedelta(days=offset)
+        paths.extend((root / day.strftime("%Y/%m/%d")).glob("rollout-*.jsonl"))
+    candidates = []
+    scanned = 0
+    incomplete = (end - start).days + 1 > 8 or len(paths) > 500
+    token = re.compile(r"(?<![\w-])" + re.escape(args.phase_key) + r"(?![\w-])")
+    for path in sorted(paths)[:500]:
+        scanned += 1
+        try:
+            with path.open("rb") as handle:
+                # Never read a task's accumulated transcript or reasoning.
+                header = handle.read(262144)
+            lines = header.splitlines()
+            meta = json.loads(lines[0])
+            if meta.get("type") != "session_meta":
+                continue
+            info = meta["payload"]
+            task_id = info.get("id") or info.get("session_id")
+            if task_id == owner or not task_id:
+                continue
+            stamp = datetime.fromisoformat(info["timestamp"].replace("Z", "+00:00"))
+            if stamp < created - timedelta(seconds=5):
+                continue
+            for line in lines[1:]:
+                record = json.loads(line)
+                payload = record.get("payload", {})
+                if record.get("type") != "response_item":
+                    continue
+                if payload.get("role") == "assistant":
+                    break
+                prompt = ""
+                if payload.get("role") == "user":
+                    prompt = "\n".join(block.get("text", "") for block in payload.get("content", []) if isinstance(block, dict))
+                elif payload.get("type") == "function_call_output" and payload.get("name") == "create_thread":
+                    # Desktop materialization injects its initial request here.
+                    output = payload.get("output")
+                    if isinstance(output, str) and "<codex_delegation>" in output:
+                        prompt = output
+                if token.search(prompt) and str(state["run_id"]) in prompt:
+                    candidates.append({"thread_id": task_id, "cwd": info.get("cwd"), "session_reference": str(path), "visibility_verified": False})
+                    break
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            incomplete = True
+    sys.stdout.write(json.dumps({
+        "status": "candidates-found" if candidates else "unresolved",
+        "phase_key": args.phase_key, "candidates": candidates[:8],
+        "scanned_headers": scanned, "scan_incomplete": incomplete or len(candidates) > 8,
+        "visibility_requires_product_read": True, "may_create_replacement": False,
+    }, ensure_ascii=False, indent=2) + "\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command_name", required=True)
+
+    resolve = subparsers.add_parser("phase-candidates")
+    resolve.add_argument("--state", type=Path, required=True)
+    resolve.add_argument("--phase-key", required=True)
+    resolve.add_argument("--sessions-root", type=Path)
+    resolve.set_defaults(handler=phase_candidates)
 
     thread = subparsers.add_parser("thread-event")
     thread.add_argument("--state", type=Path, required=True)

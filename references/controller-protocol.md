@@ -72,6 +72,25 @@ handler is `scripts/unity_slot_adapter.py` may invoke that resource adapter;
 `main-thread-controller-adapter` means apply the named controller transition
 first.
 
+The response/runtime adapter is `scripts/continuation_adapter.py`; its command
+contract is in [control-plane-runner.md](control-plane-runner.md). The
+`RUNTIME_OBSERVED` event accepts `owner_thread_id`, `snapshot_reference`, and
+`snapshot_sha256` alongside the standard event ID/revision. It reads raw
+product polls and records only observed current phase identities. It never
+marks a technical phase completed automatically. Runtime observations remain
+permitted during a cost checkpoint because observing is not new execution.
+Launch/resume receipts invalidate previous liveness evidence. A visible
+`RUNNING` phase without fresh evidence cannot pass the yield guard; observed
+terminal phases produce `COLLECT_OBSERVED_PHASE_RESULTS`, not a replacement
+dispatch. `OBSERVE_ACTIVE_PHASES` is a bounded task-tool adapter action.
+
+Events submitted through the continuation adapter check the caller's
+`owner_thread_id` inside the controller write lock, without altering the event
+payload or breaking replay of events previously applied by the CLI. Phase children
+deliver artifacts and envelopes to this owner; they do not apply events or
+silently take over orchestration. Existing scope, approval and route checks
+still apply to every event, including resumed runs.
+
 ## Bootstrap
 
 Create or adopt the canonical run with `run_registry.py`, then bootstrap the
@@ -159,7 +178,13 @@ orchestrator must remain in the same turn and wait for transitions; the yield
 guard rejects every queued, running, or launch-unknown phase in that mode.
 `EVENT_CALLBACK` requires a verified callback target equal to the current
 orchestrator owner and injects that callback contract into each visible child
-dispatch. `BACKGROUND_WATCHER` requires both a watcher ID and deterministic
+dispatch. Record `callback_target_thread_id` and `callback_contract_reference`
+on each running phase's `PHASE_LAUNCH_OBSERVED`, citing the actual launch or
+follow-up message that carried the contract. A global `callback_verified`
+flag alone cannot prove delivery to a child. Missing or stale per-child proof
+returns `RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER`; deliver the contract
+and update the same phase observation, never create a replacement task.
+`BACKGROUND_WATCHER` requires both a watcher ID and deterministic
 evidence that it consumes zero model tokens. A recurring Codex automation that
 opens a model turn cannot satisfy this requirement.
 Legacy or resumed supervision without that evidence yields
@@ -223,6 +248,13 @@ adapter injects those recorded values into the completion event; it must not
 substitute a child's natural-language model name or UI label. A child's claim
 is diagnostic text only and cannot create a routing gate or authorize a
 rerun.
+
+For bounded contract validations, `PLAN_CONTRACT_RESULT_COLLECTED` is the
+atomic collector transaction emitted by `continuation_adapter.py collect-contract`.
+It verifies the actual result hash and observed completed task, then applies
+`PHASE_COMPLETED` and `PLAN_CONTRACT_VALIDATION_RECORDED` in a single revision.
+Both transitions retain their existing checks. An invalid verdict cannot leave
+a partially completed phase. Other phases retain their specialized events.
 
 Store detailed logs outside the repository. Events contain concise evidence
 and durable references, not full transcripts or secrets.
@@ -300,6 +332,11 @@ The following gates are enforced as code:
     gate, and a controller-recorded run-scoped, ticket-scoped, single-use
     exception. The exception grants exactly one cycle and is consumed at
     dispatch.
+    Final-train remediation has one separate deterministic exception: after
+    two cycles, a third cycle is allowed only for an exact-head `test-defect`
+    routed `LOW/LOW` whose dispatch declares `test_only_remediation: true` and
+    `production_files_modified: false`. It cannot change production files and
+    cannot be repeated.
 19. The ticket cannot merge until review is clean, live exact-head GitHub
     checks pass, Copilot is terminal and dispositioned, and the exact human
     pre-merge gate, when applicable, is approved. Agent merges use only
@@ -318,7 +355,12 @@ The following gates are enforced as code:
 24. Blocking final-review findings enter at most two routed final-remediation
     cycles; every updated PR head invalidates prior verification and review,
     GitHub feedback snapshot, and ledger, then receives targeted follow-up
-    review unless material scope changed.
+    review unless material scope changed. A final-remediation phase that
+    changes only the final PR's metadata may use
+    `FINAL_PR_METADATA_REMEDIATION_RECORDED` instead of fabricating an empty
+    repository commit: it preserves the exact-head code verification, records
+    a no-repository-files proof, and invalidates final review, feedback, and
+    ledger for a focused same-head follow-up review.
 25. CI, Copilot disposition, finding ledger, token ledger, manual validation,
     attention points, task inventory, and the completion report are recorded
     before `RUN_COMPLETED`.
@@ -383,14 +425,55 @@ The adapter follows this loop:
 
 1. Apply only changed observations.
 2. Run the control-plane step.
-3. Stop immediately on `unchanged-suppressed`; this consumes no model wake.
-4. Read only the newly generated decision packet.
+3. On `unchanged-suppressed`, resume the wait; do not end the current turn
+   unless `turn_control.may_end_turn` is true.
+4. Read a newly generated decision packet or reuse an `action-pending` packet.
 5. Read its bounded `next_actions`.
 6. Execute only the listed deterministic, adapter, or model task.
 7. Record the outcome as one event using the returned revision.
 8. Publish a user-visible transition when state materially changes.
-9. Repeat until the controller returns a wait, human gate, blocker, checkpoint,
-   or completion action.
+9. Repeat through automatic successors. A wait is not a final response:
+   foreground waiting continues inside the current turn. Only the yield guard
+   authorizes ending the turn.
+
+The persisted consolidation order and collision-free parallel groups govern
+execution-pair dispatch in both `next_actions` and event validation. Sequential
+tickets wait for the predecessor's entire validation/merge lifecycle, not
+merely its coding phase. An unrelated active phase or announced human gate
+must not hide another already-authorized ticket's verification, remediation,
+or merge. Existing execution pairs are preserved when upgrading a run.
+
+### Controlled continuation around a blocked predecessor
+
+`BLOCKED_TICKET_CONTINUATION_ISOLATED` is the sole exception to the sequential
+barrier for a predecessor that remains `BLOCKED`. It is a recovery transition,
+not a completion, retry, remediation, merge, or approval of the blocked
+ticket. It preserves its failure evidence, remediation counter, execution
+history, branches, and terminal status exactly as recorded.
+
+The event is accepted only when all of the following are recorded and verified
+by the controller:
+
+- the blocked ticket has a preserved `VERIFICATION_FAILURE_CLASSIFIED` event
+  with `next_step = block`;
+- exactly one released ticket is already `READY_FOR_IMPLEMENTATION`, has no
+  hard dependency on the blocked ticket, and all of its own hard dependencies
+  are `MERGED_INTO_TRAIN`;
+- the supplied train head equals the controller's current train head;
+- no technical phase is active;
+- the collision inventory matches both tickets exactly, and every shared
+  resource has a distinct evidence reference proving it is `quiescent`; and
+- an explicit user-decision reference authorizes this procedural recovery.
+
+The recorded exception releases only that named successor. Other sequential
+tickets remain blocked. It does not authorize an additional diagnostic or a
+ninth remediation cycle; reopening a blocked ticket requires a separate,
+future controller transition backed by its own explicit user decision.
+
+Use `verification_adapter.py` for the test-command-to-event transition. A
+timeout or process-launch failure records `exit_code: null`, never an invented
+exit code; it is valid failed evidence, not a passing test or a controller
+dead end. Every passed command still requires exit code zero.
 
 An unchanged wait snapshot does not produce an event, manifest revision,
 decision packet, detailed thread read, or model-written status. A non-LLM host

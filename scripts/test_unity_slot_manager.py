@@ -216,6 +216,31 @@ class UnitySlotManagerTests(unittest.TestCase):
         self.assertEqual(state["slots"][1]["status"], "LEASED")
         self.assertEqual(state["slots"][1]["lease"]["phase_key"], acquire.phase_key)
 
+    def test_acquire_retries_slot_blocked_by_transient_missing_revision_config(self) -> None:
+        self.assertEqual(self.init_slots(1), 0)
+        expected_head = self.git("rev-parse", "HEAD").stdout.strip()
+        state = run_registry.load_json(self.state_path)
+        state["slots"][0]["status"] = "BLOCKED_HUMAN"
+        state["slots"][0]["last_error"] = (
+            "target revision does not track the managed Unity MCP config: " + expected_head
+        )
+        run_registry.save_json(self.state_path, state)
+        acquire = argparse.Namespace(
+            state=self.state_path,
+            phase_key="run:T-1:verification:1",
+            requirement="build",
+            branch=None,
+            expected_head=expected_head,
+            recovery_attempts=0,
+            skip_cli=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(unity_slot_manager.acquire_slot(acquire), 0)
+        state = run_registry.load_json(self.state_path)
+        self.assertEqual(state["slots"][0]["status"], "LEASED")
+        self.assertIsNone(state["slots"][0]["last_error"])
+        self.assertEqual(state["slots"][0]["lease"]["phase_key"], acquire.phase_key)
+
 
 if __name__ == "__main__":
     unittest.main()

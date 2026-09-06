@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import hashlib
 import json
 import sys
 import tempfile
@@ -395,6 +396,8 @@ class Harness:
                 visibility_verified_at="2026-08-01T10:00:00+00:00",
                 execution_visibility="user-visible",
                 visibility_evidence_reference=f"tasks/{thread_id}.json",
+                callback_target_thread_id="thread-main",
+                callback_contract_reference=f"tasks/{thread_id}.json:launch-prompt",
             ),
             0,
         )
@@ -420,6 +423,15 @@ class Harness:
             ),
             0,
         )
+
+    def observe(self, thread_id: str, owner: str = "thread-main", status: str = "running") -> None:
+        source = self.root / f"snapshot-{self.event_number}.json"
+        source.write_text(json.dumps({"polls": [{
+            "thread": {"id": thread_id, "status": {"type": "active" if status == "running" else "idle"}},
+            "latestTurn": {"id": "observed-turn", "status": "inProgress" if status == "running" else status},
+        }]}), encoding="utf-8")
+        self.assert_code(self.apply("RUNTIME_OBSERVED", owner_thread_id=owner,
+                                   snapshot_reference=str(source), snapshot_sha256=hashlib.sha256(source.read_bytes()).hexdigest()), 0)
 
     def functional_ready(self) -> None:
         self.dispatch_pair()
@@ -555,6 +567,124 @@ class Harness:
 
 
 class TrainControllerTests(unittest.TestCase):
+    @staticmethod
+    def blocked_continuation_run(root: Path) -> Harness:
+        """Build a reconciled legacy state without replaying its completed work."""
+        run = Harness(root, tickets="OV-01A,OV-02A,OV-03A")
+        state = run.state()
+        proc = state["procedure"]
+        proc["dependencies_consolidated"] = True
+        proc["execution_order"] = ["OV-01A", "OV-02A", "OV-03A"]
+        proc["train_head"] = "train-sha"
+        proc["orchestrator_confirmed"] = True
+        proc["supervision"] = {"status": "ACTIVE", "mode": "FOREGROUND_WAIT", "watcher_id": None}
+        proc["tickets"]["OV-01A"].update({
+            "status": "BLOCKED",
+            "remediation_cycles": 8,
+            "execution": {"implementation_branch": "codex/ov-01a"},
+            "verification_failure": {
+                "event_id": "ov01-failure-r168",
+                "failure_class": "contract-ambiguity",
+                "next_step": "block",
+                "evidence_reference": "artifacts/ov01-failure.json",
+            },
+            "collision_domains": ["single-next-runner", "local-auth"],
+        })
+        proc["tickets"]["OV-02A"].update({
+            "status": "MERGED_INTO_TRAIN",
+            "collision_domains": ["email-outbox"],
+        })
+        proc["tickets"]["OV-03A"].update({
+            "status": "READY_FOR_IMPLEMENTATION",
+            "hard_dependencies": ["OV-02A"],
+            "collision_domains": ["single-next-runner", "inactivity"],
+            "analysis": {"complexity": "HIGH"},
+            "plan_contract_validation": {"status": "passed"},
+        })
+        run_registry.save_json(run.path, state)
+        return run
+
+    @staticmethod
+    def continuation_isolation_fields() -> dict[str, object]:
+        return {
+            "ticket_id": "OV-01A",
+            "isolation_id": "ov01-parked-for-ov03-r168",
+            "released_ticket_id": "OV-03A",
+            "blocked_failure_event_id": "ov01-failure-r168",
+            "train_head": "train-sha",
+            "dependency_evidence_reference": "artifacts/ov02-merged-into-train.json",
+            "collision_assessment": {
+                "shared_domains": ["single-next-runner"],
+                "quiescent_resources": [{
+                    "domain": "single-next-runner",
+                    "state": "quiescent",
+                    "evidence_reference": "artifacts/no-active-next-runner.json",
+                }],
+            },
+            "user_decision_reference": "thread-main:controller-repair-authorized",
+        }
+
+    def test_blocked_ticket_isolation_preserves_failure_and_releases_only_proven_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.blocked_continuation_run(Path(directory))
+            before = json.loads(json.dumps(run.state()["procedure"]["tickets"]["OV-01A"]))
+            self.assertFalse(
+                train_controller.execution_schedule_satisfied(run.state()["procedure"], "OV-03A")
+            )
+            self.assertEqual(
+                run.apply("BLOCKED_TICKET_CONTINUATION_ISOLATED", **self.continuation_isolation_fields()),
+                0,
+            )
+            blocked = run.state()["procedure"]["tickets"]["OV-01A"]
+            self.assertEqual(blocked["status"], "BLOCKED")
+            self.assertEqual(blocked["remediation_cycles"], 8)
+            self.assertEqual(blocked["verification_failure"], before["verification_failure"])
+            self.assertEqual(blocked["execution"], before["execution"])
+            self.assertTrue(
+                train_controller.execution_schedule_satisfied(run.state()["procedure"], "OV-03A")
+            )
+
+    def test_blocked_ticket_isolation_rejects_dependency_collision_and_active_phase_bypasses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.blocked_continuation_run(Path(directory))
+            fields = self.continuation_isolation_fields()
+            fields["collision_assessment"] = {
+                "shared_domains": [], "quiescent_resources": [],
+            }
+            self.assertEqual(run.apply("BLOCKED_TICKET_CONTINUATION_ISOLATED", **fields), 2)
+            self.assertNotIn("continuation_isolation", run.state()["procedure"]["tickets"]["OV-01A"])
+
+            state = run.state()
+            state["procedure"]["tickets"]["OV-02A"]["status"] = "READY_FOR_IMPLEMENTATION"
+            run_registry.save_json(run.path, state)
+            self.assertEqual(
+                run.apply("BLOCKED_TICKET_CONTINUATION_ISOLATED", **self.continuation_isolation_fields()),
+                2,
+            )
+
+            state = run.state()
+            state["procedure"]["tickets"]["OV-02A"]["status"] = "MERGED_INTO_TRAIN"
+            state["procedure"]["phases"]["run:OV-01A:diagnostic:9"] = {
+                "ticket_id": "OV-01A", "launch_state": "RUNNING",
+            }
+            run_registry.save_json(run.path, state)
+            self.assertEqual(
+                run.apply("BLOCKED_TICKET_CONTINUATION_ISOLATED", **self.continuation_isolation_fields()),
+                2,
+            )
+
+    def test_blocked_ticket_isolation_cannot_start_a_ninth_remediation_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.blocked_continuation_run(Path(directory))
+            self.assertEqual(
+                run.apply("BLOCKED_TICKET_CONTINUATION_ISOLATED", **self.continuation_isolation_fields()),
+                0,
+            )
+            self.assertEqual(run.apply("REMEDIATION_DISPATCHED", ticket_id="OV-01A"), 2)
+            blocked = run.state()["procedure"]["tickets"]["OV-01A"]
+            self.assertEqual(blocked["status"], "BLOCKED")
+            self.assertEqual(blocked["remediation_cycles"], 8)
+
     def test_scope_assessment_requires_explicit_specification_alignment_inventory(self) -> None:
         assessment = Harness.scope_assessment()
         assessment.pop("specification_deviations")
@@ -1264,6 +1394,7 @@ class TrainControllerTests(unittest.TestCase):
                 "thread-main",
             )
             run.materialize("run:run:triage:1", "thread-triage")
+            run.observe("thread-triage")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(
                     train_controller.check(argparse.Namespace(state=run.path, mode="yield")),
@@ -1292,6 +1423,19 @@ class TrainControllerTests(unittest.TestCase):
                 ),
                 0,
             )
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER",
+            )
+            self.assertEqual(run.apply(
+                "PHASE_LAUNCH_OBSERVED", phase_key="run:run:triage:1",
+                launch_state="RUNNING", thread_id="thread-triage",
+                execution_visibility="user-visible", visibility_verified=True,
+                visibility_evidence_reference="tasks/thread-triage.json",
+                callback_target_thread_id="thread-successor",
+                callback_contract_reference="tasks/thread-triage.json:callback-update",
+            ), 0)
+            run.observe("thread-triage", "thread-successor")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(
                     train_controller.check(argparse.Namespace(state=run.path, mode="yield")),
@@ -2335,6 +2479,8 @@ class TrainControllerTests(unittest.TestCase):
             run.dispatch_pair()
             run.materialize("run:T-1:implementation:1", "thread-impl")
             run.materialize("run:T-1:acceptance:1", "thread-tests")
+            run.observe("thread-impl")
+            run.observe("thread-tests")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(
@@ -2685,6 +2831,144 @@ class TrainControllerTests(unittest.TestCase):
             self.assertNotIn("remediation_pull_request", final)
             self.assertNotIn("remediation_merge", final)
 
+    def test_third_final_remediation_is_allowed_only_for_proven_low_test_defect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.reach_final_review(run)
+            state = run.state()
+            final = state["procedure"]["finalization"]
+            final["status"] = "NEEDS_FINAL_REMEDIATION"
+            final["remediation_cycles"] = 2
+            final["verification_failure"] = {"failure_class": "test-defect"}
+            run_registry.save_json(run.path, state)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_REMEDIATION_DISPATCHED",
+                    phase_key="run:run:final-remediation:3",
+                    base_commit="train-sha",
+                    branch="codex/final-test-remediation-3",
+                    criticality="LOW",
+                    complexity="LOW",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="medium",
+                    routing_conformance="conformant",
+                    scope_conformance="within-authorized-scope",
+                    test_only_remediation=True,
+                    production_files_modified=False,
+                    context_packet=run.context_packet("train-sha", "train-sha"),
+                ),
+                0,
+            )
+            final = run.state()["procedure"]["finalization"]
+            self.assertEqual(final["remediation_cycles"], 3)
+            self.assertTrue(final["test_only_remediation_extension_used"])
+
+    def test_final_pr_metadata_remediation_reuses_head_and_requires_fresh_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            state = run.state()
+            proc = state["procedure"]
+            proc["finalization"] = {
+                "status": "AWAITING_FINAL_PR_UPDATE",
+                "pull_request": {
+                    "url": "https://example.invalid/pr/final",
+                    "head_commit": "train-sha",
+                    "is_draft": False,
+                },
+                "verification": {"status": "passed", "head_commit": "train-sha"},
+                "review": {"reviewed_head": "train-sha"},
+                "review_phase_key": "run:final-review:1",
+                "feedback_collection": {"collection_id": "old"},
+                "feedback_snapshot": {"snapshot_id": "old"},
+                "finding_ledger": {"ledger_status": "complete"},
+                "evidence": {"completion_report_ready": True},
+            }
+            proc["phases"]["run:final:metadata-remediation:1"] = {
+                "phase_key": "run:final:metadata-remediation:1",
+                "kind": "final_remediation",
+                "launch_state": "COMPLETED",
+                "base": "train-sha",
+            }
+            run_registry.save_json(run.path, state)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_PR_METADATA_REMEDIATION_RECORDED",
+                    phase_key="run:final:metadata-remediation:1",
+                    url="https://example.invalid/pr/final",
+                    head_commit="train-sha",
+                    repository_files_modified=False,
+                    evidence_reference="artifacts/pr-body-readback.json",
+                ),
+                0,
+            )
+            final = run.state()["procedure"]["finalization"]
+            self.assertEqual(final["status"], "FINAL_PR_OPEN")
+            self.assertEqual(final["verification"]["head_commit"], "train-sha")
+            self.assertNotIn("review", final)
+            self.assertNotIn("feedback_snapshot", final)
+            self.assertNotIn("finding_ledger", final)
+
+    def test_final_pr_metadata_remediation_rejects_repository_change_or_head_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            state = run.state()
+            proc = state["procedure"]
+            proc["finalization"] = {
+                "status": "AWAITING_FINAL_PR_UPDATE",
+                "pull_request": {"url": "https://example.invalid/pr/final", "head_commit": "train-sha"},
+            }
+            proc["phases"]["run:final:metadata-remediation:1"] = {
+                "phase_key": "run:final:metadata-remediation:1",
+                "kind": "final_remediation",
+                "launch_state": "COMPLETED",
+                "base": "train-sha",
+            }
+            run_registry.save_json(run.path, state)
+            self.assertEqual(
+                run.apply(
+                    "FINAL_PR_METADATA_REMEDIATION_RECORDED",
+                    phase_key="run:final:metadata-remediation:1",
+                    url="https://example.invalid/pr/final",
+                    head_commit="other-sha",
+                    repository_files_modified=True,
+                    evidence_reference="artifacts/pr-body-readback.json",
+                ),
+                2,
+            )
+
+    def test_final_pr_descendant_head_drift_invalidates_stale_verification_and_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            self.reach_final_review(run)
+
+            self.assertEqual(
+                run.apply(
+                    "FINAL_PR_HEAD_DRIFT_RECORDED",
+                    previous_head_commit="train-sha",
+                    head_commit="train-sha-2",
+                    relationship="descendant",
+                    relationship_evidence_reference="artifacts/final-head-drift.json",
+                    observed_at="2026-08-29T12:00:00+00:00",
+                    source="final-review-remediation",
+                    reason="A bounded final-review remediation was pushed directly to the train branch.",
+                    superseded_review_evidence_reference="codex://threads/final-review-old-head",
+                ),
+                0,
+            )
+
+            procedure = run.state()["procedure"]
+            final = procedure["finalization"]
+            self.assertEqual(final["status"], "FINAL_PR_OPEN")
+            self.assertEqual(final["pull_request"]["head_commit"], "train-sha-2")
+            self.assertEqual(procedure["train_head"], "train-sha-2")
+            self.assertNotIn("verification", final)
+            self.assertNotIn("review", final)
+            self.assertEqual(final["verification_history"][-1]["superseded_by_head"], "train-sha-2")
+            self.assertEqual(
+                train_controller.next_actions(run.state())[0]["action"],
+                "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY",
+            )
+
     def test_same_event_id_is_idempotent_even_with_old_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
@@ -2774,6 +3058,23 @@ class TrainControllerTests(unittest.TestCase):
             ci_not_configured=False,
         )
         self.assertTrue(any("not complete" in issue for issue in issues))
+
+    def test_final_remediation_can_reuse_proven_unconfigured_ci_from_integrated_tickets(self) -> None:
+        procedure = {
+            "tickets": {
+                "T-1": {
+                    "status": "MERGED_INTO_TRAIN",
+                    "finding_ledger": {"ci_status": "not_configured"},
+                },
+                "T-2": {
+                    "status": "MERGED_INTO_TRAIN",
+                    "finding_ledger": {"ci_status": "not_configured"},
+                },
+            }
+        }
+        self.assertTrue(merge_pull_request.integrated_tickets_prove_ci_unconfigured(procedure))
+        procedure["tickets"]["T-2"]["finding_ledger"]["ci_status"] = "passed"
+        self.assertFalse(merge_pull_request.integrated_tickets_prove_ci_unconfigured(procedure))
 
     def test_dry_run_stops_after_analysis_report_and_usage_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

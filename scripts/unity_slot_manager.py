@@ -422,10 +422,23 @@ def acquire_slot(args: argparse.Namespace) -> int:
         if isinstance(owned_slot, dict):
             candidates = [owned_slot]
         else:
+            # Preparation can fail simply because the requested commit has not
+            # been fetched yet.  That is a transient repository state, not a
+            # human gate.  Retry these quarantined slots on the next acquire;
+            # genuinely unsafe slots (dirty worktree, MCP/auth failures, etc.)
+            # remain BLOCKED_HUMAN until explicitly repaired.
+            transient_config_error = "target revision does not track the managed Unity MCP config:"
             candidates = [
                 slot
                 for slot in state["slots"][: int(state["max_editors"])]
-                if slot.get("status") in {"IDLE", "READY"} and not slot.get("lease")
+                if (
+                    slot.get("status") in {"IDLE", "READY"}
+                    or (
+                        slot.get("status") == "BLOCKED_HUMAN"
+                        and str(slot.get("last_error") or "").startswith(transient_config_error)
+                    )
+                )
+                and not slot.get("lease")
             ]
             require(candidates, "no Unity editor slot is currently available")
             if args.branch:

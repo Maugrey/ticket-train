@@ -373,7 +373,7 @@ class ControlPlaneRunnerTests(unittest.TestCase):
             ))
         return path
 
-    def test_unchanged_step_is_suppressed_without_model_wake(self) -> None:
+    def test_undelivered_startup_confirmation_remains_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = self.create_manifest(root)
@@ -391,8 +391,10 @@ class ControlPlaneRunnerTests(unittest.TestCase):
                 )
             self.assertEqual(json.loads(first.getvalue())["status"], "packet-written")
             repeated = json.loads(second.getvalue())
-            self.assertEqual(repeated["status"], "unchanged-suppressed")
-            self.assertEqual(repeated["wake_kind"], "NO_MODEL_WAKE")
+            self.assertEqual(repeated["status"], "action-pending")
+            self.assertEqual(repeated["wake_kind"], "WAKE_ADAPTER")
+            self.assertFalse(repeated["turn_control"]["may_end_turn"])
+            self.assertEqual(repeated["packet_reference"], json.loads(first.getvalue())["packet_reference"])
 
     def test_hard_budget_requests_orchestrator_rotation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

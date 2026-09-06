@@ -231,8 +231,10 @@ mechanism.
 running. It requires an active supervisor, verified schedule, no hidden human
 gate, and a reconciled manifest. Run `control_guard.py check-yield` before
 using it. Also require `control_plane_runner.py step` to return
-`unchanged-suppressed` or `NO_MODEL_WAKE`; otherwise execute or hand off its
-action first.
+`unchanged-suppressed` or `NO_MODEL_WAKE` AND `turn_control.may_end_turn = true`;
+otherwise execute, capture, or continue waiting in the current turn.
+`action-pending` is unacknowledged work, never an idle state. A returned client
+ID without a verified visible task cannot yet provide an event callback.
 
 The procedural `train_controller.py check --mode yield` is authoritative for
 new runs and rejects active work under `FOREGROUND_WAIT`. Only verified

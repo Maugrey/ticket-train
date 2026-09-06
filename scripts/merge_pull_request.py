@@ -38,6 +38,17 @@ def pull_request_number(url: str) -> str:
     return match.group(1)
 
 
+def integrated_tickets_prove_ci_unconfigured(proc: dict[str, Any]) -> bool:
+    integrated = [
+        item for item in proc.get("tickets", {}).values()
+        if item.get("status") == "MERGED_INTO_TRAIN"
+    ]
+    return bool(integrated) and all(
+        (item.get("finding_ledger") or {}).get("ci_status") == "not_configured"
+        for item in integrated
+    )
+
+
 def github_gate_issues(
     snapshot: dict[str, Any], *, expected_head: str, expected_base: str, expected_head_branch: str,
     ci_not_configured: bool,
@@ -113,7 +124,7 @@ def merge(args: argparse.Namespace) -> int:
         final = proc.get("finalization", {})
         pull_request = final.get("remediation_pull_request") or {}
         expected_base = state["run_identity"]["train_branch"]
-        ci_not_configured = False
+        ci_not_configured = integrated_tickets_prove_ci_unconfigured(proc)
     else:
         final = proc.get("finalization", {})
         pull_request = final.get("pull_request") or {}

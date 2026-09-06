@@ -57,7 +57,7 @@ changed observations into controller events authorized by `next_actions`.
 
 `control_plane_runner.py` is the normal read boundary for the main
 conversation. It emits a bounded decision packet, classifies the wake, and
-suppresses an unchanged state. Do not load the complete manifest merely to
+suppresses an unchanged wait (not unexecuted work). Do not load the complete manifest merely to
 decide what happens next.
 
 ## Canonical run and ownership
@@ -179,6 +179,22 @@ Never classify a task as blocked, failed, or inactive from silence, missing
 incremental commentary, or an unchanged cursor. Reconcile authoritative task
 state and the completion envelope first.
 
+A recent-task listing can omit a materialized worktree task. When no real ID
+is available, use the read-only bounded fallback:
+
+```powershell
+python scripts/train_supervisor.py phase-candidates --state <manifest> --phase-key <key>
+```
+
+It matches the exact run and phase in the initial request (user prompt or
+desktop creation envelope) of recent local session headers, without loading
+transcripts. Verify each returned ID with
+the product's `read_thread` before recording `RUNNING`. Zero candidates, an
+incomplete scan or several candidates are unresolved, never proof that it is
+safe to create a replacement. Every child prompt must contain its canonical
+run ID as well as its phase key (a context-packet path containing the run ID
+also qualifies).
+
 ## Child completion envelope
 
 Require every phase prompt to end with a compact, machine-readable completion
@@ -271,8 +287,9 @@ wait that still permits required user updates. On every wake-up:
 
 When no state, cursor, blocker, decision, or result changed, do not read a
 thread, rewrite a narrative status, or create another model-visible report.
-The runner must return `unchanged-suppressed`; reuse the prior packet and wait
-again. A model wake must correspond to a transition, dispatch, failure,
+When only a real wait remains, the runner returns `unchanged-suppressed`;
+reuse the prior packet and wait again. An automatic successor instead remains
+`action-pending` until its outcome is recorded. A model wake must correspond to a transition, dispatch, failure,
 blocker, gate announcement, report, or technical decision whenever the
 product supports transition-triggered waits.
 
@@ -426,7 +443,17 @@ from `train_controller.py status`.
 
 ## Deterministic yield guard
 
-Maintain a `control` object in the run manifest for the read-only guard script:
+For procedural runs, a persisted `RUNNING` flag is not a runtime observation.
+Use the response-to-successor and raw product snapshot protocol in
+[control-plane-runner.md](control-plane-runner.md) before a supervised yield.
+Missing/stale snapshots and uncollected terminal results fail the same guard
+used by every decision packet. A user reply must produce a successor action,
+not only a final acknowledgement. These rules apply to every environment,
+including generic repositories and local Unity MCP.
+
+The following `control` object is a legacy diagnostic format, not a second
+state machine to maintain for procedural runs. New runs use `procedure` and
+the controller's yield/verification checks. Legacy example:
 
 ```json
 {
@@ -577,7 +604,9 @@ These are automatic successors, not work the user must request.
 requires verified supervision and no hidden human gate. It is not a completion
 state. Before yielding, `control_plane_runner.py step` must return
 `NO_MODEL_WAKE` or `unchanged-suppressed`; otherwise execute or hand off its
-action first. Store the next deterministic check time in the manifest without
+action first. Additionally require `turn_control.may_end_turn = true`:
+neither packet suppression nor a queued client ID proves durable supervision.
+Store the next deterministic check time in the manifest without
 requiring a model-authored status.
 
 For `AWAITING_REQUIRED_USER_INPUT`, identify the exact ticket, revision, gate,

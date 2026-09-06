@@ -7,6 +7,42 @@ description: Explicitly orchestrate bounded, cost-controlled trains of implement
 
 Orchestrate a bounded, reviewable implementation train while keeping ticket analysis, implementation, and review contexts separate.
 
+## Resume contract (every user reply and child result)
+
+An acknowledgement is not a completed orchestration step. Use
+[continuation_adapter.py](scripts/continuation_adapter.py) `advance` to apply
+the exact authorized event and obtain its successor in the same invocation.
+Execute that successor in the current turn; do not end with "I will continue".
+When only an announced human gate remains, stop once without a polling wake.
+
+Before yielding with active children, capture fresh product `wait_threads`
+polls and ingest them with `continuation_adapter.py observe`. Persisted
+`RUNNING` flags and callback declarations alone cannot prove activity. Collect
+finished children's existing results; never create replacement analyses to
+repair stale controller state. Missing observations are not failed launches.
+
+Generate every new/resumed phase prompt with `continuation_adapter.py handoff`
+after its dispatch/resume action is authorized. Use its exact identity,
+context reference and result-delivery contract, then record the real tool
+receipt. Keep consolidation in the authorized technical-model action; do not
+create an untracked "consolidation" or "reconciliation" worker. Only the
+canonical owner writes lifecycle events. See the concrete commands and host
+limits in [control-plane-runner.md](references/control-plane-runner.md).
+
+For visible phase creation on a desktop host with a tool-composition bridge,
+use [phase_dispatch.js](scripts/phase_dispatch.js) and its guarded Python helper
+in one invocation: intent, creation, durable raw receipt and fresh observation.
+It supports a new plan-contract intent or an already registered authorized
+phase. Acknowledging the intent and ending before creation is not continuation.
+On an interrupted launch, recover its receipt; never blindly create again.
+
+Collect a finished contract validation with `continuation_adapter.py
+collect-contract`, its existing result reference and a raw product observation.
+This records completion and verdict atomically and returns the successor.
+Never use `phase_dispatch` for collection or invent a `*-collect.json` spec.
+An internal command/path mistake calls for inspecting the handler and repairing
+the invocation in the same turn, not asking the user to provide a skill artifact.
+
 ## Load the workflow
 
 Read these references before starting:
@@ -215,10 +251,15 @@ conversation. Do not copy raw logs, full child reports, or unchanged progress
 snapshots into the orchestrator context.
 
 After every changed observation, run
-`scripts/control_plane_runner.py step`. Read only a newly written bounded
-decision packet and execute its declared wake class. A result of
-`unchanged-suppressed` means no model wake, no detailed task read, and no
-user-facing status. Never run a prompt-authored polling or heartbeat loop.
+`scripts/control_plane_runner.py step`. Read a `packet-written` packet or
+reuse the referenced `action-pending` packet and execute its declared action.
+`action-pending` means the outcome has not been recorded: reconcile any
+in-flight side effect, then execute/capture it, never blindly duplicate it.
+`unchanged-suppressed` applies only to genuine waits; return to the existing
+wait without narration. It is NOT permission to send a final response.
+Every result carries `turn_control.may_end_turn`; when false, stay in the
+current turn until a real result, authorized gate, or evidenced blocker is
+recorded. Never run a prompt-authored polling or heartbeat loop.
 
 The main thread is an adapter, not the scheduler. It must not decide the next
 phase from conversational memory. Use `train_controller.py status`, execute
@@ -433,11 +474,15 @@ At a high level:
     branch or an equivalent durable merge.
 26. Run baseline-red, exact-head integrated-green, environment-parity, and
     applicable Supabase/Auth/RLS checks with
-    [verification_runner.py](scripts/verification_runner.py). This command
+    [verification_adapter.py](scripts/verification_adapter.py), which invokes
+    the runner, captures success or failure, and returns the successor in one
+    command. Prepare its evidence template from the verification contract;
+    never invent coverage or environment attestations. Existing results are
+    reused, not rerun, after a recording interruption. Command
     execution is deterministic and records zero model tokens. Wake a model
     only to classify a failure that the structured result cannot resolve.
-27. Record functional evidence through the controller, run
-    `control_guard.py check-verification`, and mark the ticket pull request
+27. Record functional evidence through the controller and require
+    `FUNCTIONAL_READY` before marking the ticket pull request
     ready for automated code review only when functional readiness passes.
 28. Reassess both dimensions from the final production and test diff.
 29. Route one exhaustive independent automated review through the

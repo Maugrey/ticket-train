@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-RUNNER_VERSION = "1"
+RUNNER_VERSION = "2"
 
 
 def now_iso() -> str:
@@ -43,7 +43,9 @@ def git_head(workdir: Path) -> str:
 def bounded_excerpt(path: Path, limit: int = 16_384) -> str:
     if not path.exists():
         return ""
-    data = path.read_bytes()
+    with path.open("rb") as handle:
+        handle.seek(max(0, path.stat().st_size - limit))
+        data = handle.read(limit)
     return data[-limit:].decode("utf-8", errors="replace")
 
 
@@ -118,6 +120,9 @@ def run_plan(plan_path: Path, output_path: Path, logs_dir: Path) -> dict[str, An
             status = "passed" if completed.returncode == 0 else "failed"
         except subprocess.TimeoutExpired:
             status = "timed_out"
+        except OSError as error:
+            # Missing executables and launch failures are durable failures too.
+            stderr_path.write_text(str(error), encoding="utf-8")
         duration = (datetime.now(timezone.utc) - command_started).total_seconds()
         results.append(
             {
@@ -128,7 +133,10 @@ def run_plan(plan_path: Path, output_path: Path, logs_dir: Path) -> dict[str, An
                 "duration_seconds": round(duration, 3),
                 "stdout_log": str(stdout_path),
                 "stderr_log": str(stderr_path),
-                "error_excerpt": bounded_excerpt(stderr_path),
+                "error_excerpt": (
+                    (bounded_excerpt(stderr_path, 8192) + "\n" + bounded_excerpt(stdout_path, 8192)).strip()
+                    if status != "passed" else ""
+                ),
             }
         )
         if status != "passed" and plan.get("continue_on_failure") is not True:
@@ -142,6 +150,7 @@ def run_plan(plan_path: Path, output_path: Path, logs_dir: Path) -> dict[str, An
     document = {
         "schema_version": 1,
         "runner_version": RUNNER_VERSION,
+        "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
         "execution_mode": "deterministic",
         "model_tokens": 0,
         "started_at": started_at,
@@ -158,7 +167,9 @@ def run_plan(plan_path: Path, output_path: Path, logs_dir: Path) -> dict[str, An
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rendered_bytes = rendered.encode("utf-8")
-    output_path.write_bytes(rendered_bytes)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    temporary.write_bytes(rendered_bytes)
+    temporary.replace(output_path)
     return {
         "status": overall,
         "result": str(output_path),

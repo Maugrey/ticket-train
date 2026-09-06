@@ -413,8 +413,14 @@ For remediation:
 8. Review against the new final pull-request head and collect newly available
    Copilot and CI feedback.
 
-Use at most two final remediation/follow-up cycles. A third required cycle is
-a root-cause checkpoint, not an automatic continuation.
+Use at most two final remediation/follow-up cycles. One narrowly bounded third
+cycle may continue automatically only when the latest exact-head verification
+classifies the failure as a `test-defect`, the remediation is `LOW/LOW`, the
+dispatch proves `test_only_remediation: true`, and
+`production_files_modified: false`. This exception exists for an obsolete or
+incorrect test oracle discovered after integration; it must not authorize any
+production change. Every other third cycle is a root-cause checkpoint, not an
+automatic continuation, and no fourth automatic cycle exists.
 
 Do not push review fixes directly to the base branch. Do not revive a stale
 ticket branch merely because the finding originated in that ticket.

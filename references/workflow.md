@@ -918,6 +918,14 @@ For sequential or dependent tickets:
 
 Do not pre-create dependent worktrees from a stale train base.
 
+If a prior sequential ticket is terminally `BLOCKED`, it normally remains a
+barrier. The only permitted recovery is the controller's documented
+`BLOCKED_TICKET_CONTINUATION_ISOLATED` event: it can release one independently
+ready successor only after merged dependencies, the exact train head, no active
+phase, and every shared resource's quiescent evidence have been recorded. This
+does not reopen, merge, or retry the blocked ticket, and it cannot authorize an
+additional remediation cycle.
+
 ## Parallel execution
 
 Run at most two parallel implementation/test pairs, and only for tickets
@@ -1038,6 +1046,12 @@ Also apply `FINAL_PR_RECORDED`, `FINAL_VERIFICATION_RECORDED`,
 `FINAL_EVIDENCE_RECORDED` to the procedural controller, then request
 `RUN_COMPLETED`. A rejected completion event is a hard stop even when a prose
 summary appears complete.
+
+When a final-remediation phase changes only the final pull-request metadata,
+record `FINAL_PR_METADATA_REMEDIATION_RECORDED` with the completed phase,
+same exact head, read-back evidence, and `repository_files_modified = false`.
+This is the only metadata-only path: it keeps exact-head code verification but
+requires a focused follow-up review and a fresh feedback snapshot/ledger.
 
 Tie every test, Codex review, Copilot collection, and readiness statement to an
 exact final pull-request head. If Codex is explicitly asked to merge the final
