@@ -64,8 +64,10 @@ The driver durably deduplicates actionable events and creates one small task wit
 compact context only for a newly announced human gate, an evidenced terminal error
 or verified train completion. The task inherits the repository's Codex project and
 uses the profile's `attention_model` / `attention_reasoning_effort` settings, which
-default to `gpt-6-astra` / `low`. The exact event is embedded in its prompt, so it
-does not load the train manifest or accumulated history merely to present it. It can persist the
+default to `gpt-6-astra` / `medium`. The exact event is embedded in its prompt, so
+it does not load the train manifest or accumulated history merely to present it.
+For a human gate it must show the reason, blocked and continuing scope, and every
+accepted reply without summarizing them. It can persist the
 user's exact gate answer into the driver inbox. Unchanged state consumes no model
 tokens.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process

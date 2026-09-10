@@ -167,7 +167,7 @@ class Driver:
 
     def queue_owner_attention(self, kind, payload):
         """Persist one owner wake for one semantic actionable condition."""
-        semantic = {"relay_revision": "v2", "kind": kind, "payload": payload}
+        semantic = {"relay_revision": "v3", "kind": kind, "payload": payload}
         key = sha256_json(semantic)
         directory = self.directory / "owner-attention" / key[:24]
         reference = directory / "effect.json"
@@ -175,7 +175,9 @@ class Driver:
             "You are the compact decision relay for one actionable Ticket Train event. "
             "The exact event is embedded below; do not re-read or reconstruct it.\n"
             + json.dumps(semantic, ensure_ascii=False, sort_keys=True)
-            + "\nPresent its exact pending human question or terminal result, or report its evidenced error. "
+            + "\nFor a human gate, present the question, reason, blocked scope, continuing scope and every "
+            "accepted reply with all IDs and required content. Do not omit or summarize those fields. "
+            "For completion, present the terminal result; for an error, report its evidence. "
             "Do not decide a human gate. If the user answers it in this task, write one INPUT_PROVIDED JSON "
             f"file under {self.directory / 'inbox'} with a stable event_id, the exact gate_id and revision, "
             "a faithful response_summary and a response_artifact that references the user answer. "
@@ -240,7 +242,7 @@ class Driver:
                     "key": "owner-attention:" + reference.parent.name,
                     "cwd": str(workspace),
                     "model": self.profile.get("attention_model", "gpt-6-astra"),
-                    "effort": self.profile.get("attention_reasoning_effort", "low"),
+                    "effort": self.profile.get("attention_reasoning_effort", "medium"),
                     "prompt": notification["prompt"],
                     "title": title + suffix,
                 }
