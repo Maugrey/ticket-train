@@ -233,7 +233,6 @@ class Driver:
             if notification.get("status") == "pending":
                 workspace = Path(notification["directory"]) / "workspace"
                 workspace.mkdir(parents=True, exist_ok=True)
-                task_cwd = self.profile.get("repository") or str(workspace)
                 ticket_id = (notification.get("payload") or {}).get("ticket_id")
                 suffix = f" — #{ticket_id}" if ticket_id else ""
                 title = {
@@ -242,7 +241,7 @@ class Driver:
                 }.get(notification.get("kind"), "Ticket Train — attention required")
                 spec = {
                     "key": "owner-attention:" + reference.parent.name,
-                    "cwd": task_cwd,
+                    "cwd": str(workspace),
                     "model": self.profile.get("attention_model", "gpt-6-astra"),
                     "effort": self.profile.get("attention_reasoning_effort", "medium"),
                     "prompt": notification["prompt"],

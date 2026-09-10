@@ -62,7 +62,10 @@ retries are separately bounded. The guardian and driver provide continuous
 script-only observation; do not create a scheduled app heartbeat or polling model.
 The driver durably deduplicates actionable events and creates one small task with
 compact context only for a newly announced human gate, an evidenced terminal error
-or verified train completion. The task inherits the repository's Codex project and
+or verified train completion. Native project metadata is recorded when available,
+but the desktop currently lists app-server-created tasks under Recents even when
+their accepted project metadata and repository root match. Keep their working
+directories isolated; changing `cwd` does not repair this UI grouping. The relay
 uses the profile's `attention_model` / `attention_reasoning_effort` settings, which
 default to `gpt-6-astra` / `medium`. The exact event is embedded in its prompt, so
 it does not load the train manifest or accumulated history merely to present it.
