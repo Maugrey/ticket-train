@@ -39,7 +39,7 @@ class NativeEffects:
     """
 
     def __init__(self, root, executable=None, host_factory=thread_runtime.AppServer,
-                 source_thread_id=None, repository=None):
+                 source_thread_id=None, repository=None, owner_relay=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.instance = str(uuid.uuid4())
@@ -48,6 +48,7 @@ class NativeEffects:
         self.loaded = set()
         self.source_thread_id = source_thread_id
         self.repository = repository
+        self.owner_relay = owner_relay or thread_runtime.send_message_to_thread
         self.source_project_id = None
         self.source_project_resolved = False
 
@@ -128,7 +129,7 @@ class NativeEffects:
         if job.get("retry_at", 0) > time.time():
             return False
         if job.get("pending_prompt") or job["status"] in {"creating", "starting_turn"}:
-            if not self.start_turn(job, job.get("pending_prompt") or spec["prompt"]):
+            if not self.relay_owner_turn(job, job.get("pending_prompt") or spec["prompt"]):
                 return False
             job = self.read(spec["key"])
         if not job.get("turn_id"):
@@ -141,6 +142,70 @@ class NativeEffects:
             delivered_at=utcnow(),
         )
         save_json(Path(notification["reference"]), notification)
+        return True
+
+    @staticmethod
+    def owner_relay_turn(task, prompt):
+        """Find the exact app-tool relay in an owner task snapshot."""
+        for turn in reversed(task.get("turns", [])):
+            for item in turn.get("items", []):
+                if (
+                    item.get("type") == "functionCallOutput"
+                    and item.get("name") == "send_message_to_thread"
+                    and item.get("namespace") == "codex_app"
+                    and prompt in item.get("output", "")
+                ):
+                    return turn
+        return None
+
+    def relay_owner_turn(self, job, prompt):
+        """Wake the desktop-owned conversation without acquiring its writer."""
+        job.update(status="starting_turn", pending_prompt=prompt, transport="codex-app-tools")
+        self.save(job)
+        directory = self.directory(job["key"])
+        name = "owner-relay-" + str(job["attempt"])
+        request_path = directory / (name + "-request.json")
+        response_path = directory / (name + "-response.json")
+
+        observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
+        turn = self.owner_relay_turn(observed["thread"], prompt)
+        if not turn and not response_path.exists():
+            request = {
+                "source_thread_id": self.source_thread_id or job["thread_id"],
+                "target_thread_id": job["thread_id"],
+                "prompt": prompt,
+                "call_id": job["client_message_id"],
+            }
+            if not request_path.exists():
+                save_json(request_path, request)
+            elif load_json(request_path) != request:
+                raise ValueError("Owner relay request changed after it was armed")
+            result = self.owner_relay(
+                request["source_thread_id"], request["target_thread_id"],
+                request["prompt"], request["call_id"],
+            )
+            save_json(response_path, {"result": result})
+            observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
+            turn = self.owner_relay_turn(observed["thread"], prompt)
+        if not turn and response_path.exists():
+            job.update(
+                turn_id="app-relay:" + job["client_message_id"],
+                status="completed",
+                result_reference=str(response_path),
+                completed_at=utcnow(),
+            )
+            job.pop("pending_prompt", None)
+            job.pop("retry_at", None)
+            self.save(job)
+            return True
+        if not turn:
+            job["retry_at"] = time.time() + 2
+            self.save(job)
+            return False
+        job.update(turn_id=turn["id"], status="running", started_at=utcnow())
+        job.pop("pending_prompt", None)
+        job.pop("retry_at", None)
+        self.save(job)
         return True
 
     def receipt(self, directory, name):
@@ -273,7 +338,7 @@ class NativeEffects:
         if job.get("retry_at", 0) > time.time():
             return job
         task_id = job["thread_id"]
-        if task_id not in self.loaded:
+        if job.get("transport") != "codex-app-tools" and task_id not in self.loaded:
             self.host.call("thread/resume", {"threadId": task_id, "excludeTurns": True})
             self.loaded.add(task_id)
         observation = self.host.call("thread/read", {"threadId": task_id, "includeTurns": True})
@@ -301,7 +366,11 @@ class NativeEffects:
                 job.pop("retry_at", None)
                 job["client_message_id"] = str(uuid.uuid4())
                 self.save(job)
-                self.start_turn(job, "Resume this same authorized phase after the host interruption. Reconcile existing files and results before repeating any work.\n" + job["spec"]["prompt"])
+                retry_prompt = "Resume this same authorized phase after the host interruption. Reconcile existing files and results before repeating any work.\n" + job["spec"]["prompt"]
+                if job.get("transport") == "codex-app-tools":
+                    self.relay_owner_turn(job, retry_prompt)
+                else:
+                    self.start_turn(job, retry_prompt)
                 return self.read(job["key"])
             else:
                 job["retry_at"] = time.time() + (15, 60)[job["attempt"]]

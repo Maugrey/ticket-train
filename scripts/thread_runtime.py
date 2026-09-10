@@ -19,14 +19,10 @@ class HostError(RuntimeError):
     """An observed host error, never evidence that creation did not happen."""
 
 
-class AppServer:
-    """One owned stdio connection; notifications are consumed without a model.
+class _JsonLineProcess:
+    """Small JSON-line RPC transport shared by the two native Codex bridges."""
 
-    Existing desktop-owned active tasks must not be resumed through this server.
-    Only tasks recorded as managed by this run may be started or resumed here.
-    """
-
-    def __init__(self, executable: str, event_sink=None, timeout: float = 30):
+    def __init__(self, command: list[str], event_sink=None, timeout: float = 30):
         self.timeout = timeout
         self.events = queue.Queue()
         self.responses = queue.Queue()
@@ -35,22 +31,13 @@ class AppServer:
         self.receipts = {}
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self.process = subprocess.Popen(
-            [executable, "app-server", "--stdio"], stdin=subprocess.PIPE,
+            command, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", creationflags=flags,
         )
         self.stderr_tail = []
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_errors, daemon=True).start()
-        try:
-            self.identity = self.call("initialize", {
-                "clientInfo": {"name": "ticket_train", "version": "2"},
-                "capabilities": {"experimentalApi": True},
-            })
-            self._send({"method": "initialized", "params": {}})
-        except Exception:
-            self.close()
-            raise
 
     def _read_errors(self):
         for line in self.process.stderr:
@@ -74,20 +61,20 @@ class AppServer:
         except (OSError, ValueError) as error:
             self.responses.put({"transport_error": str(error)})
         finally:
-            self.responses.put({"transport_error": "App Server connection closed"})
+            self.responses.put({"transport_error": "Native RPC connection closed"})
 
     def _send(self, value):
         if self.process.poll() is not None:
-            raise HostError("App Server process has exited")
+            raise HostError("Native RPC process has exited")
         self.process.stdin.write(json.dumps(value, ensure_ascii=False) + "\n")
         self.process.stdin.flush()
 
-    def call(self, method: str, params: dict, receipt_path: Path | None = None) -> dict:
+    def request(self, message: dict, receipt_path: Path | None = None) -> dict:
         self.serial += 1
         serial = self.serial
         if receipt_path:
             self.receipts[serial] = receipt_path
-        self._send({"id": serial, "method": method, "params": params})
+        self._send({**message, "id": serial})
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             self.drain()
@@ -102,6 +89,7 @@ class AppServer:
             if "error" in response:
                 raise HostError(json.dumps(response["error"], ensure_ascii=False))
             return response.get("result", {})
+        method = message.get("method", "RPC response")
         raise HostError(f"Timed out awaiting {method}; outcome is unknown, do not repeat a mutation")
 
     def drain(self):
@@ -114,9 +102,6 @@ class AppServer:
             events.append(event)
             self.event_sink(event)
         return events
-
-    def answer_request(self, request_id, result):
-        self._send({"id": request_id, "result": result})
 
     def wait(self, seconds: float = 1):
         """Wait on the actual event queue. No model turn, status fiction or sleep loop."""
@@ -147,6 +132,32 @@ class AppServer:
         self.close()
 
 
+class AppServer(_JsonLineProcess):
+    """One worker App Server connection; notifications consume no model.
+
+    Existing desktop-owned active tasks must not be resumed through this server.
+    Only tasks recorded as managed by this run may be started or resumed here.
+    """
+
+    def __init__(self, executable: str, event_sink=None, timeout: float = 30):
+        super().__init__([executable, "app-server", "--stdio"], event_sink, timeout)
+        try:
+            self.identity = self.call("initialize", {
+                "clientInfo": {"name": "ticket_train", "version": "2"},
+                "capabilities": {"experimentalApi": True},
+            })
+            self._send({"method": "initialized", "params": {}})
+        except Exception:
+            self.close()
+            raise
+
+    def call(self, method: str, params: dict, receipt_path: Path | None = None) -> dict:
+        return self.request({"method": method, "params": params}, receipt_path)
+
+    def answer_request(self, request_id, result):
+        self._send({"id": request_id, "result": result})
+
+
 def app_server_executable(explicit: str | None = None) -> str:
     if explicit:
         path = Path(explicit).expanduser().resolve()
@@ -163,6 +174,43 @@ def app_server_executable(explicit: str | None = None) -> str:
     if command and Path(command).suffix.lower() not in {".cmd", ".ps1", ".bat"}:
         return command
     raise ValueError("Provide the native Codex executable with --host-executable")
+
+
+def send_message_to_thread(source_thread_id: str, target_thread_id: str, prompt: str,
+                           call_id: str, timeout: float = 90) -> dict:
+    """Use the desktop's own task relay instead of taking its writer lease.
+
+    The app tool starts the target turn inside the already-running desktop host.
+    A stable call ID lets a restarted runner replay an uncertain RPC safely.
+    """
+    pipe = os.environ.get("CODEX_APP_TOOLS_PIPE_PATH")
+    node = os.environ.get("CODEX_MCP_NODE_PATH") or shutil.which("node")
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    server = codex_home / ".tmp" / "bundled-marketplaces" / "openai-bundled" / "plugins" / "codex-app-tools" / "server.mjs"
+    if not pipe or not node or not Path(node).is_file() or not server.is_file():
+        raise HostError("Codex desktop task relay is unavailable; preserve the pending owner notification")
+
+    with _JsonLineProcess(
+        [node, str(server), "--interaction-client-id", source_thread_id], timeout=timeout,
+    ) as host:
+        host.request({"jsonrpc": "2.0", "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "ticket_train", "version": "2"},
+        }})
+        host._send({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {},
+        })
+        result = host.request({"jsonrpc": "2.0", "method": "tools/call", "params": {
+            "name": "send_message_to_thread",
+            "arguments": {"threadId": target_thread_id, "prompt": prompt},
+            "_meta": {
+                "openai/threadId": source_thread_id,
+                "openai/toolCallId": call_id,
+            },
+        }})
+        if result.get("isError"):
+            raise HostError(json.dumps(result, ensure_ascii=False))
+        return result
 
 
 def timestamp(value: str) -> datetime:

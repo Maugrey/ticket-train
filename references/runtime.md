@@ -36,14 +36,17 @@ project inputs, not another workflow state. Prepare real verification coverage;
 do not invent passing assertions in an evidence template.
 
 On Windows, the desktop native `codex.exe app-server --stdio` is the host
-transport. The npm CLI's Unix-only daemon is not required. A capability file
+transport for train-owned workers. Owner notifications use the bundled Codex app
+tool `send_message_to_thread`, which reaches the conversation already owned by the
+desktop without acquiring another writer. The runner uses the app's supplied MCP
+bridge and stable tool-call IDs; it does not implement the private pipe protocol.
+The npm CLI's Unix-only daemon is not required. A capability file
 must record an actual desktop read of native-created tasks on this executable.
 Use `ticket-train-native-capability-v1`, `desktop_read_verified: true`, the
 `host_executable`, its `host_sha256`, and two actual desktop read results under
 `first` and `second`. Reuse an existing verified capability; do not create test
 tasks during an ordinary train. An executable change requires renewed evidence.
-Local metadata alone cannot prove user visibility. No private application pipe
-or undocumented bridge is used.
+Local metadata alone cannot prove user visibility.
 
 ## Execute and answer
 
@@ -63,8 +66,10 @@ script-only observation; do not create a scheduled app heartbeat or polling mode
 The driver durably deduplicates actionable events and starts one receipt-backed
 turn in the train's existing owner conversation only for a newly announced human
 gate, an evidenced terminal error or verified train completion. It never creates
-a separate attention task. If the owner conversation has an active writer, the
-driver waits and retries the same recorded turn instead of creating a replacement.
+a separate attention task. It never resumes the desktop-owned conversation through
+the worker App Server. If the owner is busy, the native task relay queues the same
+recorded message; a restart reconciles the exact prompt and stable tool-call ID
+instead of creating a replacement.
 The exact event is embedded in its prompt, so the owner does not reload the train
 manifest or reconstruct the event merely to present it.
 For a human gate it must show the reason, blocked and continuing scope, and every
@@ -72,8 +77,8 @@ accepted reply without summarizing them. Legacy gates whose replies referenced
 worker artifacts are enriched deterministically from the already collected result;
 new worker contracts require self-contained option meanings. The relay can persist the
 user's exact gate answer into the driver inbox. Unchanged state consumes no model
-tokens. The owner turn uses the same bounded, receipt-driven interruption recovery
-as technical workers and never creates a replacement task.
+tokens. Interrupted owner turns use bounded, receipt-driven recovery and never
+create a replacement task.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process
 does not survive computer shutdown or provide a private application notification
 API. Restart the same invocation if both guardian and driver were stopped.

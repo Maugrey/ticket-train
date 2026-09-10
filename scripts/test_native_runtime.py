@@ -36,6 +36,7 @@ class FakeServer:
         self.active_writer_failures = 0
         self.event_sink = None
         self.host = self
+        self.owner_relay_calls = {}
 
     def call(self, method, params, receipt_path=None):
         self.calls.append(method)
@@ -84,6 +85,27 @@ class FakeServer:
         task["status"] = {"type": "idle"}
         task["turns"][-1].update(status="completed", items=[{"type": "agentMessage", "text": json.dumps(result)}])
 
+    def send_message_to_thread(self, source_thread_id, target_thread_id, prompt, call_id):
+        self.calls.append("send_message_to_thread")
+        self.call_params.append(("send_message_to_thread", {
+            "source_thread_id": source_thread_id, "target_thread_id": target_thread_id,
+            "prompt": prompt, "call_id": call_id,
+        }))
+        if call_id not in self.owner_relay_calls:
+            task = self.threads[target_thread_id]
+            turn = {
+                "id": "owner-turn-" + str(len(task["turns"]) + 1),
+                "status": "inProgress",
+                "items": [{
+                    "type": "functionCallOutput", "name": "send_message_to_thread",
+                    "namespace": "codex_app", "output": "<input>" + prompt + "</input>",
+                }],
+            }
+            task["turns"].append(turn)
+            task["status"] = {"type": "active"}
+            self.owner_relay_calls[call_id] = turn["id"]
+        return {"content": [{"type": "text", "text": json.dumps({"threadId": target_thread_id})}], "isError": False}
+
     def wait(self, seconds):
         return []
 
@@ -95,7 +117,10 @@ class FakeServer:
 
 
 def effects(root, server):
-    return train_supervisor.NativeEffects(root, __file__, host_factory=lambda *a, **kw: server)
+    return train_supervisor.NativeEffects(
+        root, __file__, host_factory=lambda *a, **kw: server,
+        owner_relay=server.send_message_to_thread,
+    )
 
 
 def repository(path):
@@ -217,6 +242,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 host_factory=lambda *a, **kw: server,
                 source_thread_id="thread-main",
                 repository=repository,
+                owner_relay=server.send_message_to_thread,
             )
             driver = runner.Driver(
                 run.path,
@@ -234,16 +260,16 @@ class NativeRuntimeTests(unittest.TestCase):
             finally:
                 driver.close()
 
-            self.assertEqual(server.calls.count("turn/start"), 1)
-            request = next(params for method, params in server.call_params if method == "turn/start")
-            prompt = request["input"][0]["text"]
+            self.assertEqual(server.calls.count("send_message_to_thread"), 1)
+            request = next(params for method, params in server.call_params if method == "send_message_to_thread")
+            prompt = request["prompt"]
             self.assertIn("Do not create a scheduled automation", prompt)
             self.assertIn("continuous supervision", prompt)
             self.assertIn('"question": "Choose the ticket scope."', prompt)
             self.assertIn("Do not omit or summarize those fields", prompt)
-            self.assertEqual(request["threadId"], "thread-main")
-            self.assertNotIn("effort", request)
+            self.assertEqual(request["target_thread_id"], "thread-main")
             self.assertEqual(server.calls.count("thread/start"), 0)
+            self.assertEqual(server.calls.count("turn/start"), 0)
             self.assertEqual(run_registry.load_json(stale)["status"], "superseded")
             self.assertEqual(run_registry.load_json(error)["status"], "superseded")
 
@@ -319,7 +345,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 job["retry_at"] = time.time() - 1
                 runtime.save(job)
                 self.assertFalse(driver.sync_owner_attention())
-                self.assertEqual(server.calls.count("turn/start"), 2)
+                self.assertEqual(server.calls.count("send_message_to_thread"), 2)
                 server.complete(notification["thread_id"], {"relay": "presented"})
                 self.assertTrue(driver.sync_owner_attention())
                 presented = run_registry.load_json(reference)
@@ -330,7 +356,62 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(presented["thread_id"], "thread-main")
             self.assertEqual(server.calls.count("thread/start"), 0)
 
-    def test_busy_owner_is_retried_without_creating_an_attention_task(self):
+    def test_lost_owner_relay_response_reconciles_without_duplicate_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, server = Path(tmp), FakeServer()
+            server.threads["thread-main"] = {
+                "id": "thread-main", "cwd": str(root), "createdAt": time.time(),
+                "turns": [], "status": {"type": "idle"}, "projectId": None,
+            }
+
+            def lose_response(*args):
+                server.send_message_to_thread(*args)
+                raise thread_runtime.HostError("connection lost after relay")
+
+            runtime = train_supervisor.NativeEffects(
+                root / "effects", __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="thread-main", owner_relay=lose_response,
+            )
+            spec = {"key": "owner-attention:test", "prompt": "Present the gate."}
+            notification = {"status": "pending", "reference": str(root / "notification.json")}
+            with self.assertRaises(thread_runtime.HostError):
+                runtime.start_owner_turn(notification, spec, "thread-main")
+
+            restarted = train_supervisor.NativeEffects(
+                root / "effects", __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="thread-main", owner_relay=server.send_message_to_thread,
+            )
+            self.assertTrue(restarted.start_owner_turn(notification, spec, "thread-main"))
+            self.assertEqual(server.calls.count("send_message_to_thread"), 1)
+            self.assertEqual(restarted.read(spec["key"])["status"], "running")
+
+    def test_accepted_queued_owner_relay_does_not_wait_for_a_turn_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, server = Path(tmp), FakeServer()
+            server.threads["thread-main"] = {
+                "id": "thread-main", "cwd": str(root), "createdAt": time.time(),
+                "turns": [], "status": {"type": "active"}, "projectId": None,
+            }
+            calls = []
+
+            def queue_only(*args):
+                calls.append(args)
+                return {"content": [{"type": "text", "text": '{"threadId":"thread-main"}'}], "isError": False}
+
+            runtime = train_supervisor.NativeEffects(
+                root / "effects", __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="thread-main", owner_relay=queue_only,
+            )
+            spec = {"key": "owner-attention:queued", "prompt": "Present the queued gate."}
+            notification = {"status": "pending", "reference": str(root / "notification.json")}
+
+            self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(runtime.read(spec["key"])["status"], "completed")
+            self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
+            self.assertEqual(len(calls), 1)
+
+    def test_busy_owner_is_relayed_without_creating_an_attention_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))
             server = FakeServer()
@@ -338,7 +419,6 @@ class NativeRuntimeTests(unittest.TestCase):
                 "id": "thread-main", "cwd": str(Path(tmp)), "createdAt": time.time(),
                 "turns": [], "status": {"type": "active"}, "projectId": None,
             }
-            server.active_writer_failures = 1
             runtime = effects(Path(tmp) / "driver" / "effects", server)
             runtime.source_thread_id = "thread-main"
             driver = runner.Driver(
@@ -350,20 +430,16 @@ class NativeRuntimeTests(unittest.TestCase):
             )
             try:
                 reference = driver.queue_owner_attention("human-gate", {"gate_id": "G-1"})
-                self.assertFalse(driver.sync_owner_attention())
-                notification = run_registry.load_json(reference)
-                self.assertEqual(notification["status"], "pending")
-                job = runtime.read("owner-attention:" + reference.parent.name)
-                job["retry_at"] = time.time() - 1
-                runtime.save(job)
                 self.assertTrue(driver.sync_owner_attention())
-                delivered = run_registry.load_json(reference)
+                notification = run_registry.load_json(reference)
+                self.assertEqual(notification["status"], "delivered")
             finally:
                 driver.close()
 
-            self.assertEqual(delivered["thread_id"], "thread-main")
+            self.assertEqual(notification["thread_id"], "thread-main")
             self.assertEqual(server.calls.count("thread/start"), 0)
-            self.assertEqual(server.calls.count("turn/start"), 1)
+            self.assertEqual(server.calls.count("turn/start"), 0)
+            self.assertEqual(server.calls.count("send_message_to_thread"), 1)
 
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

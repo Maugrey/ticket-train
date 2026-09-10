@@ -25,7 +25,8 @@ resolves scope and presents decisions and results.
    and driver are the sole continuous watcher. They observe tasks, collect results,
    retry bounded failures and write actionable outbox items without idle model
    wakes. Each new human gate, terminal error or completed train starts one
-   receipt-backed turn in the train's owner conversation with compact event context.
+   receipt-backed turn in the train's owner conversation through the desktop's
+   native task relay, with compact event context.
 7. Persist each user answer against its exact gate and revision, then continue
    the same runner. An acknowledgement or an emitted packet is not execution.
 
@@ -98,6 +99,8 @@ owner, epoch and revision under one lock. Never create a second orchestrator.
 Persist external intent and actual response. Reconcile ambiguous operations;
 missing list entries and stale RUNNING flags are not liveness evidence.
 Never resume a desktop-owned active task through a separate App Server.
+Use the bundled `send_message_to_thread` app relay for owner attention; keep the
+isolated App Server transport for train-owned technical workers.
 
 Verification journals individual commands. Reuse passed commands only for the
 same plan and unchanged worktree. Preserve raw logs and exit codes. Keep resource
