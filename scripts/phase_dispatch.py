@@ -124,13 +124,15 @@ def phase_prompt(driver, value, allowed):
         "launch other tasks, approve decisions, or message another task. Persist reports/tests as required. "
         "Implementation, acceptance and remediation must commit their own changes. "
         f"Return a JSON object with envelope and events. The allowed event types are {sorted(allowed)}. "
+        "Each event must identify its event type with the exact JSON field `type`; do not use `event_type`. "
         f"Their authoritative validation contract is {contract}; read only that contract. "
         "The envelope must contain phase_status (completed, failed, blocked or needs_input), result_summary, "
         "artifacts (including commit for code changes), tests_and_checks, residual_risks, "
         "requested_or_recommended_next_action and files_modified. Supply real evidence, never assumed success. "
         "For needs_input include input_request with gate_id, revision, question, reason, blocked_scope, "
         "continuing_scope and accepted_replies. Events contain technical findings; the runner supplies "
-        "phase_key, model, effort and event identity. Never resolve an unspecified product behavior yourself. "
+        "phase identity, event identity, model routing and reasoning authorization. Never claim or override "
+        "those controller-owned fields. Never resolve an unspecified product behavior yourself. "
         "For acceptance, include artifacts.verification_plan_reference and verification_evidence_reference, "
         "prepared for verification_runner.py and the VERIFICATION_RECORDED event; assertions need real coverage. "
         "The native collector reads your final result automatically; no completion callback is needed."
@@ -207,6 +209,18 @@ def decorate_events(driver, value, result):
     controller.require(isinstance(events, list), "Worker events must be a list")
     controller.require(not allowed or events, "Worker result is missing: technical events")
     for event in events:
+        controller.require(isinstance(event, dict), "Worker event must be a JSON object")
+        legacy_type = event.pop("event_type", None)
+        if legacy_type is not None:
+            controller.require(event.get("type") in {None, legacy_type}, "Worker event type fields disagree")
+            event["type"] = legacy_type
+        # A technical worker reports findings. It cannot forge controller
+        # identity or authorize its own route. Accepting the legacy event_type
+        # spelling keeps already-completed work collectible without another
+        # model turn; all persisted events use the canonical type field.
+        event.pop("event_id", None)
+        event.pop("reasoning_authorized", None)
+        event.pop("reasoning_authorization_id", None)
         controller.require(event.get("type") in allowed, "Worker attempted an event outside its technical role")
         if value["kind"] != "technical_decision":
             event["phase_key"] = value["phase_key"]

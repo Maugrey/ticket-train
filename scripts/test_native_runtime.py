@@ -367,6 +367,44 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(server.calls.count("thread/start"), count)
             driver.close()
 
+    def test_collection_normalizes_legacy_event_type_and_ignores_worker_authorization(self):
+        class DriverStub:
+            profile = {"revision": "fixture"}
+
+        value = {
+            "kind": "triage", "phase_key": "run:triage:1",
+            "requested_model": "gpt-6-astra", "requested_reasoning_effort": "high",
+        }
+        events = phase_dispatch.decorate_events(DriverStub(), value, {"events": [{
+            "event_type": "TICKET_TRIAGED", "event_id": "worker-controlled",
+            "ticket_id": "T-1", "criticality": "CRITICAL", "complexity": "MAXIMUM",
+            "confidence": "high", "reasoning_authorized": True,
+            "reasoning_authorization_id": "worker-controlled",
+        }]})
+        event = events[0]
+        self.assertEqual(event["type"], "TICKET_TRIAGED")
+        self.assertNotIn("event_type", event)
+        self.assertNotIn("event_id", event)
+        self.assertNotIn("reasoning_authorized", event)
+        self.assertNotIn("reasoning_authorization_id", event)
+        self.assertEqual(
+            (event["analysis_model"], event["analysis_reasoning_effort"], event["analysis_routing_conformance"]),
+            ("gpt-6-astra", "xhigh", "documented-fallback"),
+        )
+
+    def test_collection_rejects_conflicting_event_type_fields(self):
+        class DriverStub:
+            profile = {"revision": "fixture"}
+
+        value = {
+            "kind": "triage", "phase_key": "run:triage:1",
+            "requested_model": "gpt-6-astra", "requested_reasoning_effort": "high",
+        }
+        with self.assertRaisesRegex(ValueError, "type fields disagree"):
+            phase_dispatch.decorate_events(DriverStub(), value, {"events": [{
+                "type": "TICKET_TRIAGED", "event_type": "ANALYSIS_RECORDED",
+            }]})
+
     def test_old_generation_cannot_write_even_with_same_owner(self):
         state = {"orchestrator_lease": {"owner_thread_id": "same", "epoch": "new"}}
         with self.assertRaisesRegex(ValueError, "generation"):
