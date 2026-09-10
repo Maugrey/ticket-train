@@ -116,6 +116,78 @@ class NativeEffects:
     def save(self, job):
         save_json(self.directory(job["key"]) / "effect.json", job)
 
+    def start_owner_turn(self, notification):
+        """Deliver one durable, event-driven turn to the owning task."""
+        if not self.source_thread_id:
+            raise ValueError("Owner notification needs the source task ID")
+        directory = Path(notification["directory"])
+        directory.mkdir(parents=True, exist_ok=True)
+        response_path = directory / "turn-response.json"
+        request_path = directory / "turn-request.json"
+        if notification.get("status") == "delivered":
+            return True
+
+        if response_path.exists():
+            receipt = self.receipt(directory, "turn-response")
+            notification.update(
+                status="delivered",
+                turn_id=receipt["turn"]["id"],
+                delivered_at=utcnow(),
+            )
+            notification.pop("retry_at", None)
+            notification.pop("retry_reason", None)
+            save_json(Path(notification["reference"]), notification)
+            return True
+        if notification.get("status") == "ambiguous":
+            return False
+        if notification.get("retry_at", 0) > time.time():
+            return False
+        if request_path.exists() and notification.get("retry_reason") != "active-writer":
+            notification.update(
+                status="ambiguous",
+                error="Owner turn intent exists without a response; do not repeat the mutation",
+                ambiguous_at=utcnow(),
+            )
+            save_json(Path(notification["reference"]), notification)
+            return False
+
+        try:
+            if self.source_thread_id not in self.loaded:
+                self.host.call(
+                    "thread/resume",
+                    {"threadId": self.source_thread_id, "excludeTurns": True},
+                )
+                self.loaded.add(self.source_thread_id)
+            request = {
+                "threadId": self.source_thread_id,
+                "clientUserMessageId": notification["client_message_id"],
+                "input": [{"type": "text", "text": notification["prompt"], "text_elements": []}],
+            }
+            save_json(request_path, request)
+            receipt = self.host.call("turn/start", request, receipt_path=response_path)
+        except thread_runtime.HostError as error:
+            if "already has an active writer" in str(error):
+                response_path.unlink(missing_ok=True)
+                notification["retry_at"] = time.time() + 30
+                notification["retry_reason"] = "active-writer"
+                save_json(Path(notification["reference"]), notification)
+                return False
+            # The host may have accepted a mutation before a timeout or
+            # transport loss. Preserve the intent and never repeat blindly.
+            notification.update(status="ambiguous", error=str(error), ambiguous_at=utcnow())
+            save_json(Path(notification["reference"]), notification)
+            raise
+
+        notification.update(
+            status="delivered",
+            turn_id=receipt["turn"]["id"],
+            delivered_at=utcnow(),
+        )
+        notification.pop("retry_at", None)
+        notification.pop("retry_reason", None)
+        save_json(Path(notification["reference"]), notification)
+        return True
+
     def receipt(self, directory, name):
         path = directory / (name + ".json")
         if not path.exists():

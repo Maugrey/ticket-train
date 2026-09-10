@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -161,6 +162,65 @@ class Driver:
         if not path.exists():
             run_registry.save_json(path, {**value, "created_at": now_iso()})
             print(json.dumps({"status": "attention", "kind": kind, "reference": str(path)}, ensure_ascii=False), flush=True)
+        if kind != "writer-contention":
+            self.queue_owner_attention(kind, {**payload, "outbox_reference": str(path)})
+        return False
+
+    def queue_owner_attention(self, kind, payload):
+        """Persist one owner wake for one semantic actionable condition."""
+        semantic = {"kind": kind, "payload": payload}
+        key = sha256_json(semantic)
+        directory = self.directory / "owner-attention" / key[:24]
+        reference = directory / "effect.json"
+        if reference.exists():
+            return reference
+        directory.mkdir(parents=True, exist_ok=True)
+        prompt = (
+            "A new actionable Ticket Train event requires the owner task. "
+            f"Read only the compact event at {reference} and the current manifest at {self.path}. "
+            "Present the exact pending human question or terminal result, or report the evidenced error. "
+            "If the user answers a gate, persist that answer against its exact gate ID and revision in "
+            "the driver inbox so the existing runner can continue. Do not create a scheduled automation, "
+            "poll unchanged state, create another train, or repeat completed technical work. Return after "
+            "handling this single event; the native Python driver performs continuous supervision."
+        )
+        record = {
+            **semantic,
+            "format": "ticket-train-owner-attention-v1",
+            "status": "pending",
+            "created_at": now_iso(),
+            "client_message_id": str(uuid.uuid4()),
+            "directory": str(directory),
+            "reference": str(reference),
+            "prompt": prompt,
+        }
+        run_registry.save_json(reference, record)
+        return reference
+
+    def sync_owner_attention(self):
+        """Wake the owner only when the controller exposes a new action."""
+        state = self.state()
+        pending = state.get("pending_human_action")
+        if isinstance(pending, dict) and pending.get("notification_status") == "ANNOUNCED":
+            self.queue_owner_attention("human-gate", {
+                key: pending.get(key)
+                for key in (
+                    "gate_id", "gate_type", "ticket_id", "revision", "question", "reason",
+                    "blocked_scope", "continuing_scope", "accepted_replies",
+                )
+                if pending.get(key) is not None
+            })
+        if state["procedure"]["run_status"] == "COMPLETED":
+            self.queue_owner_attention("train-completed", {
+                "run_id": state.get("run_id"),
+                "manifest": str(self.path),
+            })
+
+        root = self.directory / "owner-attention"
+        for reference in sorted(root.glob("*/effect.json")) if root.exists() else []:
+            notification = run_registry.load_json(reference)
+            if notification.get("status") == "pending":
+                return bool(self.effects().start_owner_turn(notification))
         return False
 
     def command_hook(self, action):
@@ -274,6 +334,7 @@ class Driver:
                 try:
                     progress = self.tick()
                     writer_contentions = 0
+                    progress = self.sync_owner_attention() or progress
                     state = self.state()
                     if state["procedure"]["run_status"] == "COMPLETED":
                         return {"status": "completed", "revision": state["procedure"]["revision"]}

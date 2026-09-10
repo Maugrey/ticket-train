@@ -23,14 +23,17 @@ resolves scope and presents decisions and results.
    ownership epoch. Reuse the user's approval mode; otherwise use `standard`.
 6. Run `control_plane_runner.py drive` through the pinned release. Its guardian
    and driver are the sole continuous watcher. They observe tasks, collect results,
-   retry bounded failures and write actionable outbox items without model wakes.
+   retry bounded failures and write actionable outbox items without idle model
+   wakes. Each new human gate, terminal error or completed train starts one
+   compact turn in the owner conversation.
 7. Persist each user answer against its exact gate and revision, then continue
    the same runner. An acknowledgement or an emitted packet is not execution.
 
 After interruption, restart the same manifest and command. Receipts establish
 whether a task exists. A missing callback never authorizes a replacement.
-Do not add another conversation, scheduled heartbeat or polling model. Restart
-the same script after interruption; never substitute a model-based monitor.
+Do not add another conversation, scheduled heartbeat or polling model. Unchanged
+state never starts a model turn. Restart the same script after interruption;
+never substitute a model-based monitor.
 
 ## Authorization and scope
 

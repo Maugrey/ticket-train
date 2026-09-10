@@ -60,6 +60,11 @@ replays event receipts, collects results and executes successors. The guardian
 restarts a crashed driver at most three times. Host reconnection and per-command
 retries are separately bounded. The guardian and driver provide continuous
 script-only observation; do not create a scheduled app heartbeat or polling model.
+The driver durably deduplicates actionable events and starts one compact turn in
+the owner task only for a newly announced human gate, an evidenced terminal error
+or verified train completion. Active-owner contention retries the same recorded
+notification without creating another turn. Unchanged state consumes no model
+tokens.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process
 does not survive computer shutdown or provide a private application notification
 API. Restart the same invocation if both guardian and driver were stopped.
