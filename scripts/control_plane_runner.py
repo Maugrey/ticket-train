@@ -64,6 +64,7 @@ class Driver:
         self.last_observation = 0
         self.children = {}
         self.child_locks = contextlib.ExitStack()
+        self.blocked_actions = []
 
     def state(self):
         state = run_registry.load_json(self.path)
@@ -227,12 +228,25 @@ class Driver:
             self.notify("result-invalid", {"error": str(error)})
         actions = train_controller.next_actions(self.state())
         progress = False
+        self.blocked_actions = []
         for action in actions:
             if action["action"] in WAIT_ACTIONS:
                 continue
             retry_path = self.directory / "retries" / (sha256_json(action) + ".json")
             retry = run_registry.load_json(retry_path) if retry_path.exists() else {}
-            if retry.get("attempts", 0) >= 3 or retry.get("retry_at", 0) > time.time():
+            if retry.get("attempts", 0) >= 3:
+                registry = action.get("registry_reference")
+                available = False
+                if action["action"] == "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY" and registry and Path(registry).is_file():
+                    slots = run_registry.load_json(Path(registry)).get("slots", [])
+                    available = any(not slot.get("lease") and slot.get("status") in {"IDLE", "READY"} for slot in slots)
+                if available:
+                    retry = {"attempts": 0, "reason": "Unity slot registry now exposes an available slot"}
+                    run_registry.save_json(retry_path, retry)
+                else:
+                    self.blocked_actions.append({"action": action, "error": retry.get("error")})
+                    continue
+            if retry.get("retry_at", 0) > time.time():
                 continue
             try:
                 result = self.command_hook(action)
@@ -263,8 +277,10 @@ class Driver:
                     with run_registry.directory_lock(self.path.parent):
                         current = self.state()
                         run_registry.renew_lease(current)
+                        health_status = "blocked" if self.blocked_actions else ("working" if progress else "waiting")
                         current["driver_health"] = {"pid": os.getpid(), "observed_at": now_iso(),
-                                                    "status": "working" if progress else "waiting"}
+                                                    "status": health_status,
+                                                    "blocked_actions": self.blocked_actions}
                         run_registry.save_json(self.path, current)
                     if not progress:
                         if self.host:

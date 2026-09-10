@@ -203,8 +203,26 @@ class NativeRuntimeTests(unittest.TestCase):
                     with patch.object(runner.time, "time", return_value=stamp), contextlib.redirect_stdout(io.StringIO()):
                         driver.tick()
                 self.assertEqual(execute.call_count, 3)
+                self.assertEqual(driver.blocked_actions[0]["action"], action)
             self.assertIsNone(driver.host)
             self.assertFalse(run.state()["procedure"]["phases"])
+
+    def test_available_unity_slot_rearms_an_exhausted_acquisition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); run = Harness(root); run.confirm()
+            registry = root / "slots.json"
+            run_registry.save_json(registry, {"slots": [{"slot_id": "one", "status": "IDLE", "lease": None}]})
+            action = {"action": "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY", "registry_reference": str(registry)}
+            driver = runner.Driver(run.path, "thread-main", run.state()["orchestrator_lease"]["epoch"], {})
+            retry = driver.directory / "retries" / (runner.sha256_json(action) + ".json")
+            run_registry.save_json(retry, {"attempts": 3, "error": "slots unavailable"})
+            with patch.object(phase_dispatch, "collect", return_value=False), \
+                    patch.object(controller, "next_actions", return_value=[action]), \
+                    patch.object(phase_dispatch, "execute_action", return_value=True) as execute:
+                self.assertTrue(driver.tick())
+            execute.assert_called_once_with(driver, action)
+            self.assertEqual(run_registry.load_json(retry)["attempts"], 0)
+            self.assertEqual(driver.blocked_actions, [])
 
     def test_approval_answer_unblocks_same_native_task_and_rejects_stale_server(self):
         with tempfile.TemporaryDirectory() as tmp:

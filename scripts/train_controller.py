@@ -1625,6 +1625,28 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         )
         return
 
+    if event_type == "UNITY_REQUIREMENT_RECLASSIFIED":
+        require_fields(
+            event,
+            ("phase_key", "from_requirement", "to_requirement", "evidence"),
+            "Unity requirement reclassification",
+        )
+        target = phase(proc, str(event["phase_key"]))
+        require(target.get("launch_state") == "INTENT_RECORDED", "Unity requirement can change only before phase launch")
+        require(not target.get("unity_slot_lease"), "release the Unity slot before changing its requirement")
+        current = validate_unity_requirement(target.get("unity_requirement", "none"), "current Unity requirement")
+        replacement = validate_unity_requirement(event["to_requirement"], "replacement Unity requirement")
+        require(event["from_requirement"] == current, "Unity requirement reclassification source differs from the phase")
+        require(replacement != current, "Unity requirement reclassification must change the requirement")
+        target.setdefault("unity_requirement_reclassifications", []).append({
+            "from": current,
+            "to": replacement,
+            "evidence": event["evidence"],
+            "at": now_iso(),
+        })
+        target["unity_requirement"] = replacement
+        return
+
     if event_type == "UNITY_SLOT_ACQUIRED":
         unity = environment(proc)
         require(unity.get("profile") == "unity-mcp-local" and unity.get("status") == "READY", "Unity environment is not ready")

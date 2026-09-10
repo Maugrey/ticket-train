@@ -1296,6 +1296,26 @@ class TrainControllerTests(unittest.TestCase):
             self.assertEqual(release["action"], "RELEASE_UNITY_SLOT_DETERMINISTICALLY")
             self.assertEqual(release["slot_id"], "unity-slot-1")
 
+    def test_unity_requirement_can_be_corrected_before_phase_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(Path(directory), environment_profile="unity-mcp-local")
+            run.confirm()
+            self.configure_unity(run)
+            self.assertEqual(run.apply(
+                "PHASE_DISPATCHED", kind="analysis_reconciliation", ticket_id="T-1",
+                phase_key="run:T-1:reconcile:1", base_commit="base-sha",
+                model="gpt-5.6-sol", reasoning_effort="high",
+                unity_requirement="editor-read", context_packet=run.context_packet("base-sha", "base-sha"),
+            ), 0)
+            self.assertEqual(run.apply(
+                "UNITY_REQUIREMENT_RECLASSIFIED", phase_key="run:T-1:reconcile:1",
+                from_requirement="editor-read", to_requirement="none",
+                evidence="Repository-only analysis is sufficient; defer editor checks to implementation verification.",
+            ), 0)
+            target = run.state()["procedure"]["phases"]["run:T-1:reconcile:1"]
+            self.assertEqual(target["unity_requirement"], "none")
+            self.assertEqual(train_controller.next_actions(run.state())[0]["action"], "DISPATCH_VISIBLE_PHASE")
+
     def test_unity_configuration_rejects_cloud_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = Harness(Path(directory), environment_profile="unity-mcp-local")
