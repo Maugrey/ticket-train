@@ -998,6 +998,68 @@ def create_gate(
     return gates[gate_id]
 
 
+def announcement_ready_gate(gate: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(gate)
+    required = {
+        "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies",
+    }
+    if required.issubset(result):
+        return result
+
+    ticket_id = result["ticket_id"]
+    revision = result["revision"]
+    kind = result["kind"]
+    if kind == "analysis":
+        result.update(
+            question=f"Approve or reject analysis revision {revision} for ticket {ticket_id}.",
+            reason="The configured approval policy requires an explicit analysis decision.",
+            blocked_scope=[f"Implementation and delivery for ticket {ticket_id}"],
+            continuing_scope=["Independent tickets and read-only work"],
+            accepted_replies=[
+                f"Approve analysis revision {revision} for ticket {ticket_id}.",
+                f"Reject analysis revision {revision} for ticket {ticket_id}.",
+            ],
+        )
+        return result
+    if kind == "pre_merge":
+        result.update(
+            question=f"Approve or reject merging ticket {ticket_id} at commit {revision} into the train.",
+            reason="The configured approval policy requires an explicit pre-merge decision.",
+            blocked_scope=[f"Merge and downstream delivery for ticket {ticket_id}"],
+            continuing_scope=["Independent tickets and read-only work"],
+            accepted_replies=[
+                f"Approve merging ticket {ticket_id} at commit {revision}.",
+                f"Reject merging ticket {ticket_id} at commit {revision}.",
+            ],
+        )
+        return result
+    require(kind == "specification_deviation", f"gate {result['gate_id']} lacks announcement fields")
+    replies: list[str] = []
+    for proposal in result.get("proposals", []):
+        proposal_id = proposal["proposal_id"]
+        replies.extend([
+            f"{proposal_id}: select the minimal variant — {proposal['minimal_variant']}",
+            f"{proposal_id}: approve the expanded variant — {proposal['expanded_variant']}",
+            f"{proposal_id}: defer this proposal.",
+        ])
+    for deviation in result.get("specification_deviations", []):
+        recommended = deviation["recommended_option_id"]
+        for option in deviation["options"]:
+            suffix = " (recommended)" if option["option_id"] == recommended else ""
+            replies.append(
+                f"{deviation['deviation_id']}/{option['option_id']}{suffix}: {option['description']}"
+            )
+    result.update(
+        question=f"Select one explicit option for every proposed scope or specification item for ticket {ticket_id}.",
+        reason=result.get("reason") or "The source does not authorize these product decisions explicitly.",
+        blocked_scope=[f"Implementation and delivery for ticket {ticket_id}"],
+        continuing_scope=["Independent tickets and read-only work"],
+        accepted_replies=replies,
+    )
+    require(replies, "specification gate has no concrete reply options")
+    return result
+
+
 def scope_decision_key(ticket_id, source_revision, assessment):
     material = {"ticket_id": ticket_id, "source_revision": source_revision,
                 "proposals": assessment.get("proposals", []), "deviations": assessment.get("specification_deviations", [])}
@@ -4319,7 +4381,7 @@ def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
 
     unannounced = [gate for gate in proc["human_gates"].values() if gate["status"] == "PENDING_UNANNOUNCED"]
     if unannounced and not state.get("pending_human_action"):
-        return [{"action": "ANNOUNCE_HUMAN_GATE", "gate": unannounced[0]}]
+        return [{"action": "ANNOUNCE_HUMAN_GATE", "gate": announcement_ready_gate(unannounced[0])}]
     waiting_gates = [gate for gate in proc["human_gates"].values() if gate["status"] == "PENDING_ANNOUNCED"]
     gate_actions = [{"action": "AWAIT_HUMAN_GATE", "gate": gate} for gate in waiting_gates]
 
