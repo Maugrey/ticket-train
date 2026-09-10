@@ -102,6 +102,36 @@ def repository(path):
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    def test_driver_materializes_human_gate_for_owner_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Harness(Path(tmp))
+            run.confirm()
+            run.analyze(scope_proposals=[Harness.scope_expansion_proposal()])
+            state = run.state()
+            action = controller.next_actions(state)[0]
+            self.assertEqual(action["action"], "ANNOUNCE_HUMAN_GATE")
+            action["gate"].update({
+                "question": "Choose the ticket scope.",
+                "blocked_scope": ["Ticket implementation"],
+                "continuing_scope": ["Independent tickets"],
+                "accepted_replies": ["Use the minimal scope.", "Approve the expanded scope."],
+            })
+            driver = runner.Driver(
+                run.path,
+                "thread-main",
+                state["orchestrator_lease"]["epoch"],
+                {},
+            )
+            try:
+                self.assertTrue(phase_dispatch.execute_action(driver, action))
+            finally:
+                driver.close()
+
+            pending = run.state()["pending_human_action"]
+            self.assertEqual(pending["gate_id"], action["gate"]["gate_id"])
+            self.assertEqual(pending["question"], action["gate"]["question"])
+            self.assertEqual(pending["notification_status"], "ANNOUNCED")
+
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()

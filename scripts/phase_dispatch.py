@@ -663,6 +663,24 @@ def reports(driver, action):
 
 def execute_action(driver, action):
     name = action["action"]
+    if name == "ANNOUNCE_HUMAN_GATE":
+        gate = action["gate"]
+        presentation = (
+            "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
+        )
+        if not all(key in gate for key in presentation):
+            return driver.notify("human-gate-presentation-required", action)
+        driver.apply({
+            "type": "GATE_ANNOUNCED",
+            "gate_id": gate["gate_id"],
+            "revision": gate["revision"],
+            "decision_summary": gate["question"],
+            "evidence_summary": gate["reason"],
+            "blocked_scope": gate["blocked_scope"],
+            "continuing_scope": gate["continuing_scope"],
+            "accepted_replies": gate["accepted_replies"],
+        })
+        return True
     if name in {"CONFIGURE_SUPERVISION_BEFORE_DISPATCH", "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER", "REPLACE_MODEL_WAKING_WATCHER"}:
         import os
         driver.apply({"type": "SUPERVISION_CONFIGURED", "mode": "BACKGROUND_WATCHER",
