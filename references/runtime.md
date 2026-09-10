@@ -67,7 +67,9 @@ uses the profile's `attention_model` / `attention_reasoning_effort` settings, wh
 default to `gpt-6-astra` / `medium`. The exact event is embedded in its prompt, so
 it does not load the train manifest or accumulated history merely to present it.
 For a human gate it must show the reason, blocked and continuing scope, and every
-accepted reply without summarizing them. It can persist the
+accepted reply without summarizing them. Legacy gates whose replies referenced
+worker artifacts are enriched deterministically from the already collected result;
+new worker contracts require self-contained option meanings. The relay can persist the
 user's exact gate answer into the driver inbox. Unchanged state consumes no model
 tokens.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process

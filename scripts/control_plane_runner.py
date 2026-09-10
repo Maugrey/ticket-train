@@ -167,7 +167,7 @@ class Driver:
 
     def queue_owner_attention(self, kind, payload):
         """Persist one owner wake for one semantic actionable condition."""
-        semantic = {"relay_revision": "v3", "kind": kind, "payload": payload}
+        semantic = {"relay_revision": "v4", "kind": kind, "payload": payload}
         key = sha256_json(semantic)
         directory = self.directory / "owner-attention" / key[:24]
         reference = directory / "effect.json"
@@ -212,14 +212,15 @@ class Driver:
         state = self.state()
         pending = state.get("pending_human_action")
         if isinstance(pending, dict) and pending.get("notification_status") == "ANNOUNCED":
-            self.queue_owner_attention("human-gate", {
+            payload = {
                 key: pending.get(key)
                 for key in (
                     "gate_id", "gate_type", "ticket_id", "revision", "question", "reason",
                     "blocked_scope", "continuing_scope", "accepted_replies",
                 )
                 if pending.get(key) is not None
-            })
+            }
+            self.queue_owner_attention("human-gate", self.enrich_gate_payload(state, payload))
         if state["procedure"]["run_status"] == "COMPLETED":
             self.queue_owner_attention("train-completed", {
                 "run_id": state.get("run_id"),
@@ -248,6 +249,54 @@ class Driver:
                 }
                 return bool(self.effects().start_attention_task(notification, spec))
         return False
+
+    def enrich_gate_payload(self, state, payload):
+        """Make legacy gate replies self-contained from their collected result."""
+        accepted = payload.get("accepted_replies")
+        if not isinstance(accepted, list) or all(
+            not isinstance(reply, dict) or reply.get("options") or reply.get("meaning")
+            for reply in accepted
+        ):
+            return payload
+        gate_id = payload.get("gate_id")
+        source = None
+        for phase in state["procedure"]["phases"].values():
+            envelope = phase.get("completion_envelope") or {}
+            request = envelope.get("input_request") or {}
+            if request.get("gate_id") != gate_id:
+                continue
+            reference = (envelope.get("artifacts") or {}).get("complete_result_reference")
+            if not reference:
+                break
+            candidate = Path(reference).resolve()
+            if not candidate.is_relative_to(self.path.parent.resolve()):
+                break
+            source = run_registry.load_json(candidate)
+            break
+        if not source:
+            return payload
+        deviations = {}
+        for event in source.get("events", []):
+            assessment = event.get("scope_assessment") or {}
+            for item in assessment.get("specification_deviations", []):
+                if isinstance(item, dict) and item.get("id"):
+                    deviations[item["id"]] = item
+        enriched = copy.deepcopy(payload)
+        for reply in enriched["accepted_replies"]:
+            if not isinstance(reply, dict):
+                continue
+            deviation = deviations.get(reply.get("deviation_id"))
+            if not deviation:
+                continue
+            option_ids = set(reply.get("option_ids") or [])
+            reply["options"] = [
+                copy.deepcopy(option)
+                for option in deviation.get("options", [])
+                if option.get("id") in option_ids
+            ]
+            if deviation.get("recommendation"):
+                reply["recommendation"] = deviation["recommendation"]
+        return enriched
 
     def command_hook(self, action):
         """One optional project adapter per nonstandard mechanical operation.

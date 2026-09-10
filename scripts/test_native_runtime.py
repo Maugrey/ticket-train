@@ -235,6 +235,49 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(request["effort"], "medium")
             self.assertIn("owner-attention", creation["cwd"])
 
+    def test_legacy_gate_replies_are_enriched_from_collected_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Harness(Path(tmp))
+            result_path = run.path.parent / "reports" / "result.json"
+            run_registry.save_json(result_path, {
+                "events": [{
+                    "scope_assessment": {
+                        "specification_deviations": [{
+                            "id": "D-1",
+                            "recommendation": "OPTION-A",
+                            "options": [
+                                {"id": "OPTION-A", "meaning": "Complete A", "consequences": "Effect A"},
+                                {"id": "OPTION-B", "meaning": "Complete B", "consequences": "Effect B"},
+                            ],
+                        }],
+                    },
+                }],
+            })
+            state = run.state()
+            state["procedure"]["phases"]["T-1:analysis:1"] = {
+                "completion_envelope": {
+                    "input_request": {"gate_id": "G-1"},
+                    "artifacts": {"complete_result_reference": str(result_path)},
+                },
+            }
+            driver = runner.Driver(
+                run.path,
+                "thread-main",
+                state["orchestrator_lease"]["epoch"],
+                {},
+            )
+            payload = {
+                "gate_id": "G-1",
+                "accepted_replies": [{"deviation_id": "D-1", "option_ids": ["OPTION-A", "OPTION-B"]}],
+            }
+
+            enriched = driver.enrich_gate_payload(state, payload)
+
+            reply = enriched["accepted_replies"][0]
+            self.assertEqual(reply["recommendation"], "OPTION-A")
+            self.assertEqual(reply["options"][0]["meaning"], "Complete A")
+            self.assertNotIn("options", payload["accepted_replies"][0])
+
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()
