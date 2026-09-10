@@ -278,6 +278,45 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(reply["options"][0]["meaning"], "Complete A")
             self.assertNotIn("options", payload["accepted_replies"][0])
 
+    def test_interrupted_decision_relay_reuses_its_recorded_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Harness(Path(tmp))
+            server = FakeServer()
+            server.threads["thread-main"] = {
+                "id": "thread-main", "cwd": str(Path(tmp)), "createdAt": time.time(),
+                "turns": [], "status": {"type": "idle"}, "projectId": None,
+            }
+            runtime = effects(Path(tmp) / "driver" / "effects", server)
+            runtime.source_thread_id = "thread-main"
+            driver = runner.Driver(
+                run.path,
+                "thread-main",
+                run.state()["orchestrator_lease"]["epoch"],
+                {},
+                host=runtime,
+            )
+            try:
+                reference = driver.queue_owner_attention("human-gate", {"gate_id": "G-1"})
+                self.assertTrue(driver.sync_owner_attention())
+                notification = run_registry.load_json(reference)
+                task = server.threads[notification["thread_id"]]
+                task["turns"][-1]["status"] = "interrupted"
+                task["status"] = {"type": "idle"}
+                self.assertFalse(driver.sync_owner_attention())
+                job = runtime.read(notification["job_key"])
+                job["retry_at"] = time.time() - 1
+                runtime.save(job)
+                self.assertFalse(driver.sync_owner_attention())
+                self.assertEqual(server.calls.count("turn/start"), 2)
+                server.complete(notification["thread_id"], {"relay": "presented"})
+                self.assertTrue(driver.sync_owner_attention())
+                presented = run_registry.load_json(reference)
+            finally:
+                driver.close()
+
+            self.assertEqual(presented["status"], "presented")
+            self.assertEqual(presented["thread_id"], notification["thread_id"])
+
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()

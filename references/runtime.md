@@ -71,7 +71,8 @@ accepted reply without summarizing them. Legacy gates whose replies referenced
 worker artifacts are enriched deterministically from the already collected result;
 new worker contracts require self-contained option meanings. The relay can persist the
 user's exact gate answer into the driver inbox. Unchanged state consumes no model
-tokens.
+tokens. Its own initial turn uses the same bounded, receipt-driven interruption
+recovery as technical workers and never creates a replacement task.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process
 does not survive computer shutdown or provide a private application notification
 API. Restart the same invocation if both guardian and driver were stopped.

@@ -248,6 +248,22 @@ class Driver:
                     "title": title + suffix,
                 }
                 return bool(self.effects().start_attention_task(notification, spec))
+            if notification.get("status") == "delivered":
+                job_key = notification.get("job_key") or "owner-attention:" + reference.parent.name
+                job = self.effects().read(job_key)
+                if not job:
+                    notification.update(status="blocked", error="Attention task journal is missing")
+                    run_registry.save_json(reference, notification)
+                    return False
+                job = self.effects().observe(job)
+                if job["status"] == "completed":
+                    notification.update(status="presented", presented_at=now_iso())
+                    run_registry.save_json(reference, notification)
+                    return True
+                if job["status"] == "blocked":
+                    notification.update(status="blocked", error=job.get("error"))
+                    run_registry.save_json(reference, notification)
+                return False
         return False
 
     def enrich_gate_payload(self, state, payload):

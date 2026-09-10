@@ -123,6 +123,7 @@ class NativeEffects:
         job = self.submit(spec)
         notification.update(
             status="delivered",
+            job_key=job["key"],
             thread_id=job["thread_id"],
             turn_id=job["turn_id"],
             delivered_at=utcnow(),
