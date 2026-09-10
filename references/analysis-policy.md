@@ -36,6 +36,8 @@ verification completeness and whether claimed complexity reductions hold. Return
 all findings together. HIGH/MAXIMUM plans need this validation before execution.
 A failed validation calls for a targeted contract amendment, not another unchanged
 analysis or a new product approval. Reuse unaffected evidence and source decisions.
+Missing controller schemas, helpers, repository evidence or technical instructions
+are runner defects, never human gates. Report them as technical failures with evidence.
 
 Re-analyze only invalidated findings after source, base or scope changes. Preserve
 stable technical findings and approval references. Route validation checks a

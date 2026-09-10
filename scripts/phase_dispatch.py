@@ -96,8 +96,41 @@ def event_contracts(events):
         if isinstance(node, ast.If) and isinstance(node.test, ast.Compare):
             names = {x.value for x in ast.walk(node.test) if isinstance(x, ast.Constant) and isinstance(x.value, str)}
             if names.intersection(events):
-                sections.append(ast.get_source_segment(source, node))
-    return "\n\n".join(sections)
+                sections.append(node)
+
+    definitions = {}
+    for node in tree.body:
+        names = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [target.id for target in targets if isinstance(target, ast.Name)]
+        for name in names:
+            definitions[name] = node
+
+    roots = {
+        call.func.id
+        for section in sections
+        for call in ast.walk(section)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id.startswith(("validate_", "require"))
+    }
+    support, pending, seen = [], list(roots), set()
+    while pending:
+        name = pending.pop()
+        node = definitions.get(name)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        support.append(node)
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) and child.id in definitions:
+                pending.append(child.id)
+
+    selected = sorted({*support, *sections}, key=lambda node: node.lineno)
+    return "\n\n".join(ast.get_source_segment(source, node) for node in selected)
 
 
 def phase_prompt(driver, value, allowed):
@@ -129,6 +162,9 @@ def phase_prompt(driver, value, allowed):
         "The envelope must contain phase_status (completed, failed, blocked or needs_input), result_summary, "
         "artifacts (including commit for code changes), tests_and_checks, residual_risks, "
         "requested_or_recommended_next_action and files_modified. Supply real evidence, never assumed success. "
+        "Use needs_input only for a missing product decision, authorization or external fact that only the "
+        "user can supply. A missing controller contract, schema, helper, repository fact, tool result or "
+        "technical instruction is not user input: return failed with evidence so the runner can repair it. "
         "For needs_input include input_request with gate_id, revision, question, reason, blocked_scope, "
         "continuing_scope and accepted_replies. Every accepted reply must be self-contained: include each "
         "option ID with its complete meaning, consequences and any required user-supplied content; never "
@@ -832,15 +868,84 @@ def execute_action(driver, action):
         job = driver.effects().read(value["phase_key"])
         if not job:
             return driver.notify("external-resume-required", action)
-        prompt = "The user answered the phase's pending question: " + json.dumps(action["provided_input"], ensure_ascii=False)
-        if not job.get("pending_prompt"):
-            job["attempt"] += 1
+        prompt = "The phase's pending input is now available: " + json.dumps(
+            action["provided_input"], ensure_ascii=False
+        )
+
+        # A phase can request input more than once. The controller's default
+        # event id only identifies the phase, so a later PHASE_RESUMED used to
+        # be discarded as a duplicate. The phase stayed INPUT_READY and every
+        # runner tick started another turn. Journal the operation before the
+        # app-server call and key it by the actual supplied input.
+        input_request = (value.get("completion_envelope") or {}).get("input_request") or {}
+        resume_key = digest(
+            {
+                "phase_key": value["phase_key"],
+                "gate_id": input_request.get("gate_id"),
+                "gate_revision": input_request.get("revision"),
+                "provided_input": action["provided_input"],
+            }
+        )
+        operation = job.get("resume_operation")
+        if not isinstance(operation, dict) or operation.get("key") != resume_key:
+            job["attempt"] = int(job.get("attempt", 0)) + 1
             import uuid
+
             job["client_message_id"] = str(uuid.uuid4())
+            operation = {
+                "key": resume_key,
+                "event_id": f"driver:phase-resumed:{resume_key}",
+                "status": "armed",
+                "previous_turn_id": job.get("turn_id"),
+                "prompt": prompt,
+                "armed_at": time.time(),
+            }
+            job["resume_operation"] = operation
             driver.effects().save(job)
-        if not driver.effects().start_turn(job, job.get("pending_prompt") or prompt):
-            return False
-        driver.apply({"type": "PHASE_RESUMED", "phase_key": value["phase_key"], "thread_id": job["thread_id"], "visibility_verified": True})
+
+        operation = job["resume_operation"]
+        if operation.get("status") in {"armed", "starting"}:
+            current_turn_id = job.get("turn_id")
+            previous_turn_id = operation.get("previous_turn_id")
+            if (
+                operation.get("status") == "starting"
+                and current_turn_id
+                and current_turn_id != previous_turn_id
+                and not job.get("pending_prompt")
+            ):
+                operation["status"] = "turn_started"
+                operation["turn_id"] = current_turn_id
+                operation["turn_started_at"] = time.time()
+                driver.effects().save(job)
+            else:
+                if float(job.get("retry_at") or 0) > time.time():
+                    return False
+                operation["status"] = "starting"
+                operation["starting_at"] = time.time()
+                driver.effects().save(job)
+                if not driver.effects().start_turn(job, job.get("pending_prompt") or operation["prompt"]):
+                    return False
+                job = driver.effects().read(value["phase_key"])
+                operation = job["resume_operation"]
+                operation["status"] = "turn_started"
+                operation["turn_id"] = job.get("turn_id")
+                operation["turn_started_at"] = time.time()
+                driver.effects().save(job)
+
+        driver.apply(
+            {
+                "event_id": operation["event_id"],
+                "type": "PHASE_RESUMED",
+                "phase_key": value["phase_key"],
+                "thread_id": job["thread_id"],
+                "visibility_verified": True,
+            }
+        )
+        job = driver.effects().read(value["phase_key"])
+        if job and isinstance(job.get("resume_operation"), dict):
+            job["resume_operation"]["status"] = "recorded"
+            job["resume_operation"]["recorded_at"] = time.time()
+            driver.effects().save(job)
         return True
     if name == "RECORD_ANALYSIS_READINESS_RECONCILIATION":
         driver.apply({"type": "ANALYSIS_READINESS_RECONCILED", "ticket_id": action["ticket_id"],

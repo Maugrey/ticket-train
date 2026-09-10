@@ -110,6 +110,16 @@ def repository(path):
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    def test_analysis_contract_includes_nested_scope_validator_schema(self):
+        contract = phase_dispatch.event_contracts({"ANALYSIS_RECORDED"})
+
+        self.assertIn("def validate_scope_assessment", contract)
+        self.assertIn("PRODUCT_LIFECYCLE_STAGES =", contract)
+        self.assertIn("COMPATIBILITY_POSTURES =", contract)
+        self.assertIn('"classification_scope_item_ids"', contract)
+        self.assertIn('"specification_alignment"', contract)
+        self.assertIn("def require_fields", contract)
+
     def test_run_level_input_request_becomes_a_blocked_phase(self):
         envelope = {
             "phase_status": "needs_input",
@@ -826,6 +836,72 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(job["status"], "blocked")
             self.assertEqual(server.calls.count("thread/start"), 1)
             self.assertEqual(server.calls.count("turn/start"), 3)
+
+    def test_phase_resume_is_idempotent_for_the_same_supplied_input(self):
+        class FakeEffects:
+            def __init__(self):
+                self.job = {
+                    "phase_key": "34:analysis:3",
+                    "thread_id": "worker-34",
+                    "turn_id": "old-turn",
+                    "attempt": 3,
+                    "status": "completed",
+                }
+                self.start_calls = 0
+
+            def read(self, _phase_key):
+                return self.job
+
+            def save(self, job):
+                self.job = job
+
+            def start_turn(self, job, prompt):
+                self.start_calls += 1
+                job["turn_id"] = f"resume-turn-{self.start_calls}"
+                job["status"] = "running"
+                job.pop("pending_prompt", None)
+                job["last_prompt"] = prompt
+                self.save(job)
+                return True
+
+        class FakeDriver:
+            def __init__(self):
+                self.runtime = FakeEffects()
+                self.events = []
+                self.gate_id = "gate-1"
+
+            def state(self):
+                return {"procedure": {"phases": {"34:analysis:3": {
+                    "phase_key": "34:analysis:3", "thread_id": "worker-34",
+                    "completion_envelope": {"input_request": {
+                        "gate_id": self.gate_id, "revision": "analysis-r1",
+                    }},
+                }}}}
+
+            def effects(self):
+                return self.runtime
+
+            def apply(self, event):
+                self.events.append(event)
+
+            def notify(self, _kind, _payload):
+                return False
+
+        driver = FakeDriver()
+        action = {
+            "action": "RESUME_VISIBLE_PHASE_WITH_INPUT",
+            "phase_key": "34:analysis:3",
+            "provided_input": {"artifact": "repaired-contract", "sha256": "abc"},
+        }
+        self.assertTrue(phase_dispatch.execute_action(driver, action))
+        self.assertTrue(phase_dispatch.execute_action(driver, action))
+        self.assertEqual(driver.runtime.start_calls, 1)
+        self.assertEqual(driver.events[0]["event_id"], driver.events[1]["event_id"])
+
+        driver.gate_id = "gate-2"
+        self.assertTrue(phase_dispatch.execute_action(driver, action))
+        self.assertEqual(driver.runtime.start_calls, 2)
+        self.assertNotEqual(driver.events[1]["event_id"], driver.events[2]["event_id"])
 
     def test_verification_executor_survives_caller_and_does_not_repeat_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
