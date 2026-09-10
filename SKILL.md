@@ -24,8 +24,8 @@ resolves scope and presents decisions and results.
 6. Run `control_plane_runner.py drive` through the pinned release. Its guardian
    and driver are the sole continuous watcher. They observe tasks, collect results,
    retry bounded failures and write actionable outbox items without idle model
-   wakes. Each new human gate, terminal error or completed train starts one small
-   isolated decision task with compact context.
+   wakes. Each new human gate, terminal error or completed train starts one
+   receipt-backed turn in the train's owner conversation with compact event context.
 7. Persist each user answer against its exact gate and revision, then continue
    the same runner. An acknowledgement or an emitted packet is not execution.
 

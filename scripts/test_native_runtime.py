@@ -181,7 +181,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(pending["question"], action["gate"]["question"])
             self.assertEqual(pending["notification_status"], "ANNOUNCED")
 
-    def test_driver_creates_one_project_decision_task_and_never_polls_unchanged_state(self):
+    def test_driver_wakes_owner_conversation_once_and_never_polls_unchanged_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))
             run.confirm()
@@ -229,11 +229,9 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertIn("continuous supervision", prompt)
             self.assertIn('"question": "Choose the ticket scope."', prompt)
             self.assertIn("Do not omit or summarize those fields", prompt)
-            creation = next(params for method, params in server.call_params if method == "thread/start")
-            self.assertEqual(creation["projectId"], "project-1")
-            self.assertEqual(creation["model"], "gpt-6-astra")
-            self.assertEqual(request["effort"], "medium")
-            self.assertIn("owner-attention", creation["cwd"])
+            self.assertEqual(request["threadId"], "thread-main")
+            self.assertNotIn("effort", request)
+            self.assertEqual(server.calls.count("thread/start"), 0)
 
     def test_legacy_gate_replies_are_enriched_from_collected_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,7 +276,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(reply["options"][0]["meaning"], "Complete A")
             self.assertNotIn("options", payload["accepted_replies"][0])
 
-    def test_interrupted_decision_relay_reuses_its_recorded_task(self):
+    def test_interrupted_owner_relay_reuses_its_recorded_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))
             server = FakeServer()
@@ -315,7 +313,43 @@ class NativeRuntimeTests(unittest.TestCase):
                 driver.close()
 
             self.assertEqual(presented["status"], "presented")
-            self.assertEqual(presented["thread_id"], notification["thread_id"])
+            self.assertEqual(presented["thread_id"], "thread-main")
+            self.assertEqual(server.calls.count("thread/start"), 0)
+
+    def test_busy_owner_is_retried_without_creating_an_attention_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Harness(Path(tmp))
+            server = FakeServer()
+            server.threads["thread-main"] = {
+                "id": "thread-main", "cwd": str(Path(tmp)), "createdAt": time.time(),
+                "turns": [], "status": {"type": "active"}, "projectId": None,
+            }
+            server.active_writer_failures = 1
+            runtime = effects(Path(tmp) / "driver" / "effects", server)
+            runtime.source_thread_id = "thread-main"
+            driver = runner.Driver(
+                run.path,
+                "thread-main",
+                run.state()["orchestrator_lease"]["epoch"],
+                {},
+                host=runtime,
+            )
+            try:
+                reference = driver.queue_owner_attention("human-gate", {"gate_id": "G-1"})
+                self.assertFalse(driver.sync_owner_attention())
+                notification = run_registry.load_json(reference)
+                self.assertEqual(notification["status"], "pending")
+                job = runtime.read("owner-attention:" + reference.parent.name)
+                job["retry_at"] = time.time() - 1
+                runtime.save(job)
+                self.assertTrue(driver.sync_owner_attention())
+                delivered = run_registry.load_json(reference)
+            finally:
+                driver.close()
+
+            self.assertEqual(delivered["thread_id"], "thread-main")
+            self.assertEqual(server.calls.count("thread/start"), 0)
+            self.assertEqual(server.calls.count("turn/start"), 1)
 
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

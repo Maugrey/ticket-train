@@ -167,18 +167,18 @@ class Driver:
 
     def queue_owner_attention(self, kind, payload):
         """Persist one owner wake for one semantic actionable condition."""
-        semantic = {"relay_revision": "v5", "kind": kind, "payload": payload}
+        semantic = {"relay_revision": "v6", "kind": kind, "payload": payload}
         key = sha256_json(semantic)
         directory = self.directory / "owner-attention" / key[:24]
         reference = directory / "effect.json"
         prompt = (
-            "You are the compact decision relay for one actionable Ticket Train event. "
+            "You are the owner conversation for one actionable Ticket Train event. "
             "The exact event is embedded below; do not re-read or reconstruct it.\n"
             + json.dumps(semantic, ensure_ascii=False, sort_keys=True)
             + "\nFor a human gate, present the question, reason, blocked scope, continuing scope and every "
             "accepted reply with all IDs and required content. Do not omit or summarize those fields. "
             "For completion, present the terminal result; for an error, report its evidence. "
-            "Do not decide a human gate. If the user answers it in this task, write one INPUT_PROVIDED JSON "
+            "Do not decide a human gate. When the user answers in this conversation, write one INPUT_PROVIDED JSON "
             f"file under {self.directory / 'inbox'} with a stable event_id, the exact gate_id and revision, "
             "a faithful response_summary and a response_artifact that references the user answer. "
             f"Before writing the answer, verify only pending_human_action in {self.path}. "
@@ -188,8 +188,8 @@ class Driver:
         )
         if reference.exists():
             record = run_registry.load_json(reference)
-            if record.get("status") == "pending" and record.get("format") != "ticket-train-attention-task-v1":
-                record.update(format="ticket-train-attention-task-v1", prompt=prompt)
+            if record.get("status") == "pending" and record.get("format") != "ticket-train-owner-turn-v1":
+                record.update(format="ticket-train-owner-turn-v1", prompt=prompt)
                 for field in ("client_message_id", "retry_at", "retry_reason", "error", "ambiguous_at"):
                     record.pop(field, None)
                 run_registry.save_json(reference, record)
@@ -197,7 +197,7 @@ class Driver:
         directory.mkdir(parents=True, exist_ok=True)
         record = {
             **semantic,
-            "format": "ticket-train-attention-task-v1",
+            "format": "ticket-train-owner-turn-v1",
             "status": "pending",
             "created_at": now_iso(),
             "directory": str(directory),
@@ -231,28 +231,16 @@ class Driver:
         for reference in sorted(root.glob("*/effect.json")) if root.exists() else []:
             notification = run_registry.load_json(reference)
             if notification.get("status") == "pending":
-                workspace = Path(notification["directory"]) / "workspace"
-                workspace.mkdir(parents=True, exist_ok=True)
-                ticket_id = (notification.get("payload") or {}).get("ticket_id")
-                suffix = f" — #{ticket_id}" if ticket_id else ""
-                title = {
-                    "human-gate": "Ticket Train — input required",
-                    "train-completed": "Ticket Train — completed",
-                }.get(notification.get("kind"), "Ticket Train — attention required")
                 spec = {
                     "key": "owner-attention:" + reference.parent.name,
-                    "cwd": str(workspace),
-                    "model": self.profile.get("attention_model", "gpt-6-astra"),
-                    "effort": self.profile.get("attention_reasoning_effort", "medium"),
                     "prompt": notification["prompt"],
-                    "title": title + suffix,
                 }
-                return bool(self.effects().start_attention_task(notification, spec))
+                return bool(self.effects().start_owner_turn(notification, spec, self.owner))
             if notification.get("status") == "delivered":
                 job_key = notification.get("job_key") or "owner-attention:" + reference.parent.name
                 job = self.effects().read(job_key)
                 if not job:
-                    notification.update(status="blocked", error="Attention task journal is missing")
+                    notification.update(status="blocked", error="Owner attention journal is missing")
                     run_registry.save_json(reference, notification)
                     return False
                 job = self.effects().observe(job)

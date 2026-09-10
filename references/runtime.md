@@ -60,22 +60,20 @@ replays event receipts, collects results and executes successors. The guardian
 restarts a crashed driver at most three times. Host reconnection and per-command
 retries are separately bounded. The guardian and driver provide continuous
 script-only observation; do not create a scheduled app heartbeat or polling model.
-The driver durably deduplicates actionable events and creates one small task with
-compact context only for a newly announced human gate, an evidenced terminal error
-or verified train completion. Native project metadata is recorded when available,
-but the desktop currently lists app-server-created tasks under Recents even when
-their accepted project metadata and repository root match. Keep their working
-directories isolated; changing `cwd` does not repair this UI grouping. The relay
-uses the profile's `attention_model` / `attention_reasoning_effort` settings, which
-default to `gpt-6-astra` / `medium`. The exact event is embedded in its prompt, so
-it does not load the train manifest or accumulated history merely to present it.
+The driver durably deduplicates actionable events and starts one receipt-backed
+turn in the train's existing owner conversation only for a newly announced human
+gate, an evidenced terminal error or verified train completion. It never creates
+a separate attention task. If the owner conversation has an active writer, the
+driver waits and retries the same recorded turn instead of creating a replacement.
+The exact event is embedded in its prompt, so the owner does not reload the train
+manifest or reconstruct the event merely to present it.
 For a human gate it must show the reason, blocked and continuing scope, and every
 accepted reply without summarizing them. Legacy gates whose replies referenced
 worker artifacts are enriched deterministically from the already collected result;
 new worker contracts require self-contained option meanings. The relay can persist the
 user's exact gate answer into the driver inbox. Unchanged state consumes no model
-tokens. Its own initial turn uses the same bounded, receipt-driven interruption
-recovery as technical workers and never creates a replacement task.
+tokens. The owner turn uses the same bounded, receipt-driven interruption recovery
+as technical workers and never creates a replacement task.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process
 does not survive computer shutdown or provide a private application notification
 API. Restart the same invocation if both guardian and driver were stopped.

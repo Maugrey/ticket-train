@@ -116,15 +116,27 @@ class NativeEffects:
     def save(self, job):
         save_json(self.directory(job["key"]) / "effect.json", job)
 
-    def start_attention_task(self, notification, spec):
-        """Create one compact, run-owned task for one actionable event."""
+    def start_owner_turn(self, notification, spec, owner_thread_id):
+        """Start one durable turn in the existing owner conversation."""
         if notification.get("status") == "delivered":
             return True
-        job = self.submit(spec)
+        job = self.prepare(spec)
+        if job.get("thread_id") and job["thread_id"] != owner_thread_id:
+            raise ValueError("Owner attention target changed after it was armed")
+        job["thread_id"] = owner_thread_id
+        self.save(job)
+        if job.get("retry_at", 0) > time.time():
+            return False
+        if job.get("pending_prompt") or job["status"] in {"creating", "starting_turn"}:
+            if not self.start_turn(job, job.get("pending_prompt") or spec["prompt"]):
+                return False
+            job = self.read(spec["key"])
+        if not job.get("turn_id"):
+            return False
         notification.update(
             status="delivered",
             job_key=job["key"],
-            thread_id=job["thread_id"],
+            thread_id=owner_thread_id,
             turn_id=job["turn_id"],
             delivered_at=utcnow(),
         )
