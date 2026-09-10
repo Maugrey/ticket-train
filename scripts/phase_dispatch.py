@@ -733,6 +733,14 @@ def execute_action(driver, action):
             "accepted_replies": gate["accepted_replies"],
         })
         return True
+    if name == "REOPEN_STALE_PHASE_INPUT_GATE":
+        driver.apply({
+            "type": "STALE_PHASE_INPUT_GATE_REOPENED",
+            "phase_key": action["phase_key"],
+            "gate_id": action["gate_id"],
+            "revision": action["revision"],
+        })
+        return True
     if name in {"CONFIGURE_SUPERVISION_BEFORE_DISPATCH", "RECONFIGURE_EVENT_CALLBACKS_FOR_CURRENT_OWNER", "REPLACE_MODEL_WAKING_WATCHER"}:
         import os
         driver.apply({"type": "SUPERVISION_CONFIGURED", "mode": "BACKGROUND_WATCHER",

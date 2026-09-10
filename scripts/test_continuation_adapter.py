@@ -160,6 +160,38 @@ class ContinuationTests(unittest.TestCase):
             self.assertNotIn("runtime_observation", run.state()["procedure"]["phases"][phase_key])
             self.assertEqual(len(run.state()["procedure"]["phases"]), count)
 
+            narrowed = dict(request)
+            narrowed["question"] = "Choose the remaining B1 or B2 behavior?"
+            narrowed["accepted_replies"] = ["B1", "B2"]
+            self.assertEqual(run.apply("PHASE_TERMINATED", phase_key=phase_key, envelope={
+                "phase_key": phase_key, "phase_status": "needs_input", "actual_model": "gpt-5.6-terra",
+                "actual_reasoning_effort": "medium", "result_summary": "One choice remains", "artifacts": {},
+                "tests_and_checks": ["prior answer preserved"], "residual_risks": "Remaining choice",
+                "requested_or_recommended_next_action": "ask the narrowed question", "files_modified": "none",
+                "usage": {"measurement": "unavailable"}, "input_request": narrowed,
+            }), 0)
+            gate = run.state()["procedure"]["human_gates"]["phase-question"]
+            self.assertEqual(gate["status"], "PENDING_UNANNOUNCED")
+            self.assertEqual(gate["question"], narrowed["question"])
+            self.assertEqual(gate["response_history"][0]["response_summary"], "B")
+            self.assertEqual(controller.next_actions(run.state())[0]["action"], "ANNOUNCE_HUMAN_GATE")
+
+            state = run.state()
+            state["procedure"]["human_gates"]["phase-question"]["status"] = "PROVIDED"
+            run_registry.save_json(run.path, state)
+            recovery = controller.next_actions(run.state())[0]
+            self.assertEqual(recovery["action"], "REOPEN_STALE_PHASE_INPUT_GATE")
+            self.assertEqual(run.apply(
+                "STALE_PHASE_INPUT_GATE_REOPENED",
+                phase_key=phase_key,
+                gate_id="phase-question",
+                revision="q1",
+            ), 0)
+            self.assertEqual(
+                run.state()["procedure"]["human_gates"]["phase-question"]["status"],
+                "PENDING_UNANNOUNCED",
+            )
+
 
 
 if __name__ == "__main__":

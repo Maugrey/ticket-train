@@ -228,8 +228,27 @@ class Driver:
             })
 
         root = self.directory / "owner-attention"
+        records = []
         for reference in sorted(root.glob("*/effect.json")) if root.exists() else []:
             notification = run_registry.load_json(reference)
+            if (
+                isinstance(pending, dict)
+                and notification.get("kind") == "human-gate"
+                and notification.get("payload", {}).get("gate_id") != pending.get("gate_id")
+                and notification.get("status") in {"pending", "delivered"}
+            ):
+                notification.update(status="superseded", superseded_at=now_iso())
+                run_registry.save_json(reference, notification)
+            records.append((reference, notification))
+
+        if isinstance(pending, dict):
+            records = [
+                pair for pair in records
+                if pair[1].get("kind") == "human-gate"
+                and pair[1].get("payload", {}).get("gate_id") == pending.get("gate_id")
+            ]
+
+        for reference, notification in records:
             if notification.get("status") == "pending":
                 spec = {
                     "key": "owner-attention:" + reference.parent.name,

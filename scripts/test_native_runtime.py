@@ -226,6 +226,8 @@ class NativeRuntimeTests(unittest.TestCase):
                 host=runtime,
             )
             try:
+                stale = driver.queue_owner_attention("human-gate", {"gate_id": "old-gate"})
+                error = driver.queue_owner_attention("driver-blocked", {"error": "old failure"})
                 self.assertTrue(phase_dispatch.execute_action(driver, action))
                 self.assertTrue(driver.sync_owner_attention())
                 self.assertFalse(driver.sync_owner_attention())
@@ -242,6 +244,8 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(request["threadId"], "thread-main")
             self.assertNotIn("effort", request)
             self.assertEqual(server.calls.count("thread/start"), 0)
+            self.assertEqual(run_registry.load_json(stale)["status"], "superseded")
+            self.assertEqual(run_registry.load_json(error)["status"], "pending")
 
     def test_legacy_gate_replies_are_enriched_from_collected_result(self):
         with tempfile.TemporaryDirectory() as tmp:

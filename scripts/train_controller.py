@@ -979,12 +979,26 @@ def add_phase(
 def create_gate(
     proc: dict[str, Any], *, gate_id: str, kind: str, ticket_id: str, revision: str,
     phase_key: str | None = None, prior_ticket_status: str | None = None,
+    reopen_provided: bool = False,
 ) -> dict[str, Any]:
     gates = proc.setdefault("human_gates", {})
     require(isinstance(gates, dict), "procedure.human_gates must be an object")
     if gate_id in gates:
         prior = gates[gate_id]
         require((prior["kind"], prior["ticket_id"], prior["revision"]) == (kind, ticket_id, revision), "gate identity collision")
+        if reopen_provided and prior.get("status") == "PROVIDED":
+            prior.setdefault("response_history", []).append({
+                key: prior[key]
+                for key in ("response_summary", "response_artifact", "resolved_at")
+                if key in prior
+            })
+            for key in ("response_summary", "response_artifact", "resolved_at", "announced_at", "choices"):
+                prior.pop(key, None)
+            prior.update(
+                status="PENDING_UNANNOUNCED",
+                phase_key=phase_key,
+                prior_ticket_status=prior_ticket_status,
+            )
         return prior
     gates[gate_id] = {
         "gate_id": gate_id,
@@ -1318,7 +1332,7 @@ def terminate_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, An
         gate = create_gate(
             proc, gate_id=request["gate_id"], kind="input", ticket_id=str(ticket_id),
             revision=request["revision"], phase_key=item["phase_key"],
-            prior_ticket_status=prior_status,
+            prior_ticket_status=prior_status, reopen_provided=True,
         )
         gate.update({key: request[key] for key in (
             "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
@@ -2325,6 +2339,33 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         else:
             gate["resume_mode"] = "ticket-state"
         item["status"] = "AWAITING_REQUIRED_INPUT"
+        return
+
+    if event_type == "STALE_PHASE_INPUT_GATE_REOPENED":
+        interrupted = phase(proc, str(event.get("phase_key") or ""))
+        require(interrupted.get("launch_state") == "NEEDS_INPUT", "phase is not waiting for input")
+        request = (interrupted.get("completion_envelope") or {}).get("input_request")
+        require(isinstance(request, dict), "waiting phase has no input request")
+        require(event.get("gate_id") == request.get("gate_id"), "input gate does not match waiting phase")
+        require(event.get("revision") == request.get("revision"), "input revision does not match waiting phase")
+        gates = proc.get("human_gates", {})
+        existing = gates.get(event["gate_id"]) if isinstance(gates, dict) else None
+        require(isinstance(existing, dict) and existing.get("status") == "PROVIDED", "input gate is not stale")
+        gate = create_gate(
+            proc,
+            gate_id=request["gate_id"],
+            kind="input",
+            ticket_id=str(interrupted["ticket_id"]),
+            revision=request["revision"],
+            phase_key=interrupted["phase_key"],
+            prior_ticket_status=existing.get("prior_ticket_status"),
+            reopen_provided=True,
+        )
+        gate.update({key: request[key] for key in (
+            "question", "reason", "blocked_scope", "continuing_scope", "accepted_replies"
+        )})
+        gate["resume_mode"] = "same-thread"
+        ticket(proc, str(interrupted["ticket_id"]))["status"] = "AWAITING_REQUIRED_INPUT"
         return
 
     if event_type == "GATE_ANNOUNCED":
@@ -4378,6 +4419,19 @@ def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
     releases = unity_release_actions(proc)
     if releases:
         return releases
+
+    for value in proc["phases"].values():
+        if value.get("launch_state") != "NEEDS_INPUT":
+            continue
+        request = (value.get("completion_envelope") or {}).get("input_request")
+        gate = proc.get("human_gates", {}).get(request.get("gate_id")) if isinstance(request, dict) else None
+        if isinstance(gate, dict) and gate.get("status") == "PROVIDED":
+            return [{
+                "action": "REOPEN_STALE_PHASE_INPUT_GATE",
+                "phase_key": value["phase_key"],
+                "gate_id": request["gate_id"],
+                "revision": request["revision"],
+            }]
 
     unannounced = [gate for gate in proc["human_gates"].values() if gate["status"] == "PENDING_UNANNOUNCED"]
     if unannounced and not state.get("pending_human_action"):
