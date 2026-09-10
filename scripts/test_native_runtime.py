@@ -245,7 +245,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertNotIn("effort", request)
             self.assertEqual(server.calls.count("thread/start"), 0)
             self.assertEqual(run_registry.load_json(stale)["status"], "superseded")
-            self.assertEqual(run_registry.load_json(error)["status"], "pending")
+            self.assertEqual(run_registry.load_json(error)["status"], "superseded")
 
     def test_legacy_gate_replies_are_enriched_from_collected_result(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -200,6 +200,7 @@ class Driver:
             "format": "ticket-train-owner-turn-v1",
             "status": "pending",
             "created_at": now_iso(),
+            "procedure_revision": self.state()["procedure"]["revision"],
             "directory": str(directory),
             "reference": str(reference),
             "prompt": prompt,
@@ -231,11 +232,27 @@ class Driver:
         records = []
         for reference in sorted(root.glob("*/effect.json")) if root.exists() else []:
             notification = run_registry.load_json(reference)
+            current_gate_id = pending.get("gate_id") if isinstance(pending, dict) else None
             if (
-                isinstance(pending, dict)
-                and notification.get("kind") == "human-gate"
-                and notification.get("payload", {}).get("gate_id") != pending.get("gate_id")
+                notification.get("kind") == "human-gate"
+                and notification.get("payload", {}).get("gate_id") != current_gate_id
                 and notification.get("status") in {"pending", "delivered"}
+                and (
+                    current_gate_id is not None
+                    or notification.get("procedure_revision") is None
+                    or int(notification["procedure_revision"]) < int(state["procedure"]["revision"])
+                )
+            ):
+                notification.update(status="superseded", superseded_at=now_iso())
+                run_registry.save_json(reference, notification)
+            elif (
+                notification.get("kind") not in {"human-gate", "train-completed"}
+                and notification.get("status") in {"pending", "delivered"}
+                and not (state.get("driver_health") or {}).get("blocked_actions")
+                and (
+                    notification.get("procedure_revision") is None
+                    or int(notification["procedure_revision"]) < int(state["procedure"]["revision"])
+                )
             ):
                 notification.update(status="superseded", superseded_at=now_iso())
                 run_registry.save_json(reference, notification)
