@@ -29,24 +29,34 @@ from test_train_controller import Harness
 class FakeServer:
     def __init__(self):
         self.threads = {}
+        self.projects = []
         self.calls = []
+        self.call_params = []
         self.crash_after_create = False
         self.event_sink = None
         self.host = self
 
     def call(self, method, params, receipt_path=None):
         self.calls.append(method)
+        self.call_params.append((method, copy.deepcopy(params)))
         if method == "thread/start":
             task_id = "task-" + str(len(self.threads) + 1)
-            self.threads[task_id] = {"id": task_id, "cwd": params["cwd"], "createdAt": time.time(), "turns": [], "status": {"type": "idle"}}
+            self.threads[task_id] = {"id": task_id, "cwd": params["cwd"], "createdAt": time.time(), "turns": [], "status": {"type": "idle"},
+                                     "projectId": params.get("projectId")}
             result = {"thread": self.threads[task_id], "model": params.get("model", "test-model")}
             if self.crash_after_create:
                 self.crash_after_create = False
                 raise thread_runtime.HostError("Connection lost after server created the task")
         elif method == "thread/list":
             result = {"data": list(self.threads.values()), "nextCursor": None}
+        elif method == "project/list":
+            result = {"data": self.projects, "nextCursor": None}
         elif method in {"thread/read", "thread/resume"}:
             result = {"thread": self.threads[params["threadId"]]}
+        elif method == "thread/metadata/update":
+            task = self.threads[params["threadId"]]
+            task["projectId"] = params["projectId"]
+            result = {"thread": task}
         elif method == "turn/start":
             task = self.threads[params["threadId"]]
             turn = {"id": "turn-" + str(len(task["turns"]) + 1), "status": "inProgress", "items": []}
@@ -92,6 +102,56 @@ def repository(path):
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+            repository = str(Path(tmp) / "project")
+            server.threads["parent"] = {"id": "parent", "cwd": repository, "createdAt": time.time(),
+                                        "turns": [], "status": {"type": "idle"}, "projectId": None}
+            server.projects = [{"id": "project-1", "name": "Project", "roots": [{"path": repository}]}]
+            runtime = train_supervisor.NativeEffects(
+                Path(tmp), __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="parent", repository=repository
+            )
+            spec = {"key": "T-1:analysis:1", "cwd": str(Path(tmp) / "worktree"), "model": "test-model",
+                    "effort": "low", "prompt": "Analyze", "title": "Train worker"}
+
+            job = runtime.submit(spec)
+
+            start = next(params for method, params in server.call_params if method == "thread/start")
+            self.assertEqual(start["projectId"], "project-1")
+            self.assertEqual(start["cwd"], spec["cwd"])
+            self.assertEqual(server.threads[job["thread_id"]]["projectId"], "project-1")
+            self.assertEqual(server.calls.count("thread/read"), 1)
+            self.assertEqual(server.calls.count("project/list"), 1)
+
+    def test_recorded_unassigned_creation_is_repaired_without_a_second_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+            repository = str(Path(tmp) / "project")
+            server.projects = [{"id": "project-1", "name": "Project", "roots": [{"path": repository}]}]
+            server.threads["worker"] = {"id": "worker", "cwd": str(Path(tmp) / "worktree"),
+                                        "createdAt": time.time(), "turns": [], "status": {"type": "idle"},
+                                        "projectId": None}
+            runtime = train_supervisor.NativeEffects(
+                Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server, repository=repository
+            )
+            spec = {"key": "T-1:analysis:1", "cwd": server.threads["worker"]["cwd"], "model": "test-model",
+                    "effort": "low", "prompt": "Analyze", "title": "Train worker"}
+            runtime.prepare(spec)
+            directory = runtime.directory(spec["key"])
+            run_registry.save_json(directory / "create-response.json", {
+                "result": {"thread": copy.deepcopy(server.threads["worker"]), "model": "test-model"}
+            })
+
+            job = runtime.submit(spec)
+
+            self.assertEqual(job["thread_id"], "worker")
+            self.assertNotIn("thread/start", server.calls)
+            self.assertIn("thread/metadata/update", server.calls)
+            receipt = run_registry.load_json(directory / "create-response.json")
+            self.assertEqual(receipt["result"]["thread"]["projectId"], "project-1")
+
     def test_scope_decision_reuse_preserves_choice_and_risk_but_new_source_reopens_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp)); run.confirm(); run.analyze(scope_proposals=[Harness.scope_expansion_proposal()])

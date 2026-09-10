@@ -38,13 +38,47 @@ class NativeEffects:
     Only tasks with a recorded creation receipt may be resumed by this server.
     """
 
-    def __init__(self, root, executable=None, host_factory=thread_runtime.AppServer):
+    def __init__(self, root, executable=None, host_factory=thread_runtime.AppServer,
+                 source_thread_id=None, repository=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.instance = str(uuid.uuid4())
         self.pending_requests = {}
         self.host = host_factory(thread_runtime.app_server_executable(executable), event_sink=self.notification)
         self.loaded = set()
+        self.source_thread_id = source_thread_id
+        self.repository = repository
+        self.source_project_id = None
+        self.source_project_resolved = False
+
+    def project_id(self):
+        """Resolve the orchestrator's app project once for all worker tasks."""
+        if not self.source_project_resolved:
+            self.source_project_resolved = True
+            if self.source_thread_id:
+                source = self.host.call(
+                    "thread/read", {"threadId": self.source_thread_id, "includeTurns": False}
+                )["thread"]
+                value = source.get("projectId")
+                self.source_project_id = value if isinstance(value, str) and value else None
+            if not self.source_project_id and self.repository:
+                expected = os.path.normcase(os.path.abspath(self.repository))
+                projects = self.host.call("project/list", {}).get("data", [])
+                matches = [
+                    project for project in projects
+                    if any(
+                        os.path.normcase(os.path.abspath(root.get("path", ""))) == expected
+                        for root in project.get("roots", [])
+                    )
+                ]
+                if len(matches) > 1:
+                    raise thread_runtime.HostError(
+                        "Repository belongs to multiple Codex projects: "
+                        + ", ".join(project["id"] for project in matches)
+                    )
+                if matches:
+                    self.source_project_id = matches[0]["id"]
+        return self.source_project_id
 
     def notification(self, event):
         # Server-initiated approval/input requests are durable, never approved
@@ -128,11 +162,21 @@ class NativeEffects:
                 save_json(directory / "create-response.json", {"result": creation, "reconciled": True})
             else:
                 request = {"cwd": spec["cwd"], "ephemeral": False}
+                project_id = self.project_id()
+                if project_id:
+                    request["projectId"] = project_id
                 if spec.get("model"):
                     request["model"] = spec["model"]
                 save_json(armed, request)
                 creation = self.host.call("thread/start", request, receipt_path=directory / "create-response.json")
                 self.loaded.add(creation["thread"]["id"])
+        project_id = self.project_id()
+        if project_id and creation["thread"].get("projectId") != project_id:
+            updated = self.host.call(
+                "thread/metadata/update", {"threadId": creation["thread"]["id"], "projectId": project_id}
+            )
+            creation["thread"] = updated["thread"]
+            save_json(directory / "create-response.json", {"result": creation, "project_reconciled": True})
         job["thread_id"] = creation["thread"]["id"]
         job["actual_model"] = creation.get("model") or job.get("actual_model")
         self.save(job)

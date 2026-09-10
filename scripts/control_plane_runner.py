@@ -73,7 +73,10 @@ class Driver:
 
     def effects(self):
         if self.host is None:
-            self.host = self.host_factory(self.directory / "effects", self.profile.get("host_executable"))
+            self.host = self.host_factory(
+                self.directory / "effects", self.profile.get("host_executable"),
+                source_thread_id=self.owner, repository=self.profile.get("repository")
+            )
         return self.host
 
     def apply(self, event):

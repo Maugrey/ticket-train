@@ -45,6 +45,7 @@ class AppServer:
         try:
             self.identity = self.call("initialize", {
                 "clientInfo": {"name": "ticket_train", "version": "2"},
+                "capabilities": {"experimentalApi": True},
             })
             self._send({"method": "initialized", "params": {}})
         except Exception:

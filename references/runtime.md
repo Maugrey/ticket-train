@@ -79,6 +79,11 @@ actual response before returning it to the scheduler. It reuses recorded tasks
 and turns. A missing response is reconciled through the operation's isolated cwd
 and creation interval; zero or multiple matches never authorize a new task.
 
+Worker tasks inherit the repository's Codex project through native `projectId`
+metadata. The native project catalog is matched once against the profile's exact
+repository root; the isolated worktree remains the task's `cwd`. This needs no AI
+decision.
+
 `phase_dispatch.py` implements dispatch, collection, Git integration, verification,
 PRs and feedback. Workers return technical JSON; the adapter supplies identities
 and journals the whole validated event transaction. No callback is required.
