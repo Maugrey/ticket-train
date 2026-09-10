@@ -233,7 +233,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(creation["projectId"], "project-1")
             self.assertEqual(creation["model"], "gpt-6-astra")
             self.assertEqual(request["effort"], "medium")
-            self.assertIn("owner-attention", creation["cwd"])
+            self.assertEqual(creation["cwd"], repository)
 
     def test_legacy_gate_replies_are_enriched_from_collected_result(self):
         with tempfile.TemporaryDirectory() as tmp:

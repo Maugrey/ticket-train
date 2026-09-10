@@ -167,7 +167,7 @@ class Driver:
 
     def queue_owner_attention(self, kind, payload):
         """Persist one owner wake for one semantic actionable condition."""
-        semantic = {"relay_revision": "v4", "kind": kind, "payload": payload}
+        semantic = {"relay_revision": "v5", "kind": kind, "payload": payload}
         key = sha256_json(semantic)
         directory = self.directory / "owner-attention" / key[:24]
         reference = directory / "effect.json"
@@ -233,6 +233,7 @@ class Driver:
             if notification.get("status") == "pending":
                 workspace = Path(notification["directory"]) / "workspace"
                 workspace.mkdir(parents=True, exist_ok=True)
+                task_cwd = self.profile.get("repository") or str(workspace)
                 ticket_id = (notification.get("payload") or {}).get("ticket_id")
                 suffix = f" — #{ticket_id}" if ticket_id else ""
                 title = {
@@ -241,7 +242,7 @@ class Driver:
                 }.get(notification.get("kind"), "Ticket Train — attention required")
                 spec = {
                     "key": "owner-attention:" + reference.parent.name,
-                    "cwd": str(workspace),
+                    "cwd": task_cwd,
                     "model": self.profile.get("attention_model", "gpt-6-astra"),
                     "effort": self.profile.get("attention_reasoning_effort", "medium"),
                     "prompt": notification["prompt"],
