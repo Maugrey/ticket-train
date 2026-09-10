@@ -60,10 +60,12 @@ replays event receipts, collects results and executes successors. The guardian
 restarts a crashed driver at most three times. Host reconnection and per-command
 retries are separately bounded. The guardian and driver provide continuous
 script-only observation; do not create a scheduled app heartbeat or polling model.
-The driver durably deduplicates actionable events and starts one compact turn in
-the owner task only for a newly announced human gate, an evidenced terminal error
-or verified train completion. Active-owner contention retries the same recorded
-notification without creating another turn. Unchanged state consumes no model
+The driver durably deduplicates actionable events and creates one small task with
+compact context only for a newly announced human gate, an evidenced terminal error
+or verified train completion. The task inherits the repository's Codex project and
+uses the profile's `attention_model` / `attention_reasoning_effort` settings, which
+default to `gpt-5.6-luna` / `low`. It presents the exact event and can persist the
+user's exact gate answer into the driver inbox. Unchanged state consumes no model
 tokens.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process
 does not survive computer shutdown or provide a private application notification

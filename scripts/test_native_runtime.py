@@ -181,7 +181,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(pending["question"], action["gate"]["question"])
             self.assertEqual(pending["notification_status"], "ANNOUNCED")
 
-    def test_driver_wakes_owner_once_for_human_gate_and_never_polls_unchanged_state(self):
+    def test_driver_creates_one_project_decision_task_and_never_polls_unchanged_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))
             run.confirm()
@@ -195,17 +195,24 @@ class NativeRuntimeTests(unittest.TestCase):
                 "accepted_replies": ["Use the minimal scope.", "Approve the expanded scope."],
             })
             server = FakeServer()
+            repository = str(Path(tmp) / "project")
             server.threads["thread-main"] = {
-                "id": "thread-main", "cwd": str(Path(tmp)), "createdAt": time.time(),
+                "id": "thread-main", "cwd": repository, "createdAt": time.time(),
                 "turns": [], "status": {"type": "idle"}, "projectId": None,
             }
-            runtime = effects(Path(tmp) / "driver" / "effects", server)
-            runtime.source_thread_id = "thread-main"
+            server.projects = [{"id": "project-1", "name": "Project", "roots": [{"path": repository}]}]
+            runtime = train_supervisor.NativeEffects(
+                Path(tmp) / "driver" / "effects",
+                __file__,
+                host_factory=lambda *a, **kw: server,
+                source_thread_id="thread-main",
+                repository=repository,
+            )
             driver = runner.Driver(
                 run.path,
                 "thread-main",
                 state["orchestrator_lease"]["epoch"],
-                {},
+                {"repository": repository},
                 host=runtime,
             )
             try:
@@ -220,69 +227,10 @@ class NativeRuntimeTests(unittest.TestCase):
             prompt = request["input"][0]["text"]
             self.assertIn("Do not create a scheduled automation", prompt)
             self.assertIn("continuous supervision", prompt)
-
-    def test_owner_wake_reuses_same_intent_after_active_writer_contention(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run = Harness(Path(tmp))
-            server = FakeServer()
-            server.active_writer_failures = 1
-            server.threads["thread-main"] = {
-                "id": "thread-main", "cwd": str(Path(tmp)), "createdAt": time.time(),
-                "turns": [], "status": {"type": "idle"}, "projectId": None,
-            }
-            runtime = effects(Path(tmp) / "driver" / "effects", server)
-            runtime.source_thread_id = "thread-main"
-            driver = runner.Driver(
-                run.path,
-                "thread-main",
-                run.state()["orchestrator_lease"]["epoch"],
-                {},
-                host=runtime,
-            )
-            try:
-                reference = driver.queue_owner_attention("human-gate", {"gate_id": "G-1"})
-                original = run_registry.load_json(reference)["client_message_id"]
-                self.assertFalse(driver.sync_owner_attention())
-                pending = run_registry.load_json(reference)
-                pending["retry_at"] = 0
-                run_registry.save_json(reference, pending)
-                self.assertTrue(driver.sync_owner_attention())
-                delivered = run_registry.load_json(reference)
-            finally:
-                driver.close()
-
-            self.assertEqual(delivered["client_message_id"], original)
-            self.assertEqual(delivered["status"], "delivered")
-            self.assertEqual(server.calls.count("turn/start"), 1)
-
-    def test_owner_wake_does_not_repeat_an_ambiguous_recorded_intent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run = Harness(Path(tmp))
-            server = FakeServer()
-            server.threads["thread-main"] = {
-                "id": "thread-main", "cwd": str(Path(tmp)), "createdAt": time.time(),
-                "turns": [], "status": {"type": "idle"}, "projectId": None,
-            }
-            runtime = effects(Path(tmp) / "driver" / "effects", server)
-            runtime.source_thread_id = "thread-main"
-            driver = runner.Driver(
-                run.path,
-                "thread-main",
-                run.state()["orchestrator_lease"]["epoch"],
-                {},
-                host=runtime,
-            )
-            try:
-                reference = driver.queue_owner_attention("human-gate", {"gate_id": "G-1"})
-                pending = run_registry.load_json(reference)
-                run_registry.save_json(Path(pending["directory"]) / "turn-request.json", {"armed": True})
-                self.assertFalse(driver.sync_owner_attention())
-                ambiguous = run_registry.load_json(reference)
-            finally:
-                driver.close()
-
-            self.assertEqual(ambiguous["status"], "ambiguous")
-            self.assertNotIn("turn/start", server.calls)
+            creation = next(params for method, params in server.call_params if method == "thread/start")
+            self.assertEqual(creation["projectId"], "project-1")
+            self.assertEqual(creation["model"], "gpt-5.6-luna")
+            self.assertIn("owner-attention", creation["cwd"])
 
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

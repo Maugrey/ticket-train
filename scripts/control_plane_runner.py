@@ -13,7 +13,6 @@ import os
 import subprocess
 import sys
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -172,24 +171,31 @@ class Driver:
         key = sha256_json(semantic)
         directory = self.directory / "owner-attention" / key[:24]
         reference = directory / "effect.json"
-        if reference.exists():
-            return reference
-        directory.mkdir(parents=True, exist_ok=True)
         prompt = (
-            "A new actionable Ticket Train event requires the owner task. "
+            "You are the compact decision relay for one actionable Ticket Train event. "
             f"Read only the compact event at {reference} and the current manifest at {self.path}. "
             "Present the exact pending human question or terminal result, or report the evidenced error. "
-            "If the user answers a gate, persist that answer against its exact gate ID and revision in "
-            "the driver inbox so the existing runner can continue. Do not create a scheduled automation, "
+            "Do not decide a human gate. If the user answers it in this task, write one INPUT_PROVIDED JSON "
+            f"file under {self.directory / 'inbox'} with a stable event_id, the exact gate_id and revision, "
+            "a faithful response_summary and a response_artifact that references the user answer. "
+            "The existing runner will validate and continue. Do not create a scheduled automation, "
             "poll unchanged state, create another train, or repeat completed technical work. Return after "
             "handling this single event; the native Python driver performs continuous supervision."
         )
+        if reference.exists():
+            record = run_registry.load_json(reference)
+            if record.get("status") == "pending" and record.get("format") != "ticket-train-attention-task-v1":
+                record.update(format="ticket-train-attention-task-v1", prompt=prompt)
+                for field in ("client_message_id", "retry_at", "retry_reason", "error", "ambiguous_at"):
+                    record.pop(field, None)
+                run_registry.save_json(reference, record)
+            return reference
+        directory.mkdir(parents=True, exist_ok=True)
         record = {
             **semantic,
-            "format": "ticket-train-owner-attention-v1",
+            "format": "ticket-train-attention-task-v1",
             "status": "pending",
             "created_at": now_iso(),
-            "client_message_id": str(uuid.uuid4()),
             "directory": str(directory),
             "reference": str(reference),
             "prompt": prompt,
@@ -220,7 +226,23 @@ class Driver:
         for reference in sorted(root.glob("*/effect.json")) if root.exists() else []:
             notification = run_registry.load_json(reference)
             if notification.get("status") == "pending":
-                return bool(self.effects().start_owner_turn(notification))
+                workspace = Path(notification["directory"]) / "workspace"
+                workspace.mkdir(parents=True, exist_ok=True)
+                ticket_id = (notification.get("payload") or {}).get("ticket_id")
+                suffix = f" — #{ticket_id}" if ticket_id else ""
+                title = {
+                    "human-gate": "Ticket Train — input required",
+                    "train-completed": "Ticket Train — completed",
+                }.get(notification.get("kind"), "Ticket Train — attention required")
+                spec = {
+                    "key": "owner-attention:" + reference.parent.name,
+                    "cwd": str(workspace),
+                    "model": self.profile.get("attention_model", "gpt-5.6-luna"),
+                    "effort": self.profile.get("attention_reasoning_effort", "low"),
+                    "prompt": notification["prompt"],
+                    "title": title + suffix,
+                }
+                return bool(self.effects().start_attention_task(notification, spec))
         return False
 
     def command_hook(self, action):
