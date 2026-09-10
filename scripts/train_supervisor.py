@@ -196,8 +196,19 @@ class NativeEffects:
         receipt = self.receipt(directory, name + "-response")
         if not receipt:
             if job["thread_id"] not in self.loaded:
-                resumed = self.host.call("thread/resume", {"threadId": job["thread_id"], "excludeTurns": True},
-                                         receipt_path=directory / (name + "-resume-response.json"))
+                resume_receipt = directory / (name + "-resume-response.json")
+                try:
+                    resumed = self.host.call(
+                        "thread/resume", {"threadId": job["thread_id"], "excludeTurns": True},
+                        receipt_path=resume_receipt,
+                    )
+                except thread_runtime.HostError as error:
+                    if "already has an active writer" not in str(error):
+                        raise
+                    resume_receipt.unlink(missing_ok=True)
+                    job["retry_at"] = time.time() + 30
+                    self.save(job)
+                    return False
                 job["actual_model"] = resumed.get("model") or job.get("actual_model")
                 self.save(job)
                 self.loaded.add(job["thread_id"])
@@ -220,7 +231,9 @@ class NativeEffects:
                 receipt = self.host.call("turn/start", request, receipt_path=directory / (name + "-response.json"))
         job.update(turn_id=receipt["turn"]["id"], status="running", started_at=utcnow())
         job.pop("pending_prompt", None)
+        job.pop("retry_at", None)
         self.save(job)
+        return True
 
     def observe(self, job):
         if job.get("pending_prompt"):

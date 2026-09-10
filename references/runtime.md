@@ -58,10 +58,8 @@ resume with that same profile rather than changing running worker inputs.
 The command starts a small guardian and a driver. The driver holds the OS lock,
 replays event receipts, collects results and executes successors. The guardian
 restarts a crashed driver at most three times. Host reconnection and per-command
-retries are separately bounded. Attach one five-minute app heartbeat to the owner
-conversation. It reads compact status and only the newest actionable outbox item,
-stays silent while unchanged, restarts this same invocation if it stopped, and
-pauses itself after verified completion. Do not create an external monitor task.
+retries are separately bounded. The guardian and driver provide continuous
+script-only observation; do not create a scheduled app heartbeat or polling model.
 `--max-seconds` creates a checkpoint, not continuous supervision. The process
 does not survive computer shutdown or provide a private application notification
 API. Restart the same invocation if both guardian and driver were stopped.

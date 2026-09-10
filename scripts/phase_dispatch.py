@@ -286,8 +286,9 @@ def collect(driver):
                 import uuid
                 job.update(result_repair_count=int(job.get("result_repair_count", 0)) + 1,
                            attempt=job["attempt"] + 1, client_message_id=str(uuid.uuid4()))
-                driver.effects().start_turn(job, repair_prompt(error, job["spec"]["prompt"]))
-                progress = True
+                progress = bool(driver.effects().start_turn(
+                    job, repair_prompt(error, job["spec"]["prompt"])
+                ))
             else:
                 driver.notify("result-invalid", {"phase_key": value["phase_key"], "error": str(error)})
     return progress
@@ -829,11 +830,14 @@ def execute_action(driver, action):
         job = driver.effects().read(value["phase_key"])
         if not job:
             return driver.notify("external-resume-required", action)
-        job["attempt"] += 1
-        import uuid
-        job["client_message_id"] = str(uuid.uuid4())
-        driver.effects().save(job)
-        driver.effects().start_turn(job, "The user answered the phase's pending question: " + json.dumps(action["provided_input"], ensure_ascii=False))
+        prompt = "The user answered the phase's pending question: " + json.dumps(action["provided_input"], ensure_ascii=False)
+        if not job.get("pending_prompt"):
+            job["attempt"] += 1
+            import uuid
+            job["client_message_id"] = str(uuid.uuid4())
+            driver.effects().save(job)
+        if not driver.effects().start_turn(job, job.get("pending_prompt") or prompt):
+            return False
         driver.apply({"type": "PHASE_RESUMED", "phase_key": value["phase_key"], "thread_id": job["thread_id"], "visibility_verified": True})
         return True
     if name == "RECORD_ANALYSIS_READINESS_RECONCILIATION":

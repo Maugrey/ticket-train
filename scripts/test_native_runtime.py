@@ -33,6 +33,7 @@ class FakeServer:
         self.calls = []
         self.call_params = []
         self.crash_after_create = False
+        self.active_writer_failures = 0
         self.event_sink = None
         self.host = self
 
@@ -52,6 +53,13 @@ class FakeServer:
         elif method == "project/list":
             result = {"data": self.projects, "nextCursor": None}
         elif method in {"thread/read", "thread/resume"}:
+            if method == "thread/resume" and self.active_writer_failures:
+                self.active_writer_failures -= 1
+                if receipt_path:
+                    run_registry.save_json(receipt_path, {
+                        "error": {"code": -32600, "message": "already has an active writer"}
+                    })
+                raise thread_runtime.HostError("already has an active writer")
             result = {"thread": self.threads[params["threadId"]]}
         elif method == "thread/metadata/update":
             task = self.threads[params["threadId"]]
@@ -384,6 +392,26 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(request["input"][0]["text"], "approved choice")
             restarted.submit(spec)
             self.assertEqual(server.calls.count("turn/start"), 2)
+
+    def test_active_writer_retry_reuses_one_turn_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, server = Path(tmp), FakeServer()
+            runtime = effects(root, server)
+            spec = {"key": "input", "cwd": tmp, "prompt": "original"}
+            job = runtime.submit(spec)
+            job.update(attempt=1, pending_prompt="approved choice", status="starting_turn")
+            runtime.save(job)
+            restarted = effects(root, server)
+            server.active_writer_failures = 1
+
+            self.assertFalse(restarted.start_turn(restarted.read("input"), "approved choice"))
+            pending = restarted.read("input")
+            self.assertEqual(pending["attempt"], 1)
+            self.assertEqual(pending["pending_prompt"], "approved choice")
+            self.assertFalse((restarted.directory("input") / "turn-1-resume-response.json").exists())
+
+            self.assertTrue(restarted.start_turn(pending, "approved choice"))
+            self.assertEqual(restarted.read("input")["attempt"], 1)
 
     def test_result_journal_survives_cost_checkpoint_and_rejects_changed_result(self):
         with tempfile.TemporaryDirectory() as tmp:

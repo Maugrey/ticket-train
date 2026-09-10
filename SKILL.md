@@ -21,17 +21,16 @@ resolves scope and presents decisions and results.
    and verification commands. Repair missing inputs before launching work.
 5. Initialize and bootstrap once with the actual conversation ID and returned
    ownership epoch. Reuse the user's approval mode; otherwise use `standard`.
-6. Run `control_plane_runner.py drive` through the pinned release. Attach one
-   compact app heartbeat to the owner conversation. It reads only compact status
-   and new outbox items, stays silent while unchanged, restarts the same runner
-   if stopped, surfaces human gates and pauses itself after completion.
+6. Run `control_plane_runner.py drive` through the pinned release. Its guardian
+   and driver are the sole continuous watcher. They observe tasks, collect results,
+   retry bounded failures and write actionable outbox items without model wakes.
 7. Persist each user answer against its exact gate and revision, then continue
    the same runner. An acknowledgement or an emitted packet is not execution.
 
 After interruption, restart the same manifest and command. Receipts establish
 whether a task exists. A missing callback never authorizes a replacement.
-Do not add another conversation or external monitor. The owner heartbeat is the
-only model-based notification bridge; the runner performs all automatic work.
+Do not add another conversation, scheduled heartbeat or polling model. Restart
+the same script after interruption; never substitute a model-based monitor.
 
 ## Authorization and scope
 
