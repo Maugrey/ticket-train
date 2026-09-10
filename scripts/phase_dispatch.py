@@ -203,6 +203,13 @@ def parse_result(job):
     return result
 
 
+def repairable_result_error(error):
+    if isinstance(error, (json.JSONDecodeError, KeyError)):
+        return True
+    message = str(error)
+    return "is missing:" in message or " is required by the " in message
+
+
 def decorate_events(driver, value, result):
     allowed = DECISION_EVENTS[value["decision_action"]] if value["kind"] == "technical_decision" else RESULT_EVENTS[value["kind"]]
     events = result.get("events", [])
@@ -249,7 +256,7 @@ def collect(driver):
             progress = collect_one(driver, value) or progress
         except (ValueError, KeyError, OSError) as error:
             job = driver.effects().read(value["phase_key"])
-            format_error = isinstance(error, (json.JSONDecodeError, KeyError)) or "is missing:" in str(error)
+            format_error = repairable_result_error(error)
             if job and job["status"] == "completed" and format_error and not job.get("result_repair_count"):
                 import uuid
                 job.update(result_repair_count=1, attempt=job["attempt"] + 1, client_message_id=str(uuid.uuid4()))

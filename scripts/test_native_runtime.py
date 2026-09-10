@@ -405,6 +405,10 @@ class NativeRuntimeTests(unittest.TestCase):
                 "type": "TICKET_TRIAGED", "event_type": "ANALYSIS_RECORDED",
             }]})
 
+    def test_missing_environment_field_is_a_repairable_result_error(self):
+        error = ValueError("analysis_unity_requirement is required by the unity-mcp-local environment profile")
+        self.assertTrue(phase_dispatch.repairable_result_error(error))
+
     def test_old_generation_cannot_write_even_with_same_owner(self):
         state = {"orchestrator_lease": {"owner_thread_id": "same", "epoch": "new"}}
         with self.assertRaisesRegex(ValueError, "generation"):
