@@ -227,9 +227,10 @@ class NativeRuntimeTests(unittest.TestCase):
             prompt = request["input"][0]["text"]
             self.assertIn("Do not create a scheduled automation", prompt)
             self.assertIn("continuous supervision", prompt)
+            self.assertIn('"question": "Choose the ticket scope."', prompt)
             creation = next(params for method, params in server.call_params if method == "thread/start")
             self.assertEqual(creation["projectId"], "project-1")
-            self.assertEqual(creation["model"], "gpt-5.6-luna")
+            self.assertEqual(creation["model"], "gpt-6-astra")
             self.assertIn("owner-attention", creation["cwd"])
 
     def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):

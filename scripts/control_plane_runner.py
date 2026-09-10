@@ -167,17 +167,19 @@ class Driver:
 
     def queue_owner_attention(self, kind, payload):
         """Persist one owner wake for one semantic actionable condition."""
-        semantic = {"kind": kind, "payload": payload}
+        semantic = {"relay_revision": "v2", "kind": kind, "payload": payload}
         key = sha256_json(semantic)
         directory = self.directory / "owner-attention" / key[:24]
         reference = directory / "effect.json"
         prompt = (
             "You are the compact decision relay for one actionable Ticket Train event. "
-            f"Read only the compact event at {reference} and the current manifest at {self.path}. "
-            "Present the exact pending human question or terminal result, or report the evidenced error. "
+            "The exact event is embedded below; do not re-read or reconstruct it.\n"
+            + json.dumps(semantic, ensure_ascii=False, sort_keys=True)
+            + "\nPresent its exact pending human question or terminal result, or report its evidenced error. "
             "Do not decide a human gate. If the user answers it in this task, write one INPUT_PROVIDED JSON "
             f"file under {self.directory / 'inbox'} with a stable event_id, the exact gate_id and revision, "
             "a faithful response_summary and a response_artifact that references the user answer. "
+            f"Before writing the answer, verify only pending_human_action in {self.path}. "
             "The existing runner will validate and continue. Do not create a scheduled automation, "
             "poll unchanged state, create another train, or repeat completed technical work. Return after "
             "handling this single event; the native Python driver performs continuous supervision."
@@ -237,7 +239,7 @@ class Driver:
                 spec = {
                     "key": "owner-attention:" + reference.parent.name,
                     "cwd": str(workspace),
-                    "model": self.profile.get("attention_model", "gpt-5.6-luna"),
+                    "model": self.profile.get("attention_model", "gpt-6-astra"),
                     "effort": self.profile.get("attention_reasoning_effort", "low"),
                     "prompt": notification["prompt"],
                     "title": title + suffix,
