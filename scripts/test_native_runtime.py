@@ -487,6 +487,13 @@ class NativeRuntimeTests(unittest.TestCase):
         error = ValueError("analysis_unity_requirement is required by the unity-mcp-local environment profile")
         self.assertTrue(phase_dispatch.repairable_result_error(error))
 
+    def test_invalid_enum_is_repairable_with_exact_contract_guidance(self):
+        error = ValueError("invalid product lifecycle stage")
+        self.assertTrue(phase_dispatch.repairable_result_error(error))
+        prompt = phase_dispatch.repair_prompt(error, "Original task")
+        self.assertIn("exact JSON field names", prompt)
+        self.assertIn("do not paraphrase enum values", prompt)
+
     def test_old_generation_cannot_write_even_with_same_owner(self):
         state = {"orchestrator_lease": {"owner_thread_id": "same", "epoch": "new"}}
         with self.assertRaisesRegex(ValueError, "generation"):

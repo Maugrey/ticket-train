@@ -207,7 +207,18 @@ def repairable_result_error(error):
     if isinstance(error, (json.JSONDecodeError, KeyError)):
         return True
     message = str(error)
-    return "is missing:" in message or " is required by the " in message
+    return ("is missing:" in message or " is required by the " in message
+            or message.startswith("invalid "))
+
+
+def repair_prompt(error, original):
+    guidance = (
+        " Re-read the authoritative contract and use its exact JSON field names, "
+        "enum spelling, casing and object shapes; do not paraphrase enum values."
+    )
+    return ("Your existing result could not be registered: " + str(error) + "." + guidance
+            + " Return the required JSON envelope and technical events from your existing findings. "
+            "Do not repeat technical work or alter scope. " + original)
 
 
 def decorate_events(driver, value, result):
@@ -257,12 +268,12 @@ def collect(driver):
         except (ValueError, KeyError, OSError) as error:
             job = driver.effects().read(value["phase_key"])
             format_error = repairable_result_error(error)
-            if job and job["status"] == "completed" and format_error and not job.get("result_repair_count"):
+            if (job and job["status"] == "completed" and format_error
+                    and int(job.get("result_repair_count", 0)) < 2):
                 import uuid
-                job.update(result_repair_count=1, attempt=job["attempt"] + 1, client_message_id=str(uuid.uuid4()))
-                driver.effects().start_turn(job, "Your existing result could not be registered: " + str(error)
-                    + ". Return the required JSON envelope and technical events from your existing findings. Do not repeat technical work or alter scope. "
-                    + job["spec"]["prompt"])
+                job.update(result_repair_count=int(job.get("result_repair_count", 0)) + 1,
+                           attempt=job["attempt"] + 1, client_message_id=str(uuid.uuid4()))
+                driver.effects().start_turn(job, repair_prompt(error, job["spec"]["prompt"]))
                 progress = True
             else:
                 driver.notify("result-invalid", {"phase_key": value["phase_key"], "error": str(error)})
