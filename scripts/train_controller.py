@@ -35,7 +35,7 @@ UNITY_REQUIREMENTS = ("none", "editor-read", "editor-write", "playmode-ui", "bui
 UNITY_REQUIREMENT_ORDER = {value: index for index, value in enumerate(UNITY_REQUIREMENTS)}
 DEFAULT_MAX_UNITY_EDITORS = 3
 MAX_CONFIGURABLE_UNITY_EDITORS = 16
-ROUTING_POLICY_VERSION = "2026-08-27-v2"
+ROUTING_POLICY_VERSION = "2026-09-10-v3"
 SCOPE_POLICY_VERSION = "2026-08-29-v2"
 PRODUCT_LIFECYCLE_STAGES = (
     "prototype", "pre-MVP", "private-beta", "public-beta", "production", "unknown",
@@ -81,37 +81,51 @@ USAGE_TICKET_PHASE_COLUMNS = (
 )
 
 ANALYSIS_MATRIX = {
-    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Terra/H", "Sol/M", "Sol/H", "Sol/XH"),
-    "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-    "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
+    "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+    "NORMAL": ("Terra/H", "Sol/M", "Astra/H", "Astra/XH"),
+    "HIGH": ("Astra/H", "Astra/H", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
 }
 IMPLEMENTATION_MATRIX = {
-    "LOW": ("Terra/M", "Terra/M", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-    "HIGH": ("Sol/M", "Sol/H", "Sol/XH", "Sol/XH"),
-    "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+    "LOW": ("Terra/M", "Terra/M", "Astra/H", "Astra/XH"),
+    "NORMAL": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+    "HIGH": ("Astra/M", "Astra/H", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
 }
 ACCEPTANCE_MATRIX = {
-    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Terra/H", "Terra/H", "Sol/H", "Sol/XH"),
-    "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-    "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+    "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+    "NORMAL": ("Terra/H", "Terra/H", "Astra/H", "Astra/XH"),
+    "HIGH": ("Astra/H", "Astra/H", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
 }
 INITIAL_REVIEW_MATRIX = {
-    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-    "HIGH": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/XH"),
-    "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
+    "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+    "NORMAL": ("Terra/H", "Sol/H", "Astra/H", "Astra/XH"),
+    "HIGH": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
 }
 FOLLOWUP_REVIEW_MATRIX = {
-    "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-    "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-    "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-    "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+    "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+    "NORMAL": ("Terra/H", "Sol/H", "Astra/H", "Astra/XH"),
+    "HIGH": ("Astra/H", "Astra/H", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
 }
-REMEDIATION_MATRIX = IMPLEMENTATION_MATRIX
-FINAL_REVIEW_MATRIX = INITIAL_REVIEW_MATRIX
+REMEDIATION_MATRIX = {
+    "LOW": ("Astra/M", "Astra/M", "Astra/H", "Astra/XH"),
+    "NORMAL": ("Astra/M", "Astra/H", "Astra/H", "Astra/XH"),
+    "HIGH": ("Astra/M", "Astra/H", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
+}
+REMEDIATION_RETRY_MATRIX = {
+    criticality: tuple("Astra/Max" if setting == "Astra/Max" else "Astra/XH" for setting in row)
+    for criticality, row in REMEDIATION_MATRIX.items()
+}
+FINAL_REVIEW_MATRIX = {
+    "LOW": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+    "NORMAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+    "HIGH": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+    "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
+}
 SETTING_NAMES = {
     "Luna/M": ("gpt-5.6-luna", "medium"),
     "Terra/M": ("gpt-5.6-terra", "medium"),
@@ -120,6 +134,10 @@ SETTING_NAMES = {
     "Sol/H": ("gpt-5.6-sol", "high"),
     "Sol/XH": ("gpt-5.6-sol", "xhigh"),
     "Sol/Max": ("gpt-5.6-sol", "max"),
+    "Astra/M": ("gpt-6-astra", "medium"),
+    "Astra/H": ("gpt-6-astra", "high"),
+    "Astra/XH": ("gpt-6-astra", "xhigh"),
+    "Astra/Max": ("gpt-6-astra", "max"),
 }
 
 # Capability is phase-specific. These tables intentionally avoid claiming a
@@ -131,6 +149,9 @@ ANALYSIS_ROUTE_COVERAGE = {
     "Sol/H": {"Terra/M", "Terra/H", "Sol/M", "Sol/H"},
     "Sol/XH": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Sol/XH"},
     "Sol/Max": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Sol/XH", "Sol/Max"},
+    "Astra/H": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Astra/H"},
+    "Astra/XH": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Sol/XH", "Astra/H", "Astra/XH"},
+    "Astra/Max": {"Terra/M", "Terra/H", "Sol/M", "Sol/H", "Sol/XH", "Sol/Max", "Astra/H", "Astra/XH", "Astra/Max"},
 }
 FOLLOWUP_CEILING_COMPATIBILITY = {
     "Terra/M": {"Terra/M"},
@@ -138,6 +159,9 @@ FOLLOWUP_CEILING_COMPATIBILITY = {
     "Sol/H": {"Terra/M", "Terra/H", "Sol/H"},
     "Sol/XH": {"Terra/M", "Terra/H", "Sol/H", "Sol/XH"},
     "Sol/Max": {"Terra/M", "Terra/H", "Sol/H", "Sol/XH", "Sol/Max"},
+    "Astra/H": {"Terra/M", "Terra/H", "Sol/H", "Astra/H"},
+    "Astra/XH": {"Terra/M", "Terra/H", "Sol/H", "Sol/XH", "Astra/H", "Astra/XH"},
+    "Astra/Max": {"Terra/M", "Terra/H", "Sol/H", "Sol/XH", "Sol/Max", "Astra/H", "Astra/XH", "Astra/Max"},
 }
 
 
@@ -297,7 +321,7 @@ def routed_setting(
 ) -> tuple[str, str, str]:
     model, effort = setting_from_matrix(matrix, criticality, complexity)
     if effort == "max" and not reasoning_authorized:
-        return "gpt-5.6-sol", "xhigh", "documented-fallback"
+        return "gpt-6-astra", "xhigh", "documented-fallback"
     return model, effort, "conformant"
 
 
@@ -330,6 +354,11 @@ def routed_phase_setting(
     ):
         return "gpt-5.6-luna", "medium", "conformant"
     return routed_setting(matrix, criticality, complexity, reasoning_authorized)
+
+
+def remediation_matrix_for_cycle(completed_cycles: int) -> dict[str, tuple[str, str, str, str]]:
+    require(completed_cycles >= 0, "remediation cycle count cannot be negative")
+    return REMEDIATION_RETRY_MATRIX if completed_cycles >= 1 else REMEDIATION_MATRIX
 
 
 def triage_setting(event: dict[str, Any]) -> tuple[str, str, str]:
@@ -374,7 +403,7 @@ def validate_reasoning_authorization(
         require(not event.get(authorization_field), "reasoning authorization supplied for a non-Max route")
         return
     authorization_id = event.get(authorization_field)
-    require(bool(authorization_id), "Sol/Max requires a scoped reasoning authorization")
+    require(bool(authorization_id), "Astra/Max requires a scoped reasoning authorization")
     authorizations = proc.get("reasoning_authorizations", {})
     authorization = authorizations.get(authorization_id) if isinstance(authorizations, dict) else None
     require(isinstance(authorization, dict), "unknown reasoning authorization")
@@ -3297,10 +3326,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(context_packet["exact_head"] == remediation_head, "remediation context head mismatch")
         effective = item.get("effective_classification") or item["analysis"]
         require(event["criticality"] == effective["criticality"], "remediation must use current effective criticality")
-        expected = routed_phase_setting(
-            REMEDIATION_MATRIX, event["criticality"], event["complexity"],
-            bool(event.get("reasoning_authorized")), event=event,
-            fast_path_field="mechanical_fast_path",
+        expected = routed_setting(
+            remediation_matrix_for_cycle(cycles), event["criticality"], event["complexity"],
+            bool(event.get("reasoning_authorized")),
         )
         validate_routing(event, expected)
         validate_reasoning_authorization(
@@ -3591,7 +3619,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(context_packet["exact_head"] == final["pull_request"]["head_commit"], "final review context head mismatch")
         required_kind = "full" if scope == "initial" or material else "focused"
         require(event.get("review_kind") == required_kind, f"final {scope} review must be {required_kind}")
-        matrix = FINAL_REVIEW_MATRIX if scope == "initial" or material else FOLLOWUP_REVIEW_MATRIX
+        matrix = FINAL_REVIEW_MATRIX
         matrix_expected = routed_setting(
             matrix, event["train_criticality"], event["train_complexity"], bool(event.get("reasoning_authorized")),
         )
@@ -3644,7 +3672,7 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
             if floor_name not in FOLLOWUP_CEILING_COMPATIBILITY[selected_name]:
                 selected = floor
             if selected[1] == "max" and not bool(event.get("reasoning_authorized")):
-                selected = ("gpt-5.6-sol", "xhigh")
+                selected = ("gpt-6-astra", "xhigh")
                 final_conformance = "documented-fallback"
         if scope == "followup":
             full_history = [entry for entry in history if entry.get("review_kind") == "full"]
@@ -3896,10 +3924,9 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         context_packet = validate_compact_context(event, "final remediation dispatch")
         require(context_packet["exact_base"] == event["base_commit"], "final remediation context base mismatch")
         require(context_packet["exact_head"] == event["base_commit"], "final remediation context head mismatch")
-        expected = routed_phase_setting(
-            REMEDIATION_MATRIX, event["criticality"], event["complexity"],
-            bool(event.get("reasoning_authorized")), event=event,
-            fast_path_field="mechanical_fast_path",
+        expected = routed_setting(
+            remediation_matrix_for_cycle(cycles), event["criticality"], event["complexity"],
+            bool(event.get("reasoning_authorized")),
         )
         validate_routing(event, expected)
         validate_reasoning_authorization(

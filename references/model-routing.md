@@ -1,6 +1,6 @@
 # Model and Reasoning Routing
 
-Active policy version: `2026-08-27-v2`. The controller tables are authoritative.
+Active policy version: `2026-09-10-v3`. The controller tables are authoritative.
 Historical versions remain in Git and pinned run releases.
 
 ## Contents
@@ -55,9 +55,15 @@ setting. Record the matrix inputs, selected cell, requested model and effort,
 actual model and effort, and any documented fallback.
 
 Apply the train's proportionality profile to the classification inputs. The
-profile changes evidence and scope, not the matrix cells. Never use a more
-expensive setting than the selected cell merely because the parent thread or
-an old remediation thread already uses it.
+profile changes evidence and scope, not the matrix cells. Never use a different
+setting from the selected cell merely because the parent thread or an old
+remediation thread already uses it.
+
+Optimize routing for successful technical completion rather than token price.
+Use Astra whenever intrinsic criticality is `HIGH` or `CRITICAL`, complexity is
+`HIGH` or `MAXIMUM`, the phase is remediation, or the phase is the final train
+review. Preserve the effort selected for the phase except for the deterministic
+retry and final-review floors below.
 
 Legend:
 
@@ -68,6 +74,10 @@ Legend:
 - `Sol/H`: `gpt-5.6-sol` with `high`
 - `Sol/XH`: `gpt-5.6-sol` with `xhigh`
 - `Sol/Max`: `gpt-5.6-sol` with `max`
+- `Astra/M`: `gpt-6-astra` with `medium`
+- `Astra/H`: `gpt-6-astra` with `high`
+- `Astra/XH`: `gpt-6-astra` with `xhigh`
+- `Astra/Max`: `gpt-6-astra` with `max`
 
 Do not define one global capability order. Model family, reasoning effort, and
 delegation mode are separate attributes. For focused-review ceilings only,
@@ -80,6 +90,9 @@ use this phase-local compatibility table:
 | Sol/H | Terra/M, Terra/H, Sol/H |
 | Sol/XH | Terra/M, Terra/H, Sol/H, Sol/XH |
 | Sol/Max | Terra/M, Terra/H, Sol/H, Sol/XH, Sol/Max |
+| Astra/H | Terra/M, Terra/H, Sol/H, Astra/H |
+| Astra/XH | Terra/M, Terra/H, Sol/H, Sol/XH, Astra/H, Astra/XH |
+| Astra/Max | Terra/M, Terra/H, Sol/H, Sol/XH, Sol/Max, Astra/H, Astra/XH, Astra/Max |
 
 `Sol/M` and Luna are intentionally absent from review matrices, so the
 controller never invents a comparison between them and Terra/High.
@@ -193,7 +206,7 @@ Record one routing status:
   follows this reference;
 - `nonconformant`: any other mismatch.
 
-A stronger or more expensive model or effort is not automatically conformant.
+A different model or effort is not automatically conformant.
 For example, `Sol/XH` is nonconformant when the selected cell is `Sol/H`.
 
 Do not continue to the next phase after an unexplained `nonconformant` result.
@@ -209,15 +222,15 @@ diff or commit range, unresolved findings, tests, and durable references.
 
 | Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | Terra/M | Terra/H | Sol/H | Sol/XH |
-| `NORMAL` | Terra/H | Sol/M | Sol/H | Sol/XH |
-| `HIGH` | Sol/H | Sol/H | Sol/XH | Sol/XH |
-| `CRITICAL` | Sol/XH | Sol/XH | Sol/XH | Sol/Max |
+| `LOW` | Terra/M | Terra/H | Astra/H | Astra/XH |
+| `NORMAL` | Terra/H | Sol/M | Astra/H | Astra/XH |
+| `HIGH` | Astra/H | Astra/H | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/XH | Astra/XH | Astra/XH | Astra/Max |
 
-Use Terra for simple, bounded analysis, `Sol/M` for the intermediate
-`NORMAL/MEDIUM` case, and Sol/High or above only when the actual exploration,
-ambiguity, or consequences justify it. Intrinsic criticality `CRITICAL`
-imposes an `XH` floor. Reserve `Max` for `CRITICAL/MAXIMUM`.
+Use Terra for simple, bounded analysis and `Sol/M` for the intermediate
+`NORMAL/MEDIUM` case. Use Astra whenever criticality or complexity reaches
+`HIGH`. Intrinsic criticality `CRITICAL` imposes an `XH` floor. Reserve `Max`
+for `CRITICAL/MAXIMUM`.
 
 Create only one full analysis thread per ticket. Do not launch a second analyzer merely because the confirmed classification differs from triage.
 
@@ -240,10 +253,10 @@ When reconciliation marks an analysis `INVALID`, perform the scoped revision und
 
 | Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | Terra/M¹ | Terra/M | Sol/H | Sol/XH |
-| `NORMAL` | Terra/M | Terra/H | Sol/H | Sol/XH |
-| `HIGH` | Sol/M | Sol/H | Sol/XH | Sol/XH |
-| `CRITICAL` | Sol/H | Sol/XH | Sol/XH | Sol/Max |
+| `LOW` | Terra/M¹ | Terra/M | Astra/H | Astra/XH |
+| `NORMAL` | Terra/M | Terra/H | Astra/H | Astra/XH |
+| `HIGH` | Astra/M | Astra/H | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/H | Astra/XH | Astra/XH | Astra/Max |
 
 ¹ `Luna/M` is allowed only through the complete mechanical fast path.
 
@@ -262,8 +275,8 @@ unresolved_implementation_difficulty
 Treat the reconciled analysis as the implementation contract, but do not
 reduce effort merely because a contract exists. Lower residual complexity only
 when evidence identifies which design uncertainty or implementation factor was
-actually removed. Keep `CRITICAL/MAXIMUM` at Sol/Max when coding itself still
-contains maximum difficulty; route it to Sol/XH when validated residual
+actually removed. Keep `CRITICAL/MAXIMUM` at Astra/Max when coding itself still
+contains maximum difficulty; route it to Astra/XH when validated residual
 complexity is High.
 
 An implementation worker must not improvise through a material gap in the
@@ -282,16 +295,25 @@ the analyzer instead of raising this phase to Sol.
 
 ### Remediation routing
 
-Use the implementation matrix with the current effective intrinsic
-criticality and the actual complexity of the remediation batch. Do not reuse
-the analysis criticality or original implementation complexity. Classify the
-delta as `mechanical`, `bounded-behavioral`, `cross-cutting`, or
+Use the dedicated remediation matrix with the current effective intrinsic
+criticality and the actual complexity of the remediation batch. Every
+remediation uses Astra because a failed first pass is no longer routine. Do
+not reuse the analysis criticality or original implementation complexity.
+
+| Effective intrinsic criticality ↓ / Remediation complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
+|---|---:|---:|---:|---:|
+| `LOW` | Astra/M | Astra/M | Astra/H | Astra/XH |
+| `NORMAL` | Astra/M | Astra/H | Astra/H | Astra/XH |
+| `HIGH` | Astra/M | Astra/H | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/H | Astra/XH | Astra/XH | Astra/Max |
+
+From the second remediation attempt onward, impose an `Astra/XH` floor while
+preserving `Astra/Max` for `CRITICAL/MAXIMUM`. The mechanical Luna fast path
+does not apply to remediation.
+
+Classify the delta as `mechanical`, `bounded-behavioral`, `cross-cutting`, or
 `material-scope`. A `material-scope` delta returns to analysis reconciliation
 and a new full review; it is not eligible for ordinary remediation dispatch.
-
-`Luna/M` may replace `Terra/M` only for a `LOW/LOW` mechanical correction with
-the complete fast-path proof. `CRITICAL/MAXIMUM` remediation remains Sol/Max
-and requires its own scoped authorization.
 
 ## Independent acceptance-test routing
 
@@ -311,10 +333,10 @@ this dedicated matrix:
 
 | Intrinsic criticality ↓ / Verification complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | Terra/M¹ | Terra/H | Sol/H | Sol/XH |
-| `NORMAL` | Terra/H | Terra/H | Sol/H | Sol/XH |
-| `HIGH` | Sol/H | Sol/H | Sol/XH | Sol/XH |
-| `CRITICAL` | Sol/H | Sol/XH | Sol/XH | Sol/Max |
+| `LOW` | Terra/M¹ | Terra/H | Astra/H | Astra/XH |
+| `NORMAL` | Terra/H | Terra/H | Astra/H | Astra/XH |
+| `HIGH` | Astra/H | Astra/H | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/H | Astra/XH | Astra/XH | Astra/Max |
 
 ¹ `Luna/M` is allowed only for one fully specified deterministic behavior with
 a direct oracle and the complete mechanical proof. Several scenarios, roles,
@@ -331,10 +353,10 @@ model setting or model turn.
 
 | Intrinsic criticality ↓ / Complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | Terra/M | Terra/H | Sol/H | Sol/XH |
-| `NORMAL` | Terra/H | Sol/H | Sol/H | Sol/XH |
-| `HIGH` | Sol/H | Sol/XH | Sol/XH | Sol/XH |
-| `CRITICAL` | Sol/XH | Sol/XH | Sol/XH | Sol/Max |
+| `LOW` | Terra/M | Terra/H | Astra/H | Astra/XH |
+| `NORMAL` | Terra/H | Sol/H | Astra/H | Astra/XH |
+| `HIGH` | Astra/H | Astra/XH | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/XH | Astra/XH | Astra/XH | Astra/Max |
 
 Use the higher per-dimension values between the approved analysis and the
 actual implementation diff. Initial review must independently verify the
@@ -342,15 +364,27 @@ complete ticket diff, acceptance criteria, project rules, test evidence, and
 material risk surfaces.
 
 Use `H` for bounded review surfaces whose expected behavior and test oracle
-are clear. Use `XH` when criticality or complexity requires broader
+are clear. Use Astra whenever criticality or complexity reaches `HIGH`. Use
+`XH` when criticality or complexity requires broader
 cross-checking, including every `CRITICAL` ticket and every `MAXIMUM`
 complexity review. Reserve `Max` for the combined `CRITICAL` and `MAXIMUM`
 case. Ultra is not a reasoning effort in the standard routing system.
 
 ## Final train review routing
 
-Route the complete final pull-request review through the initial automated
-review matrix after the final pull request exists.
+Route the complete final pull-request review through this dedicated matrix
+after the final pull request exists:
+
+| Train criticality ↓ / Train complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
+|---|---:|---:|---:|---:|
+| `LOW` | Astra/XH | Astra/XH | Astra/XH | Astra/XH |
+| `NORMAL` | Astra/XH | Astra/XH | Astra/XH | Astra/XH |
+| `HIGH` | Astra/XH | Astra/XH | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/XH | Astra/XH | Astra/XH | Astra/Max |
+
+The final train review always uses at least Astra/XH because it owns the
+cross-ticket integration decision. Reserve Astra/Max for
+`CRITICAL/MAXIMUM`.
 
 `Complete` here means complete coverage of integration risk, cumulative scope,
 and previously unreviewed code at the exact final head. Reuse trustworthy
@@ -361,7 +395,7 @@ Before dispatch:
 
 1. Derive a train-level intrinsic criticality and complexity from consolidated
    ticket evidence and evidenced cross-ticket interactions.
-2. Resolve that classification through the initial-review matrix.
+2. Resolve that classification through the final-review matrix.
 3. For every integrated ticket, identify its latest trustworthy full review at
    the exact reviewed commit.
 4. Mark its setting as an applicable floor only when that evidence is
@@ -406,10 +440,10 @@ original ticket complexity or the parent conversation's setting.
 
 | Effective intrinsic criticality ↓ / Follow-up verification complexity → | `LOW` | `MEDIUM` | `HIGH` | `MAXIMUM` |
 |---|---:|---:|---:|---:|
-| `LOW` | Terra/M | Terra/H | Sol/H | Sol/XH |
-| `NORMAL` | Terra/H | Sol/H | Sol/H | Sol/XH |
-| `HIGH` | Sol/H | Sol/H | Sol/XH | Sol/XH |
-| `CRITICAL` | Sol/H | Sol/XH | Sol/XH | Sol/Max |
+| `LOW` | Terra/M | Terra/H | Astra/H | Astra/XH |
+| `NORMAL` | Terra/H | Sol/H | Astra/H | Astra/XH |
+| `HIGH` | Astra/H | Astra/H | Astra/XH | Astra/XH |
+| `CRITICAL` | Astra/H | Astra/XH | Astra/XH | Astra/Max |
 
 Classify follow-up verification complexity as:
 
@@ -480,14 +514,15 @@ timestamp. A boolean supplied by a dispatch event is not authorization.
 After triage, group predictable requests per ticket when possible:
 
 ```text
-Ticket <id> routes to Sol/Max for <analysis, initial review, or follow-up
-review> because its applicable classification is CRITICAL/MAXIMUM. Authorize
+Ticket <id> routes to Astra/Max for <analysis, implementation, acceptance,
+remediation, initial review, follow-up review, or final review> because its
+applicable classification is CRITICAL/MAXIMUM. Authorize
 reasoning above xhigh for this ticket stage?
 ```
 
 Record the authorized scope: stage, ticket, selected ticket set, or whole run. Never infer a broader scope.
 
-If authorization is denied, use `Sol/XH`, continue under the selected human-validation mode, and report the capped execution. Do not block solely because higher reasoning was declined.
+If authorization is denied, use `Astra/XH`, continue under the selected human-validation mode, and report the capped execution. Do not block solely because higher reasoning was declined.
 
 Ultra is a delegated multi-agent execution mode, not `Max+`. It is excluded
 from all matrices, ceilings, fallbacks, and comparisons. It may be used only
@@ -501,8 +536,9 @@ Ticket Train phase.
 Do not silently substitute a model or effort.
 
 - If Terra is unavailable, use an available Sol model at the same effort and report the substitution.
-- If Sol is unavailable, use the strongest available coding model within the authorized cap and report the substitution.
-- If `max` is authorized but unavailable, use `Sol/XH` and report the fallback.
+- If Sol is unavailable, use Astra at the same effort and report the substitution.
+- If Astra is unavailable, use Sol at the same effort and report the substitution.
+- If `max` is authorized but unavailable, use `Astra/XH` and report the fallback.
 - If a tool cannot set per-thread model or effort, do not launch the routed
   phase in an inherited parent setting. Pause that phase and ask the user
   whether to use a documented available fallback.

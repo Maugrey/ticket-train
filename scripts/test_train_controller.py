@@ -728,44 +728,62 @@ class TrainControllerTests(unittest.TestCase):
             )
 
     def test_active_routing_policy_snapshot(self) -> None:
-        self.assertEqual(train_controller.ROUTING_POLICY_VERSION, "2026-08-27-v2")
+        self.assertEqual(train_controller.ROUTING_POLICY_VERSION, "2026-09-10-v3")
         self.assertEqual(train_controller.ANALYSIS_MATRIX, {
-            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-            "NORMAL": ("Terra/H", "Sol/M", "Sol/H", "Sol/XH"),
-            "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-            "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
+            "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+            "NORMAL": ("Terra/H", "Sol/M", "Astra/H", "Astra/XH"),
+            "HIGH": ("Astra/H", "Astra/H", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
         })
         self.assertEqual(train_controller.IMPLEMENTATION_MATRIX, {
-            "LOW": ("Terra/M", "Terra/M", "Sol/H", "Sol/XH"),
-            "NORMAL": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-            "HIGH": ("Sol/M", "Sol/H", "Sol/XH", "Sol/XH"),
-            "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+            "LOW": ("Terra/M", "Terra/M", "Astra/H", "Astra/XH"),
+            "NORMAL": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+            "HIGH": ("Astra/M", "Astra/H", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
         })
         self.assertEqual(train_controller.ACCEPTANCE_MATRIX, {
-            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-            "NORMAL": ("Terra/H", "Terra/H", "Sol/H", "Sol/XH"),
-            "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-            "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+            "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+            "NORMAL": ("Terra/H", "Terra/H", "Astra/H", "Astra/XH"),
+            "HIGH": ("Astra/H", "Astra/H", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
         })
         self.assertEqual(train_controller.INITIAL_REVIEW_MATRIX, {
-            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-            "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-            "HIGH": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/XH"),
-            "CRITICAL": ("Sol/XH", "Sol/XH", "Sol/XH", "Sol/Max"),
+            "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+            "NORMAL": ("Terra/H", "Sol/H", "Astra/H", "Astra/XH"),
+            "HIGH": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
         })
         self.assertEqual(train_controller.FOLLOWUP_REVIEW_MATRIX, {
-            "LOW": ("Terra/M", "Terra/H", "Sol/H", "Sol/XH"),
-            "NORMAL": ("Terra/H", "Sol/H", "Sol/H", "Sol/XH"),
-            "HIGH": ("Sol/H", "Sol/H", "Sol/XH", "Sol/XH"),
-            "CRITICAL": ("Sol/H", "Sol/XH", "Sol/XH", "Sol/Max"),
+            "LOW": ("Terra/M", "Terra/H", "Astra/H", "Astra/XH"),
+            "NORMAL": ("Terra/H", "Sol/H", "Astra/H", "Astra/XH"),
+            "HIGH": ("Astra/H", "Astra/H", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
         })
-        self.assertIs(train_controller.REMEDIATION_MATRIX, train_controller.IMPLEMENTATION_MATRIX)
-        self.assertIs(train_controller.FINAL_REVIEW_MATRIX, train_controller.INITIAL_REVIEW_MATRIX)
+        self.assertEqual(train_controller.REMEDIATION_MATRIX, {
+            "LOW": ("Astra/M", "Astra/M", "Astra/H", "Astra/XH"),
+            "NORMAL": ("Astra/M", "Astra/H", "Astra/H", "Astra/XH"),
+            "HIGH": ("Astra/M", "Astra/H", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/H", "Astra/XH", "Astra/XH", "Astra/Max"),
+        })
+        self.assertEqual(train_controller.REMEDIATION_RETRY_MATRIX, {
+            "LOW": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "NORMAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "HIGH": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
+        })
+        self.assertEqual(train_controller.FINAL_REVIEW_MATRIX, {
+            "LOW": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "NORMAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "HIGH": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/XH"),
+            "CRITICAL": ("Astra/XH", "Astra/XH", "Astra/XH", "Astra/Max"),
+        })
 
-    def test_route_vocabulary_has_luna_and_sol_medium_but_not_ultra(self) -> None:
+    def test_route_vocabulary_has_luna_sol_and_astra_but_not_ultra(self) -> None:
         self.assertEqual(train_controller.SETTING_NAMES["Luna/M"], ("gpt-5.6-luna", "medium"))
         self.assertEqual(train_controller.SETTING_NAMES["Sol/M"], ("gpt-5.6-sol", "medium"))
+        self.assertEqual(train_controller.SETTING_NAMES["Astra/XH"], ("gpt-6-astra", "xhigh"))
         self.assertNotIn("Sol/Ultra", train_controller.SETTING_NAMES)
+        self.assertNotIn("Astra/Ultra", train_controller.SETTING_NAMES)
 
     def test_human_validation_matrices_remain_independent_from_model_routing(self) -> None:
         analysis_yes = {
@@ -828,7 +846,7 @@ class TrainControllerTests(unittest.TestCase):
         )
 
     def test_max_authorization_is_scoped_not_a_dispatch_boolean(self) -> None:
-        expected = ("gpt-5.6-sol", "max", "conformant")
+        expected = ("gpt-6-astra", "max", "conformant")
         proc = {"reasoning_authorizations": {}}
         with self.assertRaises(train_controller.ControllerError):
             train_controller.validate_reasoning_authorization(
@@ -1131,8 +1149,8 @@ class TrainControllerTests(unittest.TestCase):
                 review_kind="full",
                 train_criticality="LOW",
                 train_complexity="LOW",
-                model="gpt-5.6-terra",
-                reasoning_effort="medium",
+                model="gpt-6-astra",
+                reasoning_effort="xhigh",
                 routing_conformance="conformant",
                 ticket_floor_evidence=[{
                     "ticket_id": "T-1",
@@ -1156,13 +1174,13 @@ class TrainControllerTests(unittest.TestCase):
                 finding_inventory_complete=True,
                 reviewed_head="train-sha",
                 routing_conformance="conformant",
-                model="gpt-5.6-terra",
-                reasoning_effort="medium",
+                model="gpt-6-astra",
+                reasoning_effort="xhigh",
                 envelope={
                     "phase_key": "run:run:final-review:1",
                     "phase_status": "completed",
-                    "actual_model": "gpt-5.6-terra",
-                    "actual_reasoning_effort": "medium",
+                    "actual_model": "gpt-6-astra",
+                    "actual_reasoning_effort": "xhigh",
                     "result_summary": "clean final review",
                     "artifacts": {"reviewed_head": "train-sha"},
                     "tests_and_checks": ["exact-head evidence checked"],
@@ -1738,6 +1756,15 @@ class TrainControllerTests(unittest.TestCase):
         )
 
     def dispatch_remediation(self, run: Harness, phase_key: str) -> int:
+        completed_cycles = int(
+            run.state()["procedure"]["tickets"]["T-1"].get("remediation_cycles", 0)
+        )
+        model, effort, conformance = train_controller.routed_setting(
+            train_controller.remediation_matrix_for_cycle(completed_cycles),
+            "LOW",
+            "LOW",
+            False,
+        )
         return run.apply(
             "REMEDIATION_DISPATCHED",
             ticket_id="T-1",
@@ -1747,9 +1774,9 @@ class TrainControllerTests(unittest.TestCase):
             criticality="LOW",
             complexity="LOW",
             change_kind="bounded-behavioral",
-            model="gpt-5.6-terra",
-            reasoning_effort="medium",
-            routing_conformance="conformant",
+            model=model,
+            reasoning_effort=effort,
+            routing_conformance=conformance,
             reasoning_authorized=True,
             scope_assessment_revision="scope-1",
             scope_conformance="within-authorized-scope",
@@ -2826,8 +2853,8 @@ class TrainControllerTests(unittest.TestCase):
                     branch="codex/final-remediation-2",
                     criticality="LOW",
                     complexity="LOW",
-                    model="gpt-5.6-terra",
-                    reasoning_effort="medium",
+                    model="gpt-6-astra",
+                    reasoning_effort="xhigh",
                     routing_conformance="conformant",
                     scope_conformance="within-authorized-scope",
                     context_packet=run.context_packet("train-sha", "train-sha"),
@@ -2856,8 +2883,8 @@ class TrainControllerTests(unittest.TestCase):
                     branch="codex/final-test-remediation-3",
                     criticality="LOW",
                     complexity="LOW",
-                    model="gpt-5.6-terra",
-                    reasoning_effort="medium",
+                    model="gpt-6-astra",
+                    reasoning_effort="xhigh",
                     routing_conformance="conformant",
                     scope_conformance="within-authorized-scope",
                     test_only_remediation=True,
@@ -3180,8 +3207,8 @@ class TrainControllerTests(unittest.TestCase):
                     review_kind="full",
                     train_criticality="LOW",
                     train_complexity="LOW",
-                    model="gpt-5.6-terra",
-                    reasoning_effort="medium",
+                    model="gpt-6-astra",
+                    reasoning_effort="xhigh",
                     routing_conformance="conformant",
                     ticket_floor_evidence=[{
                         "ticket_id": "T-1",
@@ -3205,13 +3232,13 @@ class TrainControllerTests(unittest.TestCase):
                     finding_inventory_complete=True,
                     reviewed_head="train-sha",
                     routing_conformance="conformant",
-                    model="gpt-5.6-terra",
-                    reasoning_effort="medium",
+                    model="gpt-6-astra",
+                    reasoning_effort="xhigh",
                     envelope={
                         "phase_key": "run:run:final-review:1",
                         "phase_status": "completed",
-                        "actual_model": "gpt-5.6-terra",
-                        "actual_reasoning_effort": "medium",
+                        "actual_model": "gpt-6-astra",
+                        "actual_reasoning_effort": "xhigh",
                         "result_summary": "clean final review",
                         "artifacts": {"reviewed_head": "train-sha"},
                         "tests_and_checks": ["exact-head evidence checked"],
