@@ -255,6 +255,19 @@ def decorate_events(driver, value, result):
     return events
 
 
+def normalize_termination_envelope(value, envelope):
+    if value.get("ticket_id") or envelope.get("phase_status") != "needs_input":
+        return envelope
+    normalized = dict(envelope)
+    normalized["phase_status"] = "blocked"
+    normalized["result_summary"] = (
+        "Run-level prerequisite was not satisfied: "
+        + str(envelope.get("result_summary") or "the phase requested ticket input")
+    )
+    normalized.pop("input_request", None)
+    return normalized
+
+
 def collect(driver):
     if time.monotonic() - driver.last_observation < 15:
         return False
@@ -305,7 +318,7 @@ def collect_one(driver, value):
         controller.require(hashlib.sha256(Path(inputs["inputs_reference"]).read_bytes()).hexdigest() == inputs["inputs_sha256"], "Worker inputs changed before collection")
     result = parse_result(job)
     controller.require(job.get("actual_model") == value["requested_model"], "Native model receipt differs from the routed phase")
-    envelope = result["envelope"]
+    envelope = normalize_termination_envelope(value, result["envelope"])
     envelope.update(phase_key=value["phase_key"], actual_model=job["actual_model"],
                     actual_reasoning_effort=value["requested_reasoning_effort"], usage={"measurement": "unavailable"})
     import token_usage

@@ -4595,6 +4595,24 @@ def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
             "reason": "A failed routed validation requires an explicit reconciliation transition.",
             "tickets": reconciliation_required,
         }] + gate_actions
+    incomplete_analyses = [
+        ticket_id for ticket_id, value in proc["tickets"].items()
+        if not isinstance(value.get("analysis"), dict)
+    ]
+    if incomplete_analyses:
+        actions = []
+        if active:
+            actions.append({
+                "action": "WAIT_FOR_PHASE_TRANSITION",
+                "phase_keys": [value["phase_key"] for value in active],
+            })
+        if actions or gate_actions:
+            return actions + gate_actions
+        return [{
+            "action": "BLOCKED_OR_INCONSISTENT_STATE",
+            "reason": "Dependency consolidation requires every selected ticket analysis to be recorded.",
+            "tickets": incomplete_analyses,
+        }]
     if not proc.get("dependencies_consolidated"):
         return [{"action": "CONSOLIDATE_DEPENDENCIES"}]
 

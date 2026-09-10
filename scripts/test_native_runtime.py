@@ -102,6 +102,45 @@ def repository(path):
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    def test_run_level_input_request_becomes_a_blocked_phase(self):
+        envelope = {
+            "phase_status": "needs_input",
+            "result_summary": "ticket analyses are missing",
+            "input_request": {"question": "supply analyses"},
+        }
+        normalized = phase_dispatch.normalize_termination_envelope(
+            {"phase_key": "run:decision:1", "ticket_id": None}, envelope
+        )
+        self.assertEqual(normalized["phase_status"], "blocked")
+        self.assertNotIn("input_request", normalized)
+        self.assertEqual(envelope["phase_status"], "needs_input")
+
+    def test_active_writer_contention_does_not_exhaust_host_reconnects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Harness(Path(tmp))
+            driver = runner.Driver(
+                run.path,
+                "thread-main",
+                run.state()["orchestrator_lease"]["epoch"],
+                {},
+            )
+            attempts = 0
+
+            def tick():
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise thread_runtime.HostError("thread worker already has an active writer")
+                state = run.state()
+                state["procedure"]["run_status"] = "COMPLETED"
+                run_registry.save_json(run.path, state)
+                return True
+
+            with patch.object(driver, "tick", side_effect=tick), patch.object(runner.time, "sleep") as sleep:
+                result = driver.run()
+            self.assertEqual(result["status"], "completed")
+            sleep.assert_called_once_with(5)
+
     def test_driver_materializes_human_gate_for_owner_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))

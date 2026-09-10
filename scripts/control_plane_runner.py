@@ -268,10 +268,12 @@ class Driver:
         import thread_runtime
         started = time.monotonic()
         reconnects = 0
+        writer_contentions = 0
         with run_registry.file_lock(self.directory / "driver.lock", timeout_seconds=0):
             while True:
                 try:
                     progress = self.tick()
+                    writer_contentions = 0
                     state = self.state()
                     if state["procedure"]["run_status"] == "COMPLETED":
                         return {"status": "completed", "revision": state["procedure"]["revision"]}
@@ -291,6 +293,19 @@ class Driver:
                         else:
                             time.sleep(5)
                 except thread_runtime.HostError as error:
+                    if "already has an active writer" in str(error):
+                        writer_contentions += 1
+                        if self.host:
+                            self.host.close()
+                            self.host = None
+                        if writer_contentions == 3:
+                            self.notify("writer-contention", {
+                                "error": str(error),
+                                "attempts": writer_contentions,
+                                "recovery": "retrying the same recorded task without a model wake",
+                            })
+                        time.sleep(min(60, 5 * writer_contentions))
+                        continue
                     reconnects += 1
                     if self.host:
                         self.host.close()

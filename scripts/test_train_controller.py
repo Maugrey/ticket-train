@@ -2262,6 +2262,27 @@ class TrainControllerTests(unittest.TestCase):
                 2,
             )
 
+    def test_dependency_consolidation_waits_for_missing_analysis_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            state = run.state()
+            item = state["procedure"]["tickets"]["T-1"]
+            item["status"] = "AWAITING_REQUIRED_INPUT"
+            gate = {
+                "gate_id": "T-1:input:1", "kind": "input", "ticket_id": "T-1",
+                "revision": "input-1", "status": "PENDING_ANNOUNCED",
+                "question": "Choose behavior.", "reason": "The source is incomplete.",
+                "blocked_scope": ["T-1"], "continuing_scope": ["Read-only work"],
+                "accepted_replies": ["Select the documented behavior."],
+            }
+            state["procedure"]["human_gates"][gate["gate_id"]] = gate
+            state["pending_human_action"] = {**gate, "notification_status": "ANNOUNCED"}
+            run_registry.save_json(run.path, state)
+
+            actions = train_controller.next_actions(run.state())
+            self.assertEqual([action["action"] for action in actions], ["AWAIT_HUMAN_GATE"])
+
     def test_scope_expansion_gate_is_non_bypassable_in_full_auto(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)
