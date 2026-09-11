@@ -227,7 +227,10 @@ class NativeEffects:
 
     def relay_owner_turn(self, job, prompt):
         """Wake the desktop-owned conversation without acquiring its writer."""
-        job.update(status="starting_turn", pending_prompt=prompt, transport="codex-app-tools")
+        job.update(
+            status="starting_turn", pending_prompt=prompt,
+            transport="codex-app-tools", relay_kind="owner",
+        )
         self.save(job)
         directory = self.directory(job["key"])
         name = "owner-relay-" + str(job["attempt"])
@@ -277,7 +280,10 @@ class NativeEffects:
 
     def relay_worker_turn(self, job, prompt):
         """Start a worker turn through Codex Desktop so its activity is live."""
-        job.update(status="starting_turn", pending_prompt=prompt, transport="codex-app-tools")
+        job.update(
+            status="starting_turn", pending_prompt=prompt,
+            transport="codex-app-tools", relay_kind="worker",
+        )
         self.save(job)
         directory = self.directory(job["key"])
         name = "worker-relay-" + str(job["attempt"])
@@ -490,7 +496,7 @@ class NativeEffects:
                 job["client_message_id"] = str(uuid.uuid4())
                 self.save(job)
                 retry_prompt = "Resume this same authorized phase after the host interruption. Reconcile existing files and results before repeating any work.\n" + job["spec"]["prompt"]
-                if job.get("transport") == "codex-app-tools":
+                if job.get("relay_kind") == "owner" or str(job.get("key", "")).startswith("owner-attention:"):
                     self.relay_owner_turn(job, retry_prompt)
                 else:
                     self.start_turn(job, retry_prompt)

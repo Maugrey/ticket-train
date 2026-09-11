@@ -293,6 +293,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(request["target_thread_id"], "thread-main")
             self.assertEqual(server.calls.count("thread/start"), 0)
             self.assertEqual(server.calls.count("turn/start"), 0)
+
             self.assertEqual(run_registry.load_json(stale)["status"], "superseded")
             self.assertEqual(run_registry.load_json(error)["status"], "superseded")
 
@@ -522,6 +523,26 @@ class NativeRuntimeTests(unittest.TestCase):
                 server.calls.index("send_message_to_thread"),
             )
             self.assertEqual(server.calls.count("turn/start"), 0)
+
+            first_prompt = next(
+                params["prompt"] for method, params in server.call_params
+                if method == "send_message_to_thread"
+            )
+            turn = server.threads[job["thread_id"]]["turns"][-1]
+            turn.update(status="interrupted", items=[{
+                "id": "change-1", "type": "fileChange", "status": "completed",
+            }])
+            job = runtime.observe(job)
+            job["retry_at"] = time.time() - 1
+            runtime.save(job)
+            retried = runtime.observe(job)
+            relayed_prompts = [
+                params["prompt"] for method, params in server.call_params
+                if method == "send_message_to_thread"
+            ]
+            self.assertEqual(retried["relay_kind"], "worker")
+            self.assertEqual(len(relayed_prompts), 2)
+            self.assertNotEqual(first_prompt.splitlines()[0], relayed_prompts[1].splitlines()[0])
 
     def test_lost_sidebar_creation_is_reconciled_without_blocking_or_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
