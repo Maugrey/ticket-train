@@ -21,6 +21,7 @@ import run_registry
 import train_controller
 import orchestration_metrics
 import token_usage
+import thread_runtime
 
 
 RUNNER_VERSION = "2.0"
@@ -290,6 +291,56 @@ class Driver:
                 return False
         return False
 
+    def sync_owner_status(self):
+        """Project semantic run progress into the owner title without a model turn."""
+        state = self.state()
+        procedure = state["procedure"]
+        tickets = ", ".join(procedure.get("tickets", {}))
+        base = "Ticket Train " + tickets
+        pending = state.get("pending_human_action")
+        active = [
+            phase for phase in procedure.get("phases", {}).values()
+            if phase.get("launch_state") in train_controller.ACTIVE_PHASE_STATES
+        ]
+        if procedure.get("run_status") == "COMPLETED":
+            semantic, label = "completed", "completed"
+        elif isinstance(pending, dict):
+            ticket = pending.get("ticket_id")
+            semantic, label = "input:" + str(pending.get("gate_id")), "input required"
+            if ticket:
+                label += " #" + str(ticket)
+        elif self.blocked_actions:
+            semantic, label = "blocked:" + sha256_json(self.blocked_actions), "blocked"
+        elif active:
+            phase = sorted(active, key=lambda item: str(item.get("created_at") or ""))[-1]
+            observation = phase.get("runtime_observation") or {}
+            recovering = observation.get("runtime_status") in {"failed", "interrupted"}
+            label = "recovering" if recovering else str(phase.get("kind") or "working").replace("_", " ")
+            if phase.get("ticket_id"):
+                label = "#" + str(phase["ticket_id"]) + " " + label
+            semantic = ":".join((str(phase.get("phase_key")), str(phase.get("launch_state")), label))
+        else:
+            semantic, label = "transition", "transition"
+        title = base + " — " + label
+        reference = self.directory / "owner-status.json"
+        if reference.exists() and run_registry.load_json(reference).get("semantic") == semantic:
+            return False
+        call_id = "ticket-train-owner-status:" + sha256_json([self.owner, semantic])
+        record = {"semantic": semantic, "title": title, "call_id": call_id,
+                  "status": "armed", "attempted_at": now_iso()}
+        run_registry.save_json(reference, record)
+        try:
+            thread_runtime.call_app_tool(
+                self.owner, "set_thread_title", {"threadId": self.owner, "title": title},
+                call_id, timeout=15,
+            )
+        except (thread_runtime.HostError, OSError, ValueError) as error:
+            record.update(status="unavailable", error=str(error))
+        else:
+            record.update(status="updated", updated_at=now_iso())
+        run_registry.save_json(reference, record)
+        return record["status"] == "updated"
+
     def enrich_gate_payload(self, state, payload):
         """Make legacy gate replies self-contained from their collected result."""
         accepted = payload.get("accepted_replies")
@@ -440,7 +491,6 @@ class Driver:
         return progress
 
     def run(self, max_seconds=None):
-        import thread_runtime
         started = time.monotonic()
         reconnects = 0
         writer_contentions = 0
@@ -450,6 +500,7 @@ class Driver:
                     progress = self.tick()
                     writer_contentions = 0
                     progress = self.sync_owner_attention() or progress
+                    self.sync_owner_status()
                     state = self.state()
                     if state["procedure"]["run_status"] == "COMPLETED":
                         return {"status": "completed", "revision": state["procedure"]["revision"]}

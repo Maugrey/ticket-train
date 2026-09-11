@@ -26,7 +26,8 @@ resolves scope and presents decisions and results.
    retry bounded failures and write actionable outbox items without idle model
    wakes. Each new human gate, terminal error or completed train starts one
    receipt-backed turn in the train's owner conversation through the desktop's
-   native task relay, with compact event context.
+   native task relay, with compact event context. Meaningful phase changes update
+   the owner conversation title through a script-only desktop call.
 7. Persist each user answer against its exact gate and revision, then continue
    the same runner. An acknowledgement or an emitted packet is not execution.
 
@@ -105,7 +106,8 @@ isolated App Server transport for train-owned technical workers.
 Verification journals individual commands. Reuse passed commands only for the
 same plan and unchanged worktree. Preserve raw logs and exit codes. Keep resource
 leases while commands run; recover dead owners with OS locks. Bound service
-retries and report repeated failures with their evidence.
+retries by actual failed or interrupted turns, independently of result repairs
+and user-input resumes, then report repeated failures with their evidence.
 Pin scripts and role instructions per run. Installed updates do not change an
 active run. Migrate explicitly at an idle boundary and retain the old release.
 Treat the desktop executable path as volatile: after an application update, the

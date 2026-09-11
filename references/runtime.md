@@ -79,6 +79,12 @@ recorded message; a restart reconciles the exact prompt and stable tool-call ID
 instead of creating a replacement.
 The exact event is embedded in its prompt, so the owner does not reload the train
 manifest or reconstruct the event merely to present it.
+An interrupted train-owned worker resumes in the same task from its recorded
+worktree and receipts. Its bounded service-retry budget counts only failed or
+interrupted turns; format repairs and user-input resumes do not consume it.
+The runner also projects the current phase, transition, input wait, failure or
+completion into the owner task title. It writes an intent first and updates only
+when that semantic status changes; this desktop call starts no model turn.
 For a human gate it must show the reason, blocked and continuing scope, and every
 accepted reply without summarizing them. Legacy gates whose replies referenced
 worker artifacts are enriched deterministically from the already collected result;
@@ -138,7 +144,9 @@ Do not unlink lock files while another process could hold one.
 
 `bootstrap` does not silently migrate an existing procedure. Pin a new runtime
 only when workers and commands are idle, retaining the previous release and a
-migration receipt. Historical artifacts remain available.
+migration receipt. A terminal native observation and its matching blocked effect
+receipt prove an interrupted worker is idle even if its controller launch state
+has not yet been collected. Historical artifacts remain available.
 
 ```text
 python scripts/run_registry.py migrate-runtime --state MANIFEST --owner-thread-id OWNER --owner-epoch EPOCH

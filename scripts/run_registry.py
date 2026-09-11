@@ -523,7 +523,30 @@ def migrate_runtime(args: argparse.Namespace) -> int:
         state = load_json(path)
         require_owner(state, args.owner_thread_id, args.owner_epoch)
         phases = (state.get("procedure") or {}).get("phases", {})
-        if any(p.get("launch_state") in train_controller.ACTIVE_PHASE_STATES for p in phases.values()):
+        active = [
+            phase for phase in phases.values()
+            if phase.get("launch_state") in train_controller.ACTIVE_PHASE_STATES
+        ]
+        terminal = {"completed", "failed", "interrupted", "needs_input"}
+
+        def transport_is_idle(phase):
+            observation = phase.get("runtime_observation") or {}
+            key = phase.get("phase_key")
+            digest = hashlib.sha256(
+                json.dumps(key, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()
+            journal = path.parent / "driver" / "effects" / digest[:24] / "effect.json"
+            if not key or not journal.is_file():
+                return False
+            job = load_json(journal)
+            return (
+                observation.get("runtime_status") in terminal
+                and observation.get("thread_id") == phase.get("thread_id") == job.get("thread_id")
+                and observation.get("turn_id") == job.get("turn_id")
+                and job.get("status") in {"blocked", "completed", "needs_input"}
+            )
+
+        if active and not all(transport_is_idle(phase) for phase in active):
             raise ValueError("Runtime migration requires all technical tasks to be idle")
         from contextlib import ExitStack
         with ExitStack() as probes:

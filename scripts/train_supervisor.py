@@ -331,8 +331,16 @@ class NativeEffects:
         if job.get("pending_prompt"):
             self.start_turn(job, job["pending_prompt"])
             return self.read(job["key"])
-        if job["status"] in {"completed", "blocked"}:
+        if job["status"] == "completed":
             return job
+        if job["status"] == "blocked":
+            terminal = job.get("terminal_turn_status") or (job.get("error") or {}).get("message")
+            if terminal not in {"failed", "interrupted"} or int(job.get("service_retry_count", 0)) >= 2:
+                return job
+            # Older releases used the total turn number as the service retry
+            # budget. Result repairs and user-input resumes could therefore
+            # exhaust recovery before the first actual host interruption.
+            job["status"] = "running"
         if job["status"] == "creating":
             return self.submit(job["spec"])
         if job.get("retry_at", 0) > time.time():
@@ -358,10 +366,13 @@ class NativeEffects:
                                                    "text": text, "completed_at": utcnow()})
             job.update(status="completed", result_reference=str(directory / "result.json"), completed_at=utcnow())
         elif turn["status"] in {"failed", "interrupted"}:
+            job["terminal_turn_status"] = turn["status"]
             job["error"] = turn.get("error") or {"message": turn["status"]}
-            if job["attempt"] >= 2:
+            retry_count = int(job.get("service_retry_count", 0))
+            if retry_count >= 2:
                 job["status"] = "blocked"
             elif job.get("retry_at"):
+                job["service_retry_count"] = retry_count + 1
                 job["attempt"] += 1
                 job.pop("retry_at", None)
                 job["client_message_id"] = str(uuid.uuid4())
@@ -373,7 +384,7 @@ class NativeEffects:
                     self.start_turn(job, retry_prompt)
                 return self.read(job["key"])
             else:
-                job["retry_at"] = time.time() + (15, 60)[job["attempt"]]
+                job["retry_at"] = time.time() + (15, 60)[retry_count]
         self.save(job)
         return job
 

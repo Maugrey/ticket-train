@@ -273,6 +273,33 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(run_registry.load_json(stale)["status"], "superseded")
             self.assertEqual(run_registry.load_json(error)["status"], "superseded")
 
+    def test_owner_title_changes_only_with_semantic_train_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Harness(Path(tmp))
+            state = run.state()
+            state["procedure"]["phases"]["T-1:implementation:1"] = {
+                "phase_key": "T-1:implementation:1",
+                "ticket_id": "T-1",
+                "kind": "implementation",
+                "launch_state": "RUNNING",
+                "runtime_observation": {"runtime_status": "running"},
+            }
+            run_registry.save_json(run.path, state)
+            driver = runner.Driver(
+                run.path, "thread-main", state["orchestrator_lease"]["epoch"], {}
+            )
+            result = {"content": [{"type": "text", "text": '{"threadId":"thread-main"}'}]}
+            with patch.object(thread_runtime, "call_app_tool", return_value=result) as call:
+                self.assertTrue(driver.sync_owner_status())
+                self.assertFalse(driver.sync_owner_status())
+
+            call.assert_called_once()
+            self.assertEqual(call.call_args.args[1], "set_thread_title")
+            self.assertEqual(
+                call.call_args.args[2]["title"],
+                "Ticket Train T-1 — #T-1 implementation",
+            )
+
     def test_legacy_gate_replies_are_enriched_from_collected_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Harness(Path(tmp))
@@ -604,10 +631,33 @@ class NativeRuntimeTests(unittest.TestCase):
             run_registry.save_json(run.path, state)
             with self.assertRaisesRegex(ValueError, "idle"):
                 run_registry.migrate_runtime(args)
-            state["procedure"]["phases"].clear(); run_registry.save_json(run.path, state)
+            state["procedure"]["phases"]["busy"].update(
+                thread_id="worker-busy",
+                runtime_observation={
+                    "runtime_status": "interrupted",
+                    "thread_id": "worker-busy",
+                    "turn_id": "turn-busy",
+                },
+            )
+            run_registry.save_json(run.path, state)
+            effect_key = train_supervisor.digest("busy")[:24]
+            run_registry.save_json(
+                run.path.parent / "driver" / "effects" / effect_key / "effect.json",
+                {
+                    "key": "busy",
+                    "thread_id": "worker-busy",
+                    "turn_id": "turn-busy",
+                    "status": "blocked",
+                },
+            )
             with contextlib.redirect_stdout(io.StringIO()):
                 run_registry.migrate_runtime(args)
             self.assertEqual(len(run.state()["runtime_migrations"]), 1)
+            state = run.state()
+            state["procedure"]["phases"].clear(); run_registry.save_json(run.path, state)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_registry.migrate_runtime(args)
+            self.assertEqual(len(run.state()["runtime_migrations"]), 2)
             self.assertEqual(run_registry.verify_release(run.state()), release)
 
     def test_action_error_budget_prevents_endless_retries_and_idle_wakes(self):
@@ -934,6 +984,32 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(job["status"], "blocked")
             self.assertEqual(server.calls.count("thread/start"), 1)
             self.assertEqual(server.calls.count("turn/start"), 3)
+
+    def test_interruption_recovery_is_independent_from_prior_phase_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+            runtime = effects(Path(tmp), server)
+            job = runtime.submit({"key": "resumed", "cwd": tmp, "prompt": "work"})
+            job.update(
+                attempt=3,
+                status="blocked",
+                error={"message": "interrupted"},
+            )
+            runtime.save(job)
+            server.threads[job["thread_id"]]["turns"][-1]["status"] = "interrupted"
+
+            scheduled = runtime.observe(job)
+            self.assertEqual(scheduled["status"], "running")
+            self.assertGreater(scheduled["retry_at"], time.time())
+            scheduled["retry_at"] = time.time() - 1
+            runtime.save(scheduled)
+            recovered = runtime.observe(scheduled)
+
+            self.assertEqual(recovered["status"], "running")
+            self.assertEqual(recovered["attempt"], 4)
+            self.assertEqual(recovered["service_retry_count"], 1)
+            self.assertEqual(server.calls.count("thread/start"), 1)
+            self.assertEqual(server.calls.count("turn/start"), 2)
 
     def test_phase_resume_is_idempotent_for_the_same_supplied_input(self):
         class FakeEffects:
