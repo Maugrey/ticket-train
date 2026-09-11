@@ -81,7 +81,8 @@ The exact event is embedded in its prompt, so the owner does not reload the trai
 manifest or reconstruct the event merely to present it.
 An interrupted train-owned worker resumes in the same task from its recorded
 worktree and receipts. Its bounded service-retry budget counts only failed or
-interrupted turns; format repairs and user-input resumes do not consume it.
+consecutively interrupted turns that made no observable command or file progress;
+format repairs and user-input resumes do not consume it.
 The runner also projects the current phase, transition, input wait, failure or
 completion into the owner task title. It writes an intent first and updates only
 when that semantic status changes; this desktop call starts no model turn.

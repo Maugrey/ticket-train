@@ -1043,6 +1043,33 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(server.calls.count("thread/start"), 1)
             self.assertEqual(server.calls.count("turn/start"), 2)
 
+    def test_interruption_after_observable_work_resets_the_consecutive_retry_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+            runtime = effects(Path(tmp), server)
+            job = runtime.submit({"key": "progress", "cwd": tmp, "prompt": "work"})
+            turn = server.threads[job["thread_id"]]["turns"][-1]
+            turn.update(status="interrupted", items=[{
+                "id": "change-1", "type": "fileChange", "status": "completed",
+            }])
+            job.update(
+                status="blocked", terminal_turn_status="interrupted",
+                service_retry_count=2, error={"message": "interrupted"},
+            )
+            runtime.save(job)
+
+            scheduled = runtime.observe(job)
+            self.assertEqual(scheduled["status"], "running")
+            scheduled["retry_at"] = time.time() - 1
+            runtime.save(scheduled)
+            recovered = runtime.observe(scheduled)
+
+            self.assertEqual(recovered["status"], "running")
+            self.assertEqual(recovered["service_retry_count"], 1)
+            self.assertEqual(recovered["service_progress_turn_id"], turn["id"])
+            self.assertEqual(server.calls.count("thread/start"), 1)
+            self.assertEqual(server.calls.count("turn/start"), 2)
+
     def test_phase_resume_is_idempotent_for_the_same_supplied_input(self):
         class FakeEffects:
             def __init__(self):

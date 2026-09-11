@@ -395,7 +395,9 @@ class NativeEffects:
             return job
         if job["status"] == "blocked":
             terminal = job.get("terminal_turn_status") or (job.get("error") or {}).get("message")
-            if terminal not in {"failed", "interrupted"} or int(job.get("service_retry_count", 0)) >= 2:
+            if terminal not in {"failed", "interrupted"}:
+                return job
+            if terminal == "failed" and int(job.get("service_retry_count", 0)) >= 2:
                 return job
             # Older releases used the total turn number as the service retry
             # budget. Result repairs and user-input resumes could therefore
@@ -429,6 +431,14 @@ class NativeEffects:
             job["terminal_turn_status"] = turn["status"]
             job["error"] = turn.get("error") or {"message": turn["status"]}
             retry_count = int(job.get("service_retry_count", 0))
+            made_progress = turn["status"] == "interrupted" and any(
+                item.get("type") == "fileChange"
+                or (item.get("type") == "commandExecution" and item.get("status") == "completed")
+                for item in turn.get("items", [])
+            )
+            if made_progress:
+                retry_count = 0
+                job["service_progress_turn_id"] = turn["id"]
             if retry_count >= 2:
                 job["status"] = "blocked"
             elif job.get("retry_at"):
