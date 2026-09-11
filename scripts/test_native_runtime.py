@@ -280,7 +280,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 Path(tmp) / "driver" / "effects",
                 __file__,
                 host_factory=lambda *a, **kw: server,
-                source_thread_id="thread-main",
+                source_thread_id="relay-source",
                 owner_relay=server.send_message_to_thread,
             )
             driver = runner.Driver(
@@ -392,7 +392,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 "turns": [], "status": {"type": "idle"}, "projectId": None,
             }
             runtime = effects(Path(tmp) / "driver" / "effects", server)
-            runtime.source_thread_id = "thread-main"
+            runtime.source_thread_id = "relay-source"
             driver = runner.Driver(
                 run.path,
                 "thread-main",
@@ -437,7 +437,7 @@ class NativeRuntimeTests(unittest.TestCase):
 
             runtime = train_supervisor.NativeEffects(
                 root / "effects", __file__, host_factory=lambda *a, **kw: server,
-                source_thread_id="thread-main", owner_relay=lose_response,
+                source_thread_id="relay-source", owner_relay=lose_response,
             )
             spec = {"key": "owner-attention:test", "prompt": "Present the gate."}
             notification = {"status": "pending", "reference": str(root / "notification.json")}
@@ -445,18 +445,18 @@ class NativeRuntimeTests(unittest.TestCase):
 
             restarted = train_supervisor.NativeEffects(
                 root / "effects", __file__, host_factory=lambda *a, **kw: server,
-                source_thread_id="thread-main", owner_relay=server.send_message_to_thread,
+                source_thread_id="relay-source", owner_relay=server.send_message_to_thread,
             )
             self.assertTrue(restarted.start_owner_turn(notification, spec, "thread-main"))
             self.assertEqual(server.calls.count("send_message_to_thread"), 1)
             self.assertEqual(restarted.read(spec["key"])["status"], "running")
 
-    def test_empty_owner_relay_acknowledgement_uses_a_native_visible_turn(self):
+    def test_owner_self_notification_uses_a_native_visible_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, server = Path(tmp), FakeServer()
             server.threads["thread-main"] = {
                 "id": "thread-main", "cwd": str(root), "createdAt": time.time(),
-                "turns": [], "status": {"type": "active"}, "projectId": None,
+                "turns": [], "status": {"type": "idle"}, "projectId": None,
             }
             calls = []
 
@@ -472,11 +472,11 @@ class NativeRuntimeTests(unittest.TestCase):
             notification = {"status": "pending", "reference": str(root / "notification.json")}
 
             self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 0)
             self.assertEqual(runtime.read(spec["key"])["status"], "running")
             self.assertEqual(server.calls.count("turn/start"), 1)
             self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 0)
 
     def test_busy_owner_is_relayed_without_creating_an_attention_task(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -487,7 +487,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 "turns": [], "status": {"type": "active"}, "projectId": None,
             }
             runtime = effects(Path(tmp) / "driver" / "effects", server)
-            runtime.source_thread_id = "thread-main"
+            runtime.source_thread_id = "relay-source"
             driver = runner.Driver(
                 run.path,
                 "thread-main",

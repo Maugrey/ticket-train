@@ -264,7 +264,10 @@ class NativeEffects:
 
         observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
         turn = self.relayed_turn(observed["thread"], prompt)
-        if not turn and not response_path.exists():
+        # A task cannot reliably send a desktop relay to itself: some desktop
+        # versions acknowledge it with an empty turn. Existing owner tasks use
+        # their native writer below; cross-task relays retain the app path.
+        if not turn and not response_path.exists() and self.source_thread_id != job["thread_id"]:
             request = {
                 "source_thread_id": self.source_thread_id or job["thread_id"],
                 "target_thread_id": job["thread_id"],
@@ -292,6 +295,7 @@ class NativeEffects:
             turn = self.native_turn(
                 job, prompt, "owner-native-" + str(job["attempt"]),
                 prior_turn_count=len(observed["thread"].get("turns", [])),
+                wait_if_active=True,
             )
         if not turn:
             job["retry_at"] = time.time() + 2
@@ -371,13 +375,18 @@ class NativeEffects:
         self.save(job)
         return True
 
-    def native_turn(self, job, prompt, name, prior_turn_count=None):
+    def native_turn(self, job, prompt, name, prior_turn_count=None, wait_if_active=False):
         """Start or reconcile one exact turn through the task's native writer."""
         directory = self.directory(job["key"])
         receipt = self.receipt(directory, name + "-response")
         if receipt:
             return receipt["turn"]
         if job["thread_id"] not in self.loaded:
+            observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
+            if wait_if_active and (observed["thread"].get("status") or {}).get("type") == "active":
+                job["retry_at"] = time.time() + 2
+                self.save(job)
+                return None
             response_path = directory / (name + "-resume-response.json")
             try:
                 resumed = self.host.call(
