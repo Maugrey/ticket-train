@@ -1814,6 +1814,60 @@ class TrainControllerTests(unittest.TestCase):
             self.assertEqual(pair, {"run:T-1:implementation:1", "run:T-1:acceptance:1"})
             self.assertEqual(phases["run:T-1:implementation:1"]["base"], phases["run:T-1:acceptance:1"]["base"])
 
+    def test_failed_acceptance_authoring_is_reclassified_after_implementation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.dispatch_pair()
+            run.materialize("run:T-1:implementation:1", "thread-impl")
+            run.materialize("run:T-1:acceptance:1", "thread-tests")
+            acceptance = run.state()["procedure"]["phases"]["run:T-1:acceptance:1"]
+            self.assertEqual(run.apply(
+                "PHASE_TERMINATED",
+                phase_key="run:T-1:acceptance:1",
+                envelope={
+                    "phase_key": "run:T-1:acceptance:1",
+                    "phase_status": "failed",
+                    "actual_model": acceptance["requested_model"],
+                    "actual_reasoning_effort": acceptance["requested_reasoning_effort"],
+                    "result_summary": "Acceptance suite authored; baseline is red before integration.",
+                    "artifacts": {
+                        "commit": "acceptance-sha",
+                        "verification_plan_reference": "reports/verification-plan.json",
+                        "verification_evidence_reference": "reports/verification-evidence.json",
+                    },
+                    "tests_and_checks": ["The independent suite was discovered and recorded."],
+                    "residual_risks": ["Integrated verification remains pending."],
+                    "requested_or_recommended_next_action": "Integrate and run on the implementation head.",
+                    "files_modified": ["tests/acceptance.cs"],
+                    "usage": {"measurement": "complete", "total_tokens": 100},
+                },
+            ), 0)
+            implementation = run.state()["procedure"]["phases"]["run:T-1:implementation:1"]
+            run.complete_phase(
+                "run:T-1:implementation:1",
+                implementation["requested_model"],
+                implementation["requested_reasoning_effort"],
+            )
+
+            action = train_controller.next_actions(run.state())[0]
+            self.assertEqual(action["action"], "RECLASSIFY_ACCEPTANCE_AUTHORING")
+            self.assertEqual(run.apply(
+                "ACCEPTANCE_AUTHORING_RECLASSIFIED",
+                **{key: action[key] for key in (
+                    "ticket_id", "phase_key", "acceptance_commit",
+                    "verification_plan_reference", "verification_evidence_reference", "reason",
+                )},
+            ), 0)
+            state = run.state()["procedure"]
+            self.assertEqual(state["phases"]["run:T-1:acceptance:1"]["launch_state"], "COMPLETED")
+            self.assertEqual(
+                state["phases"]["run:T-1:acceptance:1"]["acceptance_authoring_original_status"],
+                "failed",
+            )
+            self.assertEqual(state["tickets"]["T-1"]["status"], "AWAITING_EXECUTION_INTEGRATION")
+
     def test_silence_does_not_change_running_phase_to_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)

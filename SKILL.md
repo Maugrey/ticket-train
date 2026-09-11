@@ -89,6 +89,9 @@ exact base. Consolidate hard dependencies and shared-file collisions before work
 Implementation and acceptance use independent workers and branches at one base.
 Integrate their commits, then verify the combined commit before review.
 The implementer's own tests do not replace independent acceptance evidence.
+Treat a committed, structurally valid acceptance suite as completed authoring
+when its pre-integration baseline is red; preserve that red result and require
+exact-head verification rather than terminating the ticket.
 
 The initial review is exhaustive and independent. Batch valid findings into a
 fresh remediation context; review the changed surface unless evidence requires

@@ -834,6 +834,15 @@ def execute_action(driver, action):
         return execution_pair(driver, action)
     if name == "INTEGRATE_EXECUTION_PAIR_DETERMINISTICALLY":
         return integrate(driver, action)
+    if name == "RECLASSIFY_ACCEPTANCE_AUTHORING":
+        driver.apply({
+            "type": "ACCEPTANCE_AUTHORING_RECLASSIFIED",
+            **{key: action[key] for key in (
+                "ticket_id", "phase_key", "acceptance_commit",
+                "verification_plan_reference", "verification_evidence_reference", "reason",
+            )},
+        })
+        return True
     if name in {"RUN_DETERMINISTIC_TICKET_VERIFICATION", "RUN_FINAL_EXACT_HEAD_VERIFICATION_DETERMINISTICALLY", "RUN_VALIDATION_ONLY_VERIFICATION"}:
         return verify(driver, action)
     if name in {"INITIALIZE_UNITY_SLOTS_DETERMINISTICALLY", "ACQUIRE_UNITY_SLOT_DETERMINISTICALLY", "RELEASE_UNITY_SLOT_DETERMINISTICALLY"}:

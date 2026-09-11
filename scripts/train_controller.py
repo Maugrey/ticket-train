@@ -1379,22 +1379,33 @@ def reclassify_acceptance_authoring(event: dict[str, Any], proc: dict[str, Any])
     require_fields(
         event,
         (
-            "ticket_id", "phase_key", "acceptance_commit", "result_reference",
-            "result_sha256", "reason",
+            "ticket_id", "phase_key", "acceptance_commit",
+            "verification_plan_reference", "verification_evidence_reference", "reason",
         ),
         "acceptance-authoring reclassification",
     )
     item = phase(proc, str(event["phase_key"]))
     require(item.get("kind") == "acceptance_tests", "only acceptance-test authoring may be reclassified")
     require(item.get("ticket_id") == str(event["ticket_id"]), "acceptance reclassification ticket mismatch")
-    require(item.get("launch_state") == "BLOCKED", "only a blocked acceptance authoring phase may be reclassified")
+    original_status = str(item.get("launch_state") or "")
+    require(
+        original_status in {"BLOCKED", "FAILED"},
+        "only a blocked or failed acceptance authoring phase may be reclassified",
+    )
     envelope = item.get("completion_envelope")
-    require(isinstance(envelope, dict) and envelope.get("phase_status") == "blocked",
+    require(isinstance(envelope, dict) and envelope.get("phase_status") == original_status.lower(),
             "reclassification requires the original blocked envelope")
     artifacts = envelope.get("artifacts") if isinstance(envelope.get("artifacts"), dict) else {}
     require(artifacts.get("commit") == event["acceptance_commit"], "acceptance reclassification commit mismatch")
-    require(artifacts.get("result_reference") == event["result_reference"], "acceptance result reference mismatch")
-    require(artifacts.get("result_sha256") == event["result_sha256"], "acceptance result hash mismatch")
+    require(
+        artifacts.get("verification_plan_reference") == event["verification_plan_reference"],
+        "acceptance verification plan mismatch",
+    )
+    require(
+        artifacts.get("verification_evidence_reference") == event["verification_evidence_reference"],
+        "acceptance verification evidence mismatch",
+    )
+    require(bool(envelope.get("tests_and_checks")), "acceptance authoring has no recorded checks")
     ticket_item = ticket(proc, str(event["ticket_id"]))
     execution = ticket_item.get("execution") or {}
     require(execution.get("acceptance_phase_key") == item.get("phase_key"), "phase is not the ticket acceptance phase")
@@ -1404,7 +1415,14 @@ def reclassify_acceptance_authoring(event: dict[str, Any], proc: dict[str, Any])
     item["launch_state"] = "COMPLETED"
     item["acceptance_authoring_reclassified_at"] = now_iso()
     item["acceptance_authoring_reclassification_reason"] = str(event["reason"])
-    item["acceptance_authoring_original_status"] = "blocked"
+    item["acceptance_authoring_original_status"] = original_status.lower()
+    risks = envelope.get("residual_risks")
+    if isinstance(risks, list):
+        reclassified_risks = [*risks, "This reclassification does not claim any oracle result or green verification."]
+    else:
+        reclassified_risks = (
+            f"{risks or ''} This reclassification does not claim any oracle result or green verification."
+        ).strip()
     item["completion_envelope"] = {
         **envelope,
         "phase_status": "completed",
@@ -1412,11 +1430,8 @@ def reclassify_acceptance_authoring(event: dict[str, Any], proc: dict[str, Any])
             f"{envelope.get('result_summary', '')} "
             "Acceptance authoring is complete; execution remains pending exact-head binding and verification."
         ).strip(),
-        "residual_risks": (
-            f"{envelope.get('residual_risks', '')} "
-            "This reclassification does not claim any oracle result or green verification."
-        ).strip(),
-        "authoring_reclassified_from": "blocked",
+        "residual_risks": reclassified_risks,
+        "authoring_reclassified_from": original_status.lower(),
         "verification_pending_reason": "The independently authored suite requires binding and execution on the integrated implementation head.",
     }
     ticket_item["status"] = "AWAITING_EXECUTION_INTEGRATION"
@@ -4805,6 +4820,37 @@ def _next_actions(state: dict[str, Any]) -> list[dict[str, Any]]:
                 })
     if contract_actions:
         return contract_actions + gate_actions
+    for ticket_id, value in proc["tickets"].items():
+        execution = value.get("execution") or {}
+        implementation_key = execution.get("implementation_phase_key")
+        acceptance_key = execution.get("acceptance_phase_key")
+        if not implementation_key or not acceptance_key:
+            continue
+        implementation = phase(proc, implementation_key)
+        acceptance = phase(proc, acceptance_key)
+        envelope = acceptance.get("completion_envelope") or {}
+        artifacts = envelope.get("artifacts") or {}
+        if (
+            implementation.get("launch_state") == "COMPLETED"
+            and acceptance.get("launch_state") in {"BLOCKED", "FAILED"}
+            and artifacts.get("commit")
+            and artifacts.get("verification_plan_reference")
+            and artifacts.get("verification_evidence_reference")
+            and envelope.get("tests_and_checks")
+        ):
+            return [{
+                "action": "RECLASSIFY_ACCEPTANCE_AUTHORING",
+                "ticket_id": ticket_id,
+                "phase_key": acceptance_key,
+                "acceptance_commit": artifacts["commit"],
+                "verification_plan_reference": artifacts["verification_plan_reference"],
+                "verification_evidence_reference": artifacts["verification_evidence_reference"],
+                "reason": (
+                    "The independent acceptance suite and evidence contract were authored; "
+                    "its pre-integration result must remain red until exact-head verification."
+                ),
+                "model_tokens": 0,
+            }] + gate_actions
     ready = [
         ticket_id for ticket_id, value in proc["tickets"].items()
         if value["status"] == "READY_FOR_IMPLEMENTATION"
