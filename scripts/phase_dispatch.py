@@ -259,6 +259,26 @@ def repair_prompt(error, original):
             "Do not repeat technical work or alter scope. " + original)
 
 
+def decorate_remediation_dispatch(driver, decision, event):
+    """Bind controller-owned identity and routing to a worker's remediation plan."""
+    proc = driver.state()["procedure"]
+    ticket_id = decision.get("ticket_id")
+    controller.require(bool(ticket_id), "Remediation decision requires a ticket identity")
+    item = proc["tickets"][ticket_id]
+    cycle = int(item.get("remediation_cycles", 0))
+    model, effort, conformance = controller.routed_setting(
+        controller.remediation_matrix_for_cycle(cycle),
+        event["criticality"], event["complexity"], False,
+    )
+    decision_sequence = decision["phase_key"].rsplit(":", 1)[-1]
+    event.update(
+        phase_key=f"{ticket_id}:remediation:{decision_sequence}",
+        model=model,
+        reasoning_effort=effort,
+        routing_conformance=conformance,
+    )
+
+
 def decorate_events(driver, value, result):
     allowed = DECISION_EVENTS[value["decision_action"]] if value["kind"] == "technical_decision" else RESULT_EVENTS[value["kind"]]
     events = result.get("events", [])
@@ -284,6 +304,8 @@ def decorate_events(driver, value, result):
             event["ticket_id"] = value["ticket_id"]
         if value["kind"] != "technical_decision":
             event.update(model=value["requested_model"], reasoning_effort=value["requested_reasoning_effort"])
+        elif event["type"] == "REMEDIATION_DISPATCHED":
+            decorate_remediation_dispatch(driver, value, event)
         if event["type"] == "TICKET_TRIAGED":
             model, effort, conformance = controller.routed_setting(controller.ANALYSIS_MATRIX, event["criticality"], event["complexity"], False)
             event.update(analysis_model=model, analysis_reasoning_effort=effort, analysis_routing_conformance=conformance,
@@ -458,6 +480,32 @@ def integrate(driver, action):
     return True
 
 
+def bind_verification_evidence(template, ticket_id, execution=None, acceptance_commit=None):
+    evidence = dict(template)
+    if evidence.get("type") in {"VERIFICATION_RECORDED", "VALIDATION_ONLY_RECORDED"}:
+        controller.require(bool(ticket_id), "Ticket verification requires controller ticket identity")
+        controller.require(evidence.get("ticket_id") in {None, ticket_id},
+                           "Verification template targets a different ticket")
+        evidence["ticket_id"] = ticket_id
+        if evidence["type"] == "VERIFICATION_RECORDED" and execution is not None:
+            controller.require(bool(acceptance_commit), "Verification requires the independent acceptance commit")
+            controller.require(evidence.get("baseline_red_base") in {None, execution["base_commit"]},
+                               "Verification baseline differs from the execution pair")
+            controller.require(evidence.get("independent_test_commit") in {None, acceptance_commit},
+                               "Verification acceptance commit differs from the execution pair")
+            evidence["baseline_red_base"] = execution["base_commit"]
+            evidence["independent_test_commit"] = acceptance_commit
+            # Missing coverage/parity evidence must remain incomplete, including
+            # when every command passes. Failed commands can still be recorded
+            # and classified without promoting an unexecuted acceptance claim.
+            evidence.setdefault("environment_status", "incomplete")
+            evidence.setdefault("acceptance_coverage_status", "incomplete")
+    else:
+        controller.require(evidence.get("type") == "FINAL_VERIFICATION_RECORDED" and ticket_id is None,
+                           "Final verification template cannot target a ticket")
+    return evidence
+
+
 def verify(driver, action):
     import verification_adapter
     proc = driver.state()["procedure"]
@@ -494,9 +542,14 @@ def verify(driver, action):
     plan = load(config["verification_plan_reference"])
     plan.update(workdir=str(directory), expected_head=head)
     run_registry.save_json(destination / "plan.json", plan)
+    evidence = bind_verification_evidence(
+        load(config["verification_evidence_reference"]), ticket_id,
+        item["execution"] if ticket_id and action["action"] != "RUN_VALIDATION_ONLY_VERIFICATION" else None,
+        acceptance.get("commit") if ticket_id and action["action"] != "RUN_VALIDATION_ONLY_VERIFICATION" else None)
+    run_registry.save_json(destination / "evidence.json", evidence)
     with contextlib.redirect_stdout(io.StringIO()):
         verification_adapter.execute(argparse.Namespace(
-            state=driver.path, plan=destination / "plan.json", evidence=Path(config["verification_evidence_reference"]),
+            state=driver.path, plan=destination / "plan.json", evidence=destination / "evidence.json",
             output=destination / "result.json", logs_dir=destination / "logs", owner=driver.owner, owner_epoch=driver.epoch))
     return True
 

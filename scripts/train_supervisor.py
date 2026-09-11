@@ -30,6 +30,31 @@ def utcnow():
     return datetime.now(timezone.utc).isoformat()
 
 
+def recover_completed_message(creation_receipt, thread_id, turn_id):
+    """Recover only the exact terminal message from a receipt-owned local rollout."""
+    created = creation_receipt.get("result", {}).get("thread", {})
+    if created.get("id") != thread_id or not created.get("path"):
+        raise ValueError("Local message recovery requires the matching creation receipt")
+    path = Path(created["path"])
+    session_ids, matches = set(), []
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = row.get("payload") or {}
+            if row.get("type") == "session_meta":
+                session_ids.add(payload.get("id"))
+            if (row.get("type") == "event_msg" and payload.get("type") == "task_complete"
+                    and payload.get("turn_id") == turn_id):
+                matches.append(payload.get("last_agent_message"))
+    if session_ids != {thread_id} or len(matches) != 1 or not isinstance(matches[0], str) or not matches[0].strip():
+        raise ValueError("No unique nonempty exact-turn local completion message")
+    return matches[0], {"source": str(path), "thread_id": thread_id, "turn_id": turn_id,
+                        "message_sha256": hashlib.sha256(matches[0].encode()).hexdigest()}
+
+
 class NativeEffects:
     """Own worker tasks and durable RPC receipts, never workflow decisions.
 
@@ -509,9 +534,17 @@ class NativeEffects:
             job["status"] = "needs_input"
         elif status == "completed":
             message = poll.get("latestAssistantMessage") or {}
+            recovered = None
+            text = message.get("text", "")
+            if not text.strip() or message.get("truncated"):
+                try:
+                    text, recovered = recover_completed_message(
+                        load_json(directory / "create-response.json"), job["thread_id"], job["turn_id"])
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    recovered = {"unavailable": str(error)}
             save_json(directory / "result.json", {
                 "thread_id": job["thread_id"], "turn_id": job["turn_id"],
-                "text": message.get("text", ""), "completed_at": utcnow(),
+                "text": text, "completed_at": utcnow(), "local_message_recovery": recovered,
             })
             job.update(
                 status="completed", result_reference=str(directory / "result.json"),

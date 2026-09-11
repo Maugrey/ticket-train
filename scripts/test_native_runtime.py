@@ -1050,6 +1050,29 @@ class NativeRuntimeTests(unittest.TestCase):
                 "type": "TICKET_TRIAGED", "event_type": "ANALYSIS_RECORDED",
             }]})
 
+    def test_collection_binds_controller_owned_remediation_identity_and_route(self):
+        class DriverStub:
+            def state(self):
+                return {"procedure": {"tickets": {"T-1": {"remediation_cycles": 0}}}}
+
+        value = {
+            "kind": "technical_decision", "decision_action": "DISPATCH_FRESH_BATCHED_REMEDIATION",
+            "phase_key": "T-1:decision:24", "ticket_id": "T-1",
+        }
+        events = phase_dispatch.decorate_events(DriverStub(), value, {"events": [{
+            "type": "REMEDIATION_DISPATCHED", "criticality": "CRITICAL", "complexity": "MAXIMUM",
+            "phase_key": "worker-controlled", "model": "gpt-5.6-luna", "reasoning_effort": "medium",
+            "reasoning_authorized": True, "reasoning_authorization_id": "worker-controlled",
+        }]})
+        event = events[0]
+        self.assertEqual(event["phase_key"], "T-1:remediation:24")
+        self.assertEqual(
+            (event["model"], event["reasoning_effort"], event["routing_conformance"]),
+            ("gpt-6-astra", "xhigh", "documented-fallback"),
+        )
+        self.assertNotIn("reasoning_authorized", event)
+        self.assertNotIn("reasoning_authorization_id", event)
+
     def test_missing_environment_field_is_a_repairable_result_error(self):
         error = ValueError("analysis_unity_requirement is required by the unity-mcp-local environment profile")
         self.assertTrue(phase_dispatch.repairable_result_error(error))
