@@ -1053,7 +1053,10 @@ class NativeRuntimeTests(unittest.TestCase):
     def test_collection_binds_controller_owned_remediation_identity_and_route(self):
         class DriverStub:
             def state(self):
-                return {"procedure": {"tickets": {"T-1": {"remediation_cycles": 0}}}}
+                return {"procedure": {"tickets": {"T-1": {
+                    "remediation_cycles": 0,
+                    "execution": {"verification_unity_requirement": "editor-tests"},
+                }}}}
 
         value = {
             "kind": "technical_decision", "decision_action": "DISPATCH_FRESH_BATCHED_REMEDIATION",
@@ -1072,6 +1075,7 @@ class NativeRuntimeTests(unittest.TestCase):
         )
         self.assertNotIn("reasoning_authorized", event)
         self.assertNotIn("reasoning_authorization_id", event)
+        self.assertEqual(event["unity_requirement"], "editor-tests")
 
     def test_missing_environment_field_is_a_repairable_result_error(self):
         error = ValueError("analysis_unity_requirement is required by the unity-mcp-local environment profile")

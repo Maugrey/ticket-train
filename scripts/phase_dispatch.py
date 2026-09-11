@@ -276,6 +276,7 @@ def decorate_remediation_dispatch(driver, decision, event):
         model=model,
         reasoning_effort=effort,
         routing_conformance=conformance,
+        unity_requirement=(item.get("execution") or {}).get("verification_unity_requirement", "none"),
     )
 
 
