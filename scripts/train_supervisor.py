@@ -275,24 +275,24 @@ class NativeEffects:
                 save_json(request_path, request)
             elif load_json(request_path) != request:
                 raise ValueError("Owner relay request changed after it was armed")
-            result = self.owner_relay(
-                request["source_thread_id"], request["target_thread_id"],
-                request["prompt"], request["call_id"],
-            )
-            save_json(response_path, {"result": result})
+            try:
+                result = self.owner_relay(
+                    request["source_thread_id"], request["target_thread_id"],
+                    request["prompt"], request["call_id"],
+                )
+                save_json(response_path, {"result": result})
+            except thread_runtime.HostError:
+                pass
             observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
             turn = self.relayed_turn(observed["thread"], prompt)
-        if not turn and response_path.exists():
-            job.update(
-                turn_id="app-relay:" + job["client_message_id"],
-                status="completed",
-                result_reference=str(response_path),
-                completed_at=utcnow(),
+        if not turn:
+            # A tool acknowledgement or an empty desktop turn is not a user
+            # notification. Use the existing owner's native task writer and
+            # require an actual prompt-bearing turn before marking delivery.
+            turn = self.native_turn(
+                job, prompt, "owner-native-" + str(job["attempt"]),
+                prior_turn_count=len(observed["thread"].get("turns", [])),
             )
-            job.pop("pending_prompt", None)
-            job.pop("retry_at", None)
-            self.save(job)
-            return True
         if not turn:
             job["retry_at"] = time.time() + 2
             self.save(job)
@@ -371,7 +371,7 @@ class NativeEffects:
         self.save(job)
         return True
 
-    def native_turn(self, job, prompt, name):
+    def native_turn(self, job, prompt, name, prior_turn_count=None):
         """Start or reconcile one exact turn through the task's native writer."""
         directory = self.directory(job["key"])
         receipt = self.receipt(directory, name + "-response")
@@ -397,9 +397,11 @@ class NativeEffects:
         request_path = directory / (name + "-request.json")
         response_path = directory / (name + "-response.json")
         if request_path.exists():
+            request = load_json(request_path)
             observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
             turns = observed["thread"].get("turns", [])
-            if len(turns) != job["attempt"] + 1:
+            expected_count = int(request.get("prior_turn_count", job["attempt"])) + 1
+            if len(turns) != expected_count:
                 raise thread_runtime.HostError("Turn outcome unknown; no duplicate prompt was submitted")
             receipt = {"turn": turns[-1]}
             save_json(response_path, {"result": receipt, "reconciled": True})
@@ -408,6 +410,8 @@ class NativeEffects:
                        "input": [{"type": "text", "text": prompt, "text_elements": []}]}
             if job["spec"].get("effort"):
                 request["effort"] = job["spec"]["effort"]
+            if prior_turn_count is not None:
+                request["prior_turn_count"] = int(prior_turn_count)
             save_json(request_path, request)
             receipt = self.host.call("turn/start", request, receipt_path=response_path)
         return receipt["turn"]

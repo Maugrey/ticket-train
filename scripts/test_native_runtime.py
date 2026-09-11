@@ -441,8 +441,7 @@ class NativeRuntimeTests(unittest.TestCase):
             )
             spec = {"key": "owner-attention:test", "prompt": "Present the gate."}
             notification = {"status": "pending", "reference": str(root / "notification.json")}
-            with self.assertRaises(thread_runtime.HostError):
-                runtime.start_owner_turn(notification, spec, "thread-main")
+            self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
 
             restarted = train_supervisor.NativeEffects(
                 root / "effects", __file__, host_factory=lambda *a, **kw: server,
@@ -452,7 +451,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(server.calls.count("send_message_to_thread"), 1)
             self.assertEqual(restarted.read(spec["key"])["status"], "running")
 
-    def test_accepted_queued_owner_relay_does_not_wait_for_a_turn_snapshot(self):
+    def test_empty_owner_relay_acknowledgement_uses_a_native_visible_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, server = Path(tmp), FakeServer()
             server.threads["thread-main"] = {
@@ -474,7 +473,8 @@ class NativeRuntimeTests(unittest.TestCase):
 
             self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
             self.assertEqual(len(calls), 1)
-            self.assertEqual(runtime.read(spec["key"])["status"], "completed")
+            self.assertEqual(runtime.read(spec["key"])["status"], "running")
+            self.assertEqual(server.calls.count("turn/start"), 1)
             self.assertTrue(runtime.start_owner_turn(notification, spec, "thread-main"))
             self.assertEqual(len(calls), 1)
 
