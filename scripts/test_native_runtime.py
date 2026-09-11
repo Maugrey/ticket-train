@@ -551,7 +551,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 if pid and verification_runner.process_alive(pid):
                     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
 
-    def test_preflight_pins_profile_and_rejects_changed_host_or_source(self):
+    def test_preflight_pins_profile_and_renews_updated_desktop_host(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); repo = root / "repo"; repository(repo)
             host = root / "codex.exe"; host.write_bytes(b"fixture executable")
@@ -561,14 +561,32 @@ class NativeRuntimeTests(unittest.TestCase):
                 "first": {"thread": {"id": "one"}}, "second": {"thread": {"id": "two"}}})
             profile = {"revision": "one", "repository": str(repo), "tickets": {"T-1": {"source_reference": "source", "source_revision": "one"}},
                 "host_executable": str(host), "native_visibility_evidence": str(proof_path)}
-            state = {"execution_mode": "dry-run", "procedure": {"tickets": {"T-1": {}}}}
-            runner.preflight(state, profile, root / "driver")
+            state = {"execution_mode": "dry-run", "orchestrator_lease": {"owner_thread_id": "thread-main"},
+                     "procedure": {"tickets": {"T-1": {}}}}
+            self.assertEqual(runner.preflight(state, profile, root / "driver"), str(host.resolve()))
             changed = copy.deepcopy(profile); changed["revision"] = "two"
             with self.assertRaisesRegex(ValueError, "profile changed"):
                 runner.preflight(state, changed, root / "driver")
+
+            def desktop_read(_owner, name, arguments, _call_id):
+                self.assertEqual(name, "read_thread")
+                return {"content": [{"type": "text", "text": json.dumps({
+                    "schemaVersion": 1, "thread": {"id": arguments["threadId"]},
+                })}], "isError": False}
+
             host.write_bytes(b"another version")
-            with self.assertRaisesRegex(ValueError, "executable changed"):
-                runner.preflight(state, profile, root / "driver")
+            with patch.object(thread_runtime, "call_app_tool", side_effect=desktop_read) as read:
+                self.assertEqual(runner.preflight(state, profile, root / "driver"), str(host.resolve()))
+            self.assertEqual(read.call_count, 2)
+            renewed = run_registry.load_json(root / "driver" / "native-capability.json")
+            self.assertEqual(renewed["host_sha256"], hashlib.sha256(host.read_bytes()).hexdigest())
+
+            replacement = root / "codex-new.exe"; replacement.write_bytes(b"replacement")
+            host.unlink()
+            with patch.object(thread_runtime, "app_server_executable", return_value=str(replacement)), \
+                    patch.object(thread_runtime, "call_app_tool", side_effect=desktop_read) as read:
+                self.assertEqual(runner.preflight(state, profile, root / "driver"), str(replacement.resolve()))
+            self.assertEqual(read.call_count, 2)
 
     def test_pinned_release_rejects_tampering_and_migration_requires_idle_owner(self):
         with tempfile.TemporaryDirectory() as tmp:

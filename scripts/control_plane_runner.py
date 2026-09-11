@@ -506,6 +506,15 @@ class Driver:
             self.host = None
 
 
+def app_tool_json(result):
+    blocks = [item for item in result.get("content", []) if item.get("type") == "text"]
+    require(len(blocks) == 1, "Codex app capability read returned no unique JSON result")
+    try:
+        return json.loads(blocks[0]["text"])
+    except (TypeError, ValueError) as error:
+        raise RunnerError("Codex app capability read returned invalid JSON") from error
+
+
 def preflight(state, profile, directory):
     """Check concrete host capability and freeze the actual project inputs."""
     import thread_runtime
@@ -518,14 +527,48 @@ def preflight(state, profile, directory):
     for key in state["procedure"]["tickets"]:
         source = profile["tickets"][key]
         require(source.get("source_reference") and source.get("source_revision"), "Ticket source/reference revision is missing: " + key)
-    executable = Path(thread_runtime.app_server_executable(profile.get("host_executable"))).resolve()
-    proof = run_registry.load_json(Path(profile.get("native_visibility_evidence", "")))
+    configured = Path(profile.get("host_executable", "")).expanduser()
+    executable = (
+        configured.resolve() if configured.is_file()
+        else Path(thread_runtime.app_server_executable()).resolve()
+    )
+    proof_path = directory / "native-capability.json"
+    proof = run_registry.load_json(
+        proof_path if proof_path.exists()
+        else Path(profile.get("native_visibility_evidence", ""))
+    )
     require(proof.get("format") == "ticket-train-native-capability-v1" and proof.get("desktop_read_verified") is True,
             "Native visibility needs an actual desktop read receipt")
-    require(Path(proof.get("host_executable", "")).resolve() == executable, "Visibility proof targets another executable")
-    require(proof.get("host_sha256") == hashlib.sha256(executable.read_bytes()).hexdigest(), "Native executable changed; verify its capability before dispatch")
     ids = {(proof.get(k, {}).get("thread") or {}).get("id") for k in ("first", "second")}
     require(None not in ids and len(ids) == 2, "Capability proof omits the two observed native test tasks")
+    host_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+    if (
+        Path(proof.get("host_executable", "")).resolve() != executable
+        or proof.get("host_sha256") != host_sha256
+    ):
+        owner = (state.get("orchestrator_lease") or {}).get("owner_thread_id")
+        require(owner, "Native capability renewal needs the visible owner task")
+        reads = []
+        for task_id in sorted(ids):
+            result = thread_runtime.call_app_tool(
+                owner, "read_thread",
+                {"threadId": task_id, "turnLimit": 1, "includeOutputs": False},
+                "ticket-train-capability:" + hashlib.sha256((host_sha256 + task_id).encode()).hexdigest(),
+            )
+            observed = app_tool_json(result)
+            require((observed.get("thread") or {}).get("id") == task_id,
+                    "Updated native host is not visible through the desktop")
+            reads.append(observed)
+        proof = {
+            "format": "ticket-train-native-capability-v1",
+            "desktop_read_verified": True,
+            "verified_at": now_iso(),
+            "host_executable": str(executable),
+            "host_sha256": host_sha256,
+            "first": reads[0],
+            "second": reads[1],
+            "renewed_from_host_sha256": proof.get("host_sha256"),
+        }
     if state.get("execution_mode") != "dry-run" and not all(profile["tickets"][key].get("mode") == "validation-only" for key in state["procedure"]["tickets"]):
         require(profile.get("github_repository"), "Delivery requires a GitHub repository")
         require(all(profile.get("final_verification", {}).get(k) for k in ("verification_plan_reference", "verification_evidence_reference")),
@@ -536,7 +579,8 @@ def preflight(state, profile, directory):
         require(saved["sha256"] == sha256_json(profile), "Pinned project profile changed; restore the recorded profile for this run")
     else:
         run_registry.save_json(target, {"profile": profile, "sha256": sha256_json(profile), "verified_at": now_iso()})
-        run_registry.save_json(directory / "native-capability.json", proof)
+    run_registry.save_json(proof_path, proof)
+    return str(executable)
 
 
 def supervise_worker(argv, directory, attempts=3):
@@ -565,13 +609,15 @@ def drive(args):
     if Path(__file__).resolve().parent.parent != release:
         return subprocess.call([sys.executable, str(release / "scripts" / "control_plane_runner.py"), *sys.argv[1:]])
     directory = Path(args.state).resolve().parent / "driver"
-    preflight(state, profile, directory)
+    resolved_executable = preflight(state, profile, directory)
     if args.preflight_only:
         print(json.dumps({"status": "ready", "release": str(release), "profile": str(directory / "profile.json")}))
         return 0
     if not args.worker:
         return supervise_worker([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--worker"], directory)
-    driver = Driver(args.state, args.owner_thread_id, args.owner_epoch, profile)
+    runtime_profile = copy.deepcopy(profile)
+    runtime_profile["host_executable"] = resolved_executable
+    driver = Driver(args.state, args.owner_thread_id, args.owner_epoch, runtime_profile)
     try:
         result = driver.run(args.max_seconds)
     finally:

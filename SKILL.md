@@ -108,6 +108,9 @@ leases while commands run; recover dead owners with OS locks. Bound service
 retries and report repeated failures with their evidence.
 Pin scripts and role instructions per run. Installed updates do not change an
 active run. Migrate explicitly at an idle boundary and retain the old release.
+Treat the desktop executable path as volatile: after an application update, the
+runner resolves the current binary and renews visibility evidence by reading the
+two existing capability tasks through the desktop bridge. It creates no probe task.
 
 ## Cost and delivery
 

@@ -176,13 +176,9 @@ def app_server_executable(explicit: str | None = None) -> str:
     raise ValueError("Provide the native Codex executable with --host-executable")
 
 
-def send_message_to_thread(source_thread_id: str, target_thread_id: str, prompt: str,
-                           call_id: str, timeout: float = 90) -> dict:
-    """Use the desktop's own task relay instead of taking its writer lease.
-
-    The app tool starts the target turn inside the already-running desktop host.
-    A stable call ID lets a restarted runner replay an uncertain RPC safely.
-    """
+def call_app_tool(source_thread_id: str, name: str, arguments: dict,
+                  call_id: str, timeout: float = 90) -> dict:
+    """Call a bundled desktop tool with a stable identity and no model turn."""
     pipe = os.environ.get("CODEX_APP_TOOLS_PIPE_PATH")
     node = os.environ.get("CODEX_MCP_NODE_PATH") or shutil.which("node")
     codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
@@ -201,8 +197,8 @@ def send_message_to_thread(source_thread_id: str, target_thread_id: str, prompt:
             "jsonrpc": "2.0", "method": "notifications/initialized", "params": {},
         })
         result = host.request({"jsonrpc": "2.0", "method": "tools/call", "params": {
-            "name": "send_message_to_thread",
-            "arguments": {"threadId": target_thread_id, "prompt": prompt},
+            "name": name,
+            "arguments": arguments,
             "_meta": {
                 "openai/threadId": source_thread_id,
                 "openai/toolCallId": call_id,
@@ -211,6 +207,15 @@ def send_message_to_thread(source_thread_id: str, target_thread_id: str, prompt:
         if result.get("isError"):
             raise HostError(json.dumps(result, ensure_ascii=False))
         return result
+
+
+def send_message_to_thread(source_thread_id: str, target_thread_id: str, prompt: str,
+                           call_id: str, timeout: float = 90) -> dict:
+    """Relay a turn through the desktop without taking its writer lease."""
+    return call_app_tool(
+        source_thread_id, "send_message_to_thread",
+        {"threadId": target_thread_id, "prompt": prompt}, call_id, timeout,
+    )
 
 
 def timestamp(value: str) -> datetime:

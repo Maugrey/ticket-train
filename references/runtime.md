@@ -48,6 +48,13 @@ Use `ticket-train-native-capability-v1`, `desktop_read_verified: true`, the
 tasks during an ordinary train. An executable change requires renewed evidence.
 Local metadata alone cannot prove user visibility.
 
+Codex Desktop updates may replace the versioned executable path while a train is
+waiting. On restart, the runner resolves the current native binary and renews the
+capability receipt by reading the same two existing capability tasks through the
+bundled desktop tool. This is a read-only, script-only check: it creates no task
+and wakes no model. The project profile remains pinned; only the effective host
+path and its capability receipt are refreshed.
+
 ## Execute and answer
 
 ```text
