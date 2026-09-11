@@ -212,16 +212,16 @@ class NativeEffects:
         return True
 
     @staticmethod
-    def owner_relay_turn(task, prompt):
-        """Find the exact app-tool relay in an owner task snapshot."""
+    def relayed_turn(task, prompt):
+        """Find the exact desktop-relayed turn in a task snapshot."""
         for turn in reversed(task.get("turns", [])):
             for item in turn.get("items", []):
-                if (
-                    item.get("type") == "functionCallOutput"
-                    and item.get("name") == "send_message_to_thread"
-                    and item.get("namespace") == "codex_app"
-                    and prompt in item.get("output", "")
-                ):
+                texts = [item.get("text", ""), item.get("output", "")]
+                texts.extend(
+                    content.get("text", "") for content in item.get("content", [])
+                    if isinstance(content, dict)
+                )
+                if any(prompt in text for text in texts if isinstance(text, str)):
                     return turn
         return None
 
@@ -235,7 +235,7 @@ class NativeEffects:
         response_path = directory / (name + "-response.json")
 
         observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
-        turn = self.owner_relay_turn(observed["thread"], prompt)
+        turn = self.relayed_turn(observed["thread"], prompt)
         if not turn and not response_path.exists():
             request = {
                 "source_thread_id": self.source_thread_id or job["thread_id"],
@@ -253,7 +253,7 @@ class NativeEffects:
             )
             save_json(response_path, {"result": result})
             observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
-            turn = self.owner_relay_turn(observed["thread"], prompt)
+            turn = self.relayed_turn(observed["thread"], prompt)
         if not turn and response_path.exists():
             job.update(
                 turn_id="app-relay:" + job["client_message_id"],
@@ -265,6 +265,45 @@ class NativeEffects:
             job.pop("retry_at", None)
             self.save(job)
             return True
+        if not turn:
+            job["retry_at"] = time.time() + 2
+            self.save(job)
+            return False
+        job.update(turn_id=turn["id"], status="running", started_at=utcnow())
+        job.pop("pending_prompt", None)
+        job.pop("retry_at", None)
+        self.save(job)
+        return True
+
+    def relay_worker_turn(self, job, prompt):
+        """Start a worker turn through Codex Desktop so its activity is live."""
+        job.update(status="starting_turn", pending_prompt=prompt, transport="codex-app-tools")
+        self.save(job)
+        directory = self.directory(job["key"])
+        name = "worker-relay-" + str(job["attempt"])
+        request_path = directory / (name + "-request.json")
+        response_path = directory / (name + "-response.json")
+
+        observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
+        turn = self.relayed_turn(observed["thread"], prompt)
+        if not turn and not response_path.exists():
+            request = {
+                "source_thread_id": self.source_thread_id,
+                "target_thread_id": job["thread_id"],
+                "prompt": prompt,
+                "call_id": job["client_message_id"],
+            }
+            if not request_path.exists():
+                save_json(request_path, request)
+            elif load_json(request_path) != request:
+                raise ValueError("Worker relay request changed after it was armed")
+            result = self.owner_relay(
+                request["source_thread_id"], request["target_thread_id"],
+                request["prompt"], request["call_id"],
+            )
+            save_json(response_path, {"result": result})
+            observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
+            turn = self.relayed_turn(observed["thread"], prompt)
         if not turn:
             job["retry_at"] = time.time() + 2
             self.save(job)
@@ -339,6 +378,8 @@ class NativeEffects:
         return self.read(spec["key"])
 
     def start_turn(self, job, prompt):
+        if self.source_thread_id:
+            return self.relay_worker_turn(job, prompt)
         job.update(status="starting_turn", pending_prompt=prompt)
         self.save(job)
         directory = self.directory(job["key"])

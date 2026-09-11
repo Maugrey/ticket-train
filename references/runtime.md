@@ -36,10 +36,11 @@ project inputs, not another workflow state. Prepare real verification coverage;
 do not invent passing assertions in an evidence template.
 
 On Windows, the desktop native `codex.exe app-server --stdio` is the host
-transport for train-owned workers. Owner notifications use the bundled Codex app
-tool `send_message_to_thread`, which reaches the conversation already owned by the
-desktop without acquiring another writer. The runner uses the app's supplied MCP
-bridge and stable tool-call IDs; it does not implement the private pipe protocol.
+transport for creating train-owned workers in their exact isolated worktrees and
+reading durable receipts. Their turns and owner notifications use the bundled
+Codex app tool `send_message_to_thread`, so commands and messages stream through
+the desktop-visible task. The runner uses the app's supplied MCP bridge and stable
+tool-call IDs; it does not implement the private pipe protocol.
 The npm CLI's Unix-only daemon is not required. A capability file
 must record an actual desktop read of native-created tasks on this executable.
 Use `ticket-train-native-capability-v1`, `desktop_read_verified: true`, the

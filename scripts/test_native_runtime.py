@@ -501,6 +501,7 @@ class NativeRuntimeTests(unittest.TestCase):
             runtime = train_supervisor.NativeEffects(
                 Path(tmp), __file__, host_factory=lambda *a, **kw: server,
                 source_thread_id="parent",
+                owner_relay=server.send_message_to_thread,
                 sidebar_section_name="Project · Train #1 · abc12345", sidebar_relay=sidebar,
             )
             spec = {"key": "T-1:analysis:1", "cwd": str(Path(tmp) / "worktree"), "model": "test-model",
@@ -518,8 +519,9 @@ class NativeRuntimeTests(unittest.TestCase):
             ])
             self.assertLess(
                 server.calls.index("sidebar:move_thread_to_sidebar_section"),
-                server.calls.index("turn/start"),
+                server.calls.index("send_message_to_thread"),
             )
+            self.assertEqual(server.calls.count("turn/start"), 0)
 
     def test_lost_sidebar_creation_is_reconciled_without_blocking_or_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,6 +532,7 @@ class NativeRuntimeTests(unittest.TestCase):
             runtime = train_supervisor.NativeEffects(
                 Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server,
                 source_thread_id="parent",
+                owner_relay=server.send_message_to_thread,
                 sidebar_section_name="Project · Train #1 · abc12345", sidebar_relay=sidebar,
             )
             spec = {"key": "T-1:analysis:1", "cwd": str(Path(tmp) / "worktree"), "model": "test-model",
@@ -537,7 +540,7 @@ class NativeRuntimeTests(unittest.TestCase):
 
             job = runtime.submit(spec)
             self.assertEqual(job["sidebar_status"], "deferred")
-            self.assertEqual(server.calls.count("turn/start"), 1)
+            self.assertEqual(server.calls.count("send_message_to_thread"), 1)
             self.assertEqual(len(sidebar.sections), 1)
 
             job["sidebar_retry_at"] = time.time() - 1
@@ -549,6 +552,39 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(job["sidebar_section_id"], "section-1")
             self.assertEqual(len(sidebar.sections), 1)
             self.assertEqual([call[0] for call in sidebar.calls].count("create_sidebar_section"), 1)
+
+    def test_queued_worker_relay_waits_for_its_visible_turn_without_duplicate_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+            calls = []
+
+            def queued(*args):
+                calls.append(args)
+                return {"content": [{"type": "text", "text": '{"threadId":"task-1"}'}]}
+
+            runtime = train_supervisor.NativeEffects(
+                Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="parent", owner_relay=queued,
+            )
+            spec = {"key": "T-1:analysis:1", "cwd": tmp, "prompt": "Analyze visibly"}
+
+            job = runtime.submit(spec)
+            self.assertEqual(job["status"], "starting_turn")
+            self.assertEqual(len(calls), 1)
+            server.threads[job["thread_id"]]["turns"].append({
+                "id": "visible-turn", "status": "inProgress",
+                "items": [{"type": "userMessage", "content": [
+                    {"type": "text", "text": spec["prompt"]},
+                ]}],
+            })
+            job["retry_at"] = time.time() - 1
+            runtime.save(job)
+
+            observed = runtime.observe(job)
+
+            self.assertEqual(observed["status"], "running")
+            self.assertEqual(observed["turn_id"], "visible-turn")
+            self.assertEqual(len(calls), 1)
 
     def test_scope_decision_reuse_preserves_choice_and_risk_but_new_source_reopens_it(self):
         with tempfile.TemporaryDirectory() as tmp:
