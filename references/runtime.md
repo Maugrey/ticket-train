@@ -100,6 +100,13 @@ New actionable conditions are written to `driver/outbox/`. Read the referenced
 item and present its actual question or error. Write the user's exact controller
 event into `driver/inbox/`. Preserve event ID, gate, revision, semantic option and
 decision reference. Technical workers cannot resolve user gates.
+If the same phase needs a corrected value after an earlier answer, it may reopen
+the same gate ID with a new revision. The controller archives the resolved
+revision and relays the new question once; unchanged revisions remain idempotent.
+When the user narrows a live train, submit one `RUN_SCOPE_REDUCED` event listing
+every retained and cancelled ticket plus the user decision reference. It may
+cancel only tickets whose implementation has not started. The scheduler then
+uses the retained execution order and preserves earlier analysis as history.
 Native input answers use `HOST_REQUEST_ANSWER` with `server_instance`,
 `request_id`, the actual host `result`, and `user_decision_reference`. A response
 from another server lifetime is rejected. After fixing an exhausted command's

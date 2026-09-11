@@ -2637,6 +2637,80 @@ class TrainControllerTests(unittest.TestCase):
             )
             self.assertEqual(train_controller.next_actions(run.state())[0]["action"], "ANNOUNCE_HUMAN_GATE")
 
+    def test_same_phase_can_request_a_new_revision_of_provided_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.harness(directory)
+            run.confirm()
+            run.analyze()
+            run.dispatch_pair()
+            run.materialize("run:T-1:implementation:1", "thread-impl")
+            run.materialize("run:T-1:acceptance:1", "thread-tests")
+
+            def terminate(revision: str) -> int:
+                return run.apply(
+                    "PHASE_TERMINATED",
+                    phase_key="run:T-1:implementation:1",
+                    envelope={
+                        "phase_key": "run:T-1:implementation:1",
+                        "phase_status": "needs_input",
+                        "actual_model": "gpt-5.6-terra",
+                        "actual_reasoning_effort": "medium",
+                        "result_summary": "Provider input needs validation.",
+                        "artifacts": {"commit": "checkpoint"},
+                        "tests_and_checks": ["checkpoint verified"],
+                        "residual_risks": ["provider validation pending"],
+                        "requested_or_recommended_next_action": "supply corrected input",
+                        "files_modified": [],
+                        "usage": {"measurement": "complete", "total_tokens": 50},
+                        "input_request": {
+                            "gate_id": "T-1:provider-input",
+                            "revision": revision,
+                            "question": "Supply provider input.",
+                            "reason": "Only the user has it.",
+                            "blocked_scope": ["provider verification"],
+                            "continuing_scope": ["preserve checkpoint"],
+                            "accepted_replies": [{"id": "SUPPLY", "meaning": "Supply input."}],
+                        },
+                    },
+                )
+
+            self.assertEqual(terminate("provider-r1"), 0)
+            self.assertEqual(run.apply(
+                "GATE_ANNOUNCED", gate_id="T-1:provider-input", revision="provider-r1",
+                decision_summary="Supply provider input.", evidence_summary="External input required.",
+                blocked_scope=["provider verification"], continuing_scope=["preserve checkpoint"],
+                accepted_replies=[{"id": "SUPPLY", "meaning": "Supply input."}],
+            ), 0)
+            self.assertEqual(run.apply(
+                "INPUT_PROVIDED", gate_id="T-1:provider-input", revision="provider-r1",
+                response_summary="Use local input.", response_artifact="thread:user-input-1",
+            ), 0)
+            self.assertEqual(run.apply(
+                "PHASE_RESUMED", phase_key="run:T-1:implementation:1",
+                thread_id="thread-impl", visibility_verified=True,
+            ), 0)
+            self.assertEqual(terminate("provider-r2"), 0)
+            gate = run.state()["procedure"]["human_gates"]["T-1:provider-input"]
+            self.assertEqual(gate["revision"], "provider-r2")
+            self.assertEqual(gate["status"], "PENDING_UNANNOUNCED")
+            self.assertEqual(gate["revision_history"][0]["revision"], "provider-r1")
+
+    def test_scope_reduction_cancels_only_tickets_without_started_implementation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Harness(Path(directory), tickets="T-1,T-2,T-3")
+            self.assertEqual(run.apply(
+                "RUN_SCOPE_REDUCED",
+                retained_ticket_ids=["T-1"],
+                cancelled_ticket_ids=["T-2", "T-3"],
+                reason="Finish only the ticket already started.",
+                user_decision_reference="thread-main:user-scope-reduction",
+            ), 0)
+            procedure = run.state()["procedure"]
+            self.assertEqual(procedure["active_ticket_ids"], ["T-1"])
+            self.assertEqual(procedure["execution_order"], ["T-1"])
+            self.assertEqual(procedure["tickets"]["T-2"]["status"], "CANCELLED")
+            self.assertEqual(procedure["tickets"]["T-3"]["status"], "CANCELLED")
+
     def test_finalization_is_automatic_and_cannot_be_skipped_on_yield(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = self.harness(directory)

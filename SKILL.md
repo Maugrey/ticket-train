@@ -59,6 +59,9 @@ Reuse decisions for the same source and options across analysis retries.
 A requested split must produce separate canonical batches, branches and final
 deliveries. Record the exact ticket assignment before implementation. Reject
 incomplete or dependency-breaking splits; a free-text promise is insufficient.
+When the user narrows a running train, record `RUN_SCOPE_REDUCED` with every
+retained and cancelled ticket. Cancel only tickets without started implementation;
+completed read-only analysis may remain as historical evidence.
 
 ## Progressive role context
 

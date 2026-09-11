@@ -985,7 +985,25 @@ def create_gate(
     require(isinstance(gates, dict), "procedure.human_gates must be an object")
     if gate_id in gates:
         prior = gates[gate_id]
-        require((prior["kind"], prior["ticket_id"], prior["revision"]) == (kind, ticket_id, revision), "gate identity collision")
+        require(
+            (prior["kind"], prior["ticket_id"], prior.get("phase_key"))
+            == (kind, ticket_id, phase_key),
+            "gate identity collision",
+        )
+        if prior["revision"] != revision:
+            require(
+                reopen_provided and prior.get("status") == "PROVIDED",
+                "gate identity collision",
+            )
+            prior.setdefault("revision_history", []).append({
+                key: copy.deepcopy(prior[key])
+                for key in (
+                    "revision", "question", "reason", "blocked_scope", "continuing_scope",
+                    "accepted_replies", "response_summary", "response_artifact", "resolved_at",
+                )
+                if key in prior
+            })
+            prior["revision"] = revision
         if reopen_provided and prior.get("status") == "PROVIDED":
             prior.setdefault("response_history", []).append({
                 key: prior[key]
@@ -1410,6 +1428,60 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     event_type = str(event.get("type") or "")
     if unresolved_cost_anomalies(proc) and event_type not in {"COST_ANOMALY_RESOLVED", "RUNTIME_OBSERVED"}:
         raise ControllerError("resolve the open cost anomaly checkpoint before another transition")
+
+    if event_type == "RUN_SCOPE_REDUCED":
+        require_fields(
+            event,
+            ("retained_ticket_ids", "cancelled_ticket_ids", "reason", "user_decision_reference"),
+            "run scope reduction",
+        )
+        retained = event["retained_ticket_ids"]
+        cancelled = event["cancelled_ticket_ids"]
+        require(
+            isinstance(retained, list) and retained
+            and isinstance(cancelled, list) and cancelled
+            and all(isinstance(value, str) for value in retained + cancelled),
+            "run scope reduction needs explicit ticket ID lists",
+        )
+        require(
+            len(set(retained)) == len(retained) and len(set(cancelled)) == len(cancelled),
+            "run scope reduction ticket IDs must be unique",
+        )
+        require(
+            all(isinstance(event[key], str) and event[key].strip()
+                for key in ("reason", "user_decision_reference")),
+            "run scope reduction needs a reason and user decision reference",
+        )
+        require(not set(retained) & set(cancelled), "retained and cancelled tickets overlap")
+        require(set(retained) | set(cancelled) == set(proc["tickets"]), "scope reduction must classify every ticket")
+        for ticket_id in cancelled:
+            item = ticket(proc, ticket_id)
+            require(not item.get("execution") and not item.get("pull_request"),
+                    "cannot cancel a ticket after implementation has started")
+            require(not any(
+                phase_item.get("ticket_id") == ticket_id
+                and phase_item.get("launch_state") in ACTIVE_PHASE_STATES
+                for phase_item in proc["phases"].values()
+            ), "cannot cancel a ticket with an active phase")
+            item.update(
+                status="CANCELLED",
+                cancellation_reason=event["reason"],
+                cancellation_reference=event["user_decision_reference"],
+                cancelled_at=now_iso(),
+            )
+        proc["active_ticket_ids"] = list(retained)
+        proc["execution_order"] = [
+            value for value in proc.get("execution_order", list(proc["tickets"]))
+            if value in retained
+        ]
+        proc.setdefault("scope_reductions", []).append({
+            "retained_ticket_ids": list(retained),
+            "cancelled_ticket_ids": list(cancelled),
+            "reason": event["reason"],
+            "user_decision_reference": event["user_decision_reference"],
+            "recorded_at": now_iso(),
+        })
+        return
 
     if event_type == "VALIDATION_ONLY_DISPATCHED":
         item = ticket(proc, event.get("ticket_id", ""))
