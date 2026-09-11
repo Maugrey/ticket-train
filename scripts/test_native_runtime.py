@@ -110,10 +110,11 @@ class FakeServer:
 
 
 class FakeSidebar:
-    def __init__(self, event_log=None):
+    def __init__(self, event_log=None, runtime_server=None):
         self.sections = []
         self.calls = []
         self.event_log = event_log
+        self.runtime_server = runtime_server
         self.lose_create_response = False
 
     @staticmethod
@@ -138,6 +139,20 @@ class FakeSidebar:
                 "hostId": arguments["hostId"], "sectionId": arguments["sectionId"],
                 "threadId": arguments["threadId"],
             })
+        if name == "wait_threads":
+            target = arguments["targets"][0]
+            task = self.runtime_server.threads[target["threadId"]]
+            turn = task["turns"][-1]
+            active = turn["status"] == "inProgress"
+            messages = [item for item in turn.get("items", []) if item.get("type") == "agentMessage"]
+            markers = [item for item in turn.get("items", []) if item.get("type") in {"commandExecution", "fileChange"}]
+            return self.result({"timedOut": False, "polls": [{
+                "cursor": "cursor-1",
+                "thread": {"id": task["id"], "hostId": "local", "status": {"type": "active" if active else "idle"}},
+                "latestTurn": {"id": turn["id"], "status": turn["status"], "error": turn.get("error")},
+                "latestAssistantMessage": messages[-1] if messages else None,
+                "latestToolMarker": markers[-1] if markers else None,
+            }]})
         raise AssertionError(name)
 
 
@@ -496,7 +511,7 @@ class NativeRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()
             repository = str(Path(tmp) / "project")
-            sidebar = FakeSidebar(server.calls)
+            sidebar = FakeSidebar(server.calls, server)
             server.threads["parent"] = {"id": "parent", "cwd": repository, "createdAt": time.time(),
                                         "turns": [], "status": {"type": "idle"}, "projectId": None}
             runtime = train_supervisor.NativeEffects(
@@ -543,12 +558,21 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(retried["relay_kind"], "worker")
             self.assertEqual(len(relayed_prompts), 2)
             self.assertNotEqual(first_prompt.splitlines()[0], relayed_prompts[1].splitlines()[0])
+            final_text = '{"envelope":{"phase_status":"completed"},"events":[]}'
+            visible_turn = server.threads[job["thread_id"]]["turns"][-1]
+            visible_turn.update(status="completed", items=[
+                *visible_turn["items"],
+                {"id": "final-1", "type": "agentMessage", "text": final_text},
+            ])
+            completed = runtime.observe(retried)
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(run_registry.load_json(completed["result_reference"])["text"], final_text)
 
     def test_lost_sidebar_creation_is_reconciled_without_blocking_or_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()
             repository = str(Path(tmp) / "project")
-            sidebar = FakeSidebar()
+            sidebar = FakeSidebar(runtime_server=server)
             sidebar.lose_create_response = True
             runtime = train_supervisor.NativeEffects(
                 Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server,

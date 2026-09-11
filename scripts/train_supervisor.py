@@ -433,6 +433,79 @@ class NativeEffects:
         self.save(job)
         return True
 
+    def retry_terminal_turn(self, job, turn_status, error, made_progress=False):
+        """Apply one bounded retry policy to native and desktop-observed turns."""
+        job["terminal_turn_status"] = turn_status
+        job["error"] = error or {"message": turn_status}
+        retry_count = int(job.get("service_retry_count", 0))
+        if turn_status == "interrupted" and made_progress:
+            retry_count = 0
+            job["service_progress_turn_id"] = job["turn_id"]
+        if retry_count >= 2:
+            job["status"] = "blocked"
+        elif job.get("retry_at"):
+            job["service_retry_count"] = retry_count + 1
+            job["attempt"] += 1
+            job.pop("retry_at", None)
+            job["client_message_id"] = str(uuid.uuid4())
+            self.save(job)
+            prompt = (
+                "Resume this same authorized phase after the host interruption. "
+                "Reconcile existing files and results before repeating any work.\n"
+                + job["spec"]["prompt"]
+            )
+            if job.get("relay_kind") == "owner" or str(job.get("key", "")).startswith("owner-attention:"):
+                self.relay_owner_turn(job, prompt)
+            else:
+                self.start_turn(job, prompt)
+            return self.read(job["key"])
+        else:
+            job["retry_at"] = time.time() + (15, 60)[retry_count]
+        self.save(job)
+        return job
+
+    def observe_relayed_worker(self, job):
+        """Observe a desktop-owned worker turn through the same visible host."""
+        sequence = int(job.get("desktop_observation_sequence", 0)) + 1
+        job["desktop_observation_sequence"] = sequence
+        self.save(job)
+        payload = self.app_tool_payload(self.sidebar_relay(
+            self.source_thread_id, "wait_threads",
+            {"targets": [{"threadId": job["thread_id"], "hostId": "local"}], "timeoutMs": 0},
+            "ticket-train-worker-observe:" + digest([job["thread_id"], job.get("turn_id"), sequence]),
+            30,
+        ))
+        directory = self.directory(job["key"])
+        save_json(directory / "observation.json", payload)
+        observation = thread_runtime.parse_wait_result(payload)[0]
+        if observation.get("turn_id") != job.get("turn_id"):
+            raise thread_runtime.HostError("Desktop observation returned another worker turn")
+        status = observation["runtime_status"]
+        poll = payload["polls"][0]
+        if status == "running":
+            job["status"] = "running"
+            job.pop("retry_at", None)
+        elif status == "needs_input":
+            job["status"] = "needs_input"
+        elif status == "completed":
+            message = poll.get("latestAssistantMessage") or {}
+            save_json(directory / "result.json", {
+                "thread_id": job["thread_id"], "turn_id": job["turn_id"],
+                "text": message.get("text", ""), "completed_at": utcnow(),
+            })
+            job.update(
+                status="completed", result_reference=str(directory / "result.json"),
+                completed_at=utcnow(),
+            )
+        elif status in {"failed", "interrupted"}:
+            marker = poll.get("latestToolMarker") or {}
+            made_progress = marker.get("status") == "completed" or bool(poll.get("latestAssistantMessage"))
+            return self.retry_terminal_turn(
+                job, status, (poll.get("latestTurn") or {}).get("error"), made_progress,
+            )
+        self.save(job)
+        return job
+
     def observe(self, job):
         self.organize_worker(job)
         job = self.read(job["key"])
@@ -455,6 +528,8 @@ class NativeEffects:
             return self.submit(job["spec"])
         if job.get("retry_at", 0) > time.time():
             return job
+        if job.get("relay_kind") == "worker":
+            return self.observe_relayed_worker(job)
         task_id = job["thread_id"]
         if job.get("transport") != "codex-app-tools" and task_id not in self.loaded:
             self.host.call("thread/resume", {"threadId": task_id, "excludeTurns": True})
@@ -476,33 +551,12 @@ class NativeEffects:
                                                    "text": text, "completed_at": utcnow()})
             job.update(status="completed", result_reference=str(directory / "result.json"), completed_at=utcnow())
         elif turn["status"] in {"failed", "interrupted"}:
-            job["terminal_turn_status"] = turn["status"]
-            job["error"] = turn.get("error") or {"message": turn["status"]}
-            retry_count = int(job.get("service_retry_count", 0))
             made_progress = turn["status"] == "interrupted" and any(
                 item.get("type") == "fileChange"
                 or (item.get("type") == "commandExecution" and item.get("status") == "completed")
                 for item in turn.get("items", [])
             )
-            if made_progress:
-                retry_count = 0
-                job["service_progress_turn_id"] = turn["id"]
-            if retry_count >= 2:
-                job["status"] = "blocked"
-            elif job.get("retry_at"):
-                job["service_retry_count"] = retry_count + 1
-                job["attempt"] += 1
-                job.pop("retry_at", None)
-                job["client_message_id"] = str(uuid.uuid4())
-                self.save(job)
-                retry_prompt = "Resume this same authorized phase after the host interruption. Reconcile existing files and results before repeating any work.\n" + job["spec"]["prompt"]
-                if job.get("relay_kind") == "owner" or str(job.get("key", "")).startswith("owner-attention:"):
-                    self.relay_owner_turn(job, retry_prompt)
-                else:
-                    self.start_turn(job, retry_prompt)
-                return self.read(job["key"])
-            else:
-                job["retry_at"] = time.time() + (15, 60)[retry_count]
+            return self.retry_terminal_turn(job, turn["status"], turn.get("error"), made_progress)
         self.save(job)
         return job
 
