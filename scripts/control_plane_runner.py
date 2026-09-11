@@ -367,7 +367,7 @@ class Driver:
             request = envelope.get("input_request") or {}
             if request.get("gate_id") != gate_id:
                 continue
-            reference = (envelope.get("artifacts") or {}).get("complete_result_reference")
+            reference = train_controller.completion_artifact(envelope, "complete_result_reference")
             if not reference:
                 break
             candidate = Path(reference).resolve()

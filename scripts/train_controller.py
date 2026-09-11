@@ -898,6 +898,18 @@ def strongest_unity_requirement(values: list[str]) -> str:
     return max(normalized or ["none"], key=lambda value: UNITY_REQUIREMENT_ORDER[value])
 
 
+def completion_artifact(envelope: Any, name: str) -> Any:
+    """Read a named completion value without depending on artifact presentation shape."""
+    if not isinstance(envelope, dict):
+        return None
+    artifacts = envelope.get("artifacts")
+    if isinstance(artifacts, dict):
+        nested = artifacts.get(name)
+        if nested is not None and nested != "":
+            return nested
+    return envelope.get(name)
+
+
 def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str, str | None, str]:
     if owner_key.startswith("ticket:") and owner_key.endswith(":verification"):
         ticket_id = owner_key[len("ticket:") : -len(":verification")]
@@ -921,14 +933,14 @@ def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str,
         ]
         if remediations:
             latest = remediations[-1]
-            head = ((latest.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
+            head = completion_artifact(latest.get("completion_envelope"), "commit")
             branch = latest.get("branch")
         if not head and item.get("status") == "AWAITING_VERIFICATION":
             head = execution.get("integrated_head")
         if not head:
             implementation = phase(proc, execution["implementation_phase_key"])
             envelope = implementation.get("completion_envelope") or {}
-            head = (envelope.get("artifacts") or {}).get("commit")
+            head = completion_artifact(envelope, "commit")
         require(bool(head), "ticket verification Unity slot requires an exact expected head")
         return requirement, branch, str(head)
     if owner_key == "run:final-verification":
@@ -1291,8 +1303,7 @@ def complete_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, Any
     item["completion_envelope"] = envelope
     item["usage_captured"] = True
     item["completed_at"] = now_iso()
-    artifacts = envelope.get("artifacts") if isinstance(envelope.get("artifacts"), dict) else {}
-    item["resume_head"] = artifacts.get("commit") or item.get("base")
+    item["resume_head"] = completion_artifact(envelope, "commit") or item.get("base")
     return item
 
 
@@ -1332,7 +1343,7 @@ def terminate_phase(event: dict[str, Any], proc: dict[str, Any]) -> dict[str, An
     item["usage_captured"] = True
     item["completed_at"] = now_iso()
     artifacts = envelope.get("artifacts") if isinstance(envelope.get("artifacts"), dict) else {}
-    item["resume_head"] = artifacts.get("commit") or item.get("base")
+    item["resume_head"] = completion_artifact(envelope, "commit") or item.get("base")
     ticket_id = item.get("ticket_id")
     if outcome == "needs_input":
         if uses_unity_mcp(proc) and item.get("unity_requirement") != "none" and item.get("branch"):
@@ -2917,8 +2928,8 @@ def handle_event(state: dict[str, Any], event: dict[str, Any]) -> None:
         require(event["implementation_branch"] == execution["implementation_branch"], "combined head must stay on the implementation branch")
         implementation = phase(proc, execution["implementation_phase_key"])
         acceptance = phase(proc, execution["acceptance_phase_key"])
-        implementation_commit = ((implementation.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
-        acceptance_commit = ((acceptance.get("completion_envelope") or {}).get("artifacts") or {}).get("commit")
+        implementation_commit = completion_artifact(implementation.get("completion_envelope"), "commit")
+        acceptance_commit = completion_artifact(acceptance.get("completion_envelope"), "commit")
         require(event["implementation_commit"] == implementation_commit, "implementation integration commit mismatch")
         require(event["acceptance_commit"] == acceptance_commit, "acceptance-test integration commit mismatch")
         execution["implementation_commit"] = event["implementation_commit"]

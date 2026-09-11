@@ -573,6 +573,16 @@ class Harness:
 
 
 class TrainControllerTests(unittest.TestCase):
+    def test_completion_artifact_accepts_structured_artifacts(self):
+        self.assertEqual(
+            train_controller.completion_artifact({"artifacts": {"commit": "nested"}}, "commit"),
+            "nested",
+        )
+
+    def test_completion_artifact_accepts_root_commit_with_artifact_inventory(self):
+        envelope = {"commit": "root", "artifacts": [{"path": "report.json", "sha256": "0" * 64}]}
+        self.assertEqual(train_controller.completion_artifact(envelope, "commit"), "root")
+
     @staticmethod
     def blocked_continuation_run(root: Path) -> Harness:
         """Build a reconciled legacy state without replaying its completed work."""

@@ -463,8 +463,9 @@ def integrate(driver, action):
     execution = proc["tickets"][action["ticket_id"]]["execution"]
     impl = proc["phases"][execution["implementation_phase_key"]]
     tests = proc["phases"][execution["acceptance_phase_key"]]
-    impl_commit = impl["completion_envelope"]["artifacts"]["commit"]
-    test_commit = tests["completion_envelope"]["artifacts"]["commit"]
+    impl_commit = controller.completion_artifact(impl["completion_envelope"], "commit")
+    test_commit = controller.completion_artifact(tests["completion_envelope"], "commit")
+    controller.require(bool(impl_commit and test_commit), "Execution integration requires exact completion commits")
     directory = worktree(driver, impl["phase_key"], impl_commit, execution["implementation_branch"])
     # A completed merge is detected through ancestry even if the controller
     # receipt was lost. A conflict stays in this isolated worktree for judgment.
@@ -523,7 +524,7 @@ def verify(driver, action):
         head = item["execution"].get("integrated_head")
         remediations = [p for p in proc["phases"].values() if p.get("ticket_id") == ticket_id and p["kind"] == "remediation" and p["launch_state"] == "COMPLETED"]
         if remediations:
-            head = remediations[-1]["completion_envelope"]["artifacts"]["commit"]
+            head = controller.completion_artifact(remediations[-1]["completion_envelope"], "commit")
         directory = worktree(driver, item["execution"]["implementation_phase_key"], head, item["execution"]["implementation_branch"])
     else:
         config = driver.profile.get("final_verification", {})
@@ -572,7 +573,8 @@ def pull_request(driver, action):
     base = proc["base_branch"] if final and not remediation else state["run_identity"]["train_branch"]
     if remediation:
         value = proc["phases"][proc["finalization"]["remediation_phase_key"]]
-        branch, head = value["branch"], value["completion_envelope"]["artifacts"]["commit"]
+        branch = value["branch"]
+        head = controller.completion_artifact(value["completion_envelope"], "commit")
     elif final:
         branch, head = state["run_identity"]["train_branch"], proc["train_head"]
     else:
