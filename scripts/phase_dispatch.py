@@ -521,11 +521,8 @@ def verify(driver, action):
         item = proc["tickets"][ticket_id]
         acceptance = proc["phases"][item["execution"]["acceptance_phase_key"]]["completion_envelope"]["artifacts"]
         config = acceptance
-        head = item["execution"].get("integrated_head")
-        remediations = [p for p in proc["phases"].values() if p.get("ticket_id") == ticket_id and p["kind"] == "remediation" and p["launch_state"] == "COMPLETED"]
-        if remediations:
-            head = controller.completion_artifact(remediations[-1]["completion_envelope"], "commit")
-        directory = worktree(driver, item["execution"]["implementation_phase_key"], head, item["execution"]["implementation_branch"])
+        target_key, target_branch, head = controller.ticket_verification_target(proc, ticket_id)
+        directory = worktree(driver, target_key, head, target_branch)
     else:
         config = driver.profile.get("final_verification", {})
         head = proc["finalization"]["pull_request"]["head_commit"]

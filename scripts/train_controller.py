@@ -910,6 +910,31 @@ def completion_artifact(envelope: Any, name: str) -> Any:
     return envelope.get(name)
 
 
+def ticket_verification_target(proc: dict[str, Any], ticket_id: str) -> tuple[str, str | None, str]:
+    """Select the exact completed worktree whose head must be verified."""
+    item = ticket(proc, ticket_id)
+    execution = item.get("execution") or {}
+    phase_key = execution.get("implementation_phase_key")
+    branch = execution.get("implementation_branch")
+    head = execution.get("integrated_head")
+    remediations = [
+        value for value in proc.get("phases", {}).values()
+        if value.get("ticket_id") == ticket_id
+        and value.get("kind") == "remediation"
+        and value.get("launch_state") == "COMPLETED"
+    ]
+    if remediations:
+        latest = remediations[-1]
+        phase_key = latest.get("phase_key")
+        branch = latest.get("branch")
+        head = completion_artifact(latest.get("completion_envelope"), "commit")
+    if not head and phase_key:
+        implementation = phase(proc, phase_key)
+        head = completion_artifact(implementation.get("completion_envelope"), "commit")
+    require(bool(phase_key and head), "ticket verification requires an exact completed target")
+    return str(phase_key), branch, str(head)
+
+
 def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str, str | None, str]:
     if owner_key.startswith("ticket:") and owner_key.endswith(":verification"):
         ticket_id = owner_key[len("ticket:") : -len(":verification")]
@@ -923,25 +948,7 @@ def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str,
             execution.get("verification_unity_requirement", "none"),
             "ticket verification Unity requirement",
         )
-        head = None
-        branch = execution.get("implementation_branch")
-        remediations = [
-            value for value in proc.get("phases", {}).values()
-            if value.get("ticket_id") == ticket_id
-            and value.get("kind") == "remediation"
-            and value.get("launch_state") == "COMPLETED"
-        ]
-        if remediations:
-            latest = remediations[-1]
-            head = completion_artifact(latest.get("completion_envelope"), "commit")
-            branch = latest.get("branch")
-        if not head and item.get("status") == "AWAITING_VERIFICATION":
-            head = execution.get("integrated_head")
-        if not head:
-            implementation = phase(proc, execution["implementation_phase_key"])
-            envelope = implementation.get("completion_envelope") or {}
-            head = completion_artifact(envelope, "commit")
-        require(bool(head), "ticket verification Unity slot requires an exact expected head")
+        _, branch, head = ticket_verification_target(proc, ticket_id)
         return requirement, branch, str(head)
     if owner_key == "run:final-verification":
         final = proc.get("finalization", {})

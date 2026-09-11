@@ -583,6 +583,27 @@ class TrainControllerTests(unittest.TestCase):
         envelope = {"commit": "root", "artifacts": [{"path": "report.json", "sha256": "0" * 64}]}
         self.assertEqual(train_controller.completion_artifact(envelope, "commit"), "root")
 
+    def test_ticket_verification_target_uses_latest_completed_remediation(self):
+        proc = {
+            "tickets": {"T-1": {"execution": {
+                "implementation_phase_key": "T-1:implementation:1",
+                "implementation_branch": "implementation",
+                "integrated_head": "integrated",
+            }}},
+            "phases": {
+                "T-1:implementation:1": {"phase_key": "T-1:implementation:1"},
+                "T-1:remediation:2": {
+                    "phase_key": "T-1:remediation:2", "ticket_id": "T-1",
+                    "kind": "remediation", "launch_state": "COMPLETED", "branch": "remediation",
+                    "completion_envelope": {"commit": "fixed", "artifacts": [{"path": "report.json"}]},
+                },
+            },
+        }
+        self.assertEqual(
+            train_controller.ticket_verification_target(proc, "T-1"),
+            ("T-1:remediation:2", "remediation", "fixed"),
+        )
+
     @staticmethod
     def blocked_continuation_run(root: Path) -> Harness:
         """Build a reconciled legacy state without replaying its completed work."""
