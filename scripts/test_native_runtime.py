@@ -592,6 +592,30 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(rebound["status"], "running")
             self.assertEqual(server.calls.count("send_message_to_thread"), 1)
 
+    def test_unavailable_owner_relay_falls_back_to_native_worker_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+
+            def unavailable(*args):
+                raise thread_runtime.HostError("desktop relay unavailable")
+
+            runtime = train_supervisor.NativeEffects(
+                Path(tmp), __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="parent", owner_relay=unavailable,
+                sidebar_relay=FakeSidebar(runtime_server=server),
+            )
+            spec = {"key": "T-1:analysis:1", "cwd": str(Path(tmp) / "worktree"),
+                    "prompt": "Analyze visibly", "effort": "high"}
+
+            job = runtime.submit(spec)
+
+            self.assertEqual(job["status"], "running")
+            self.assertEqual(server.calls.count("turn/start"), 1)
+            self.assertEqual(len(server.threads[job["thread_id"]]["turns"]), 1)
+            fallback = run_registry.load_json(
+                Path(tmp) / train_supervisor.digest(job["key"])[:24] / "worker-relay-0-response.json")
+            self.assertEqual(fallback["result"]["transport"], "native-fallback")
+
     def test_lost_sidebar_creation_is_reconciled_without_blocking_or_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()
