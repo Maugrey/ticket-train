@@ -45,6 +45,14 @@ VERIFICATION_ACTIONS = {
 }
 
 
+def worker_sidebar_section_name(state, repository):
+    """Return a readable, run-unique home for real Codex worker tasks."""
+    project = Path(repository).name.replace("-", " ").replace("_", " ").title() if repository else "Ticket Train"
+    tickets = ", ".join("#" + str(ticket) for ticket in state["procedure"].get("tickets", {}))
+    run_suffix = str(state.get("run_id") or "run").rsplit("-", 1)[-1]
+    return project + " · Train " + (tickets or run_suffix) + " · " + run_suffix
+
+
 class Driver:
     """One durable collect/apply/schedule loop. No model runs while idle.
 
@@ -74,9 +82,12 @@ class Driver:
 
     def effects(self):
         if self.host is None:
+            state = self.state()
+            repository = self.profile.get("repository")
             self.host = self.host_factory(
                 self.directory / "effects", self.profile.get("host_executable"),
-                source_thread_id=self.owner, repository=self.profile.get("repository")
+                source_thread_id=self.owner,
+                sidebar_section_name=worker_sidebar_section_name(state, repository),
             )
         return self.host
 

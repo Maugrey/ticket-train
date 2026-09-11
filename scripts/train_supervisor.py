@@ -39,7 +39,8 @@ class NativeEffects:
     """
 
     def __init__(self, root, executable=None, host_factory=thread_runtime.AppServer,
-                 source_thread_id=None, repository=None, owner_relay=None):
+                 source_thread_id=None, owner_relay=None,
+                 sidebar_section_name=None, sidebar_relay=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.instance = str(uuid.uuid4())
@@ -47,39 +48,105 @@ class NativeEffects:
         self.host = host_factory(thread_runtime.app_server_executable(executable), event_sink=self.notification)
         self.loaded = set()
         self.source_thread_id = source_thread_id
-        self.repository = repository
         self.owner_relay = owner_relay or thread_runtime.send_message_to_thread
-        self.source_project_id = None
-        self.source_project_resolved = False
+        self.sidebar_section_name = sidebar_section_name
+        self.sidebar_relay = sidebar_relay or thread_runtime.call_app_tool
 
-    def project_id(self):
-        """Resolve the orchestrator's app project once for all worker tasks."""
-        if not self.source_project_resolved:
-            self.source_project_resolved = True
-            if self.source_thread_id:
-                source = self.host.call(
-                    "thread/read", {"threadId": self.source_thread_id, "includeTurns": False}
-                )["thread"]
-                value = source.get("projectId")
-                self.source_project_id = value if isinstance(value, str) and value else None
-            if not self.source_project_id and self.repository:
-                expected = os.path.normcase(os.path.abspath(self.repository))
-                projects = self.host.call("project/list", {}).get("data", [])
-                matches = [
-                    project for project in projects
-                    if any(
-                        os.path.normcase(os.path.abspath(root.get("path", ""))) == expected
-                        for root in project.get("roots", [])
-                    )
-                ]
-                if len(matches) > 1:
-                    raise thread_runtime.HostError(
-                        "Repository belongs to multiple Codex projects: "
-                        + ", ".join(project["id"] for project in matches)
-                    )
-                if matches:
-                    self.source_project_id = matches[0]["id"]
-        return self.source_project_id
+    @staticmethod
+    def app_tool_payload(result):
+        """Extract the JSON object returned by a bundled Codex app tool."""
+        for item in result.get("content", []):
+            if item.get("type") != "text":
+                continue
+            try:
+                value = json.loads(item.get("text", ""))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        raise thread_runtime.HostError("Codex sidebar tool returned no JSON object")
+
+    def ensure_sidebar_section(self):
+        """Create or reconcile this run's user-visible worker section once."""
+        if not self.source_thread_id or not self.sidebar_section_name:
+            return None
+        reference = self.root / "sidebar-section.json"
+        if reference.exists():
+            record = load_json(reference)
+            if record.get("status") == "completed":
+                return record["section_id"]
+        else:
+            record = {
+                "status": "armed", "name": self.sidebar_section_name,
+                "armed_at": utcnow(),
+            }
+            save_json(reference, record)
+
+        call_key = digest([self.source_thread_id, self.sidebar_section_name])
+        listing = self.app_tool_payload(self.sidebar_relay(
+            self.source_thread_id, "list_threads", {"limit": 1},
+            "ticket-train-sidebar-list:" + call_key, 30,
+        ))
+        matches = [
+            section for section in listing.get("sections", [])
+            if section.get("name") == self.sidebar_section_name
+            and section.get("sectionId") not in {"pinned", "threads", "chats"}
+        ]
+        if len(matches) > 1:
+            raise thread_runtime.HostError(
+                "Multiple Codex sidebar sections have the run's exact name"
+            )
+        if matches:
+            section = matches[0]
+        else:
+            section = self.app_tool_payload(self.sidebar_relay(
+                self.source_thread_id, "create_sidebar_section",
+                {"name": self.sidebar_section_name},
+                "ticket-train-sidebar-create:" + call_key, 30,
+            ))
+        section_id = section.get("sectionId")
+        if not isinstance(section_id, str) or not section_id:
+            raise thread_runtime.HostError("Codex sidebar section has no ID")
+        record.update(status="completed", section_id=section_id, completed_at=utcnow())
+        save_json(reference, record)
+        return section_id
+
+    def organize_worker(self, job):
+        """Place a real worker task in its visible section without a model wake."""
+        if not self.source_thread_id or not self.sidebar_section_name or job.get("sidebar_section_id"):
+            return
+        if int(job.get("sidebar_attempts", 0)) >= 3:
+            return
+        if job.get("sidebar_retry_at", 0) > time.time():
+            return
+        try:
+            section_id = self.ensure_sidebar_section()
+            call_id = "ticket-train-sidebar-move:" + digest([section_id, job["thread_id"]])
+            payload = self.app_tool_payload(self.sidebar_relay(
+                self.source_thread_id, "move_thread_to_sidebar_section",
+                {"threadId": job["thread_id"], "hostId": "local", "sectionId": section_id},
+                call_id, 30,
+            ))
+            if payload.get("threadId") != job["thread_id"] or payload.get("sectionId") != section_id:
+                raise thread_runtime.HostError("Codex sidebar move returned another task or section")
+            job.update(
+                sidebar_status="completed", sidebar_section_id=section_id,
+                sidebar_section_name=self.sidebar_section_name,
+                sidebar_organized_at=utcnow(),
+            )
+            job.pop("sidebar_retry_at", None)
+            job.pop("sidebar_error", None)
+        except thread_runtime.HostError as error:
+            attempts = int(job.get("sidebar_attempts", 0)) + 1
+            job.update(
+                sidebar_status="deferred", sidebar_attempts=attempts,
+                sidebar_error=str(error),
+            )
+            if attempts < 3:
+                job["sidebar_retry_at"] = time.time() + 15
+            else:
+                job.pop("sidebar_retry_at", None)
+        self.save(job)
 
     def notification(self, event):
         # Server-initiated approval/input requests are durable, never approved
@@ -254,21 +321,11 @@ class NativeEffects:
                 save_json(directory / "create-response.json", {"result": creation, "reconciled": True})
             else:
                 request = {"cwd": spec["cwd"], "ephemeral": False}
-                project_id = self.project_id()
-                if project_id:
-                    request["projectId"] = project_id
                 if spec.get("model"):
                     request["model"] = spec["model"]
                 save_json(armed, request)
                 creation = self.host.call("thread/start", request, receipt_path=directory / "create-response.json")
                 self.loaded.add(creation["thread"]["id"])
-        project_id = self.project_id()
-        if project_id and creation["thread"].get("projectId") != project_id:
-            updated = self.host.call(
-                "thread/metadata/update", {"threadId": creation["thread"]["id"], "projectId": project_id}
-            )
-            creation["thread"] = updated["thread"]
-            save_json(directory / "create-response.json", {"result": creation, "project_reconciled": True})
         job["thread_id"] = creation["thread"]["id"]
         job["actual_model"] = creation.get("model") or job.get("actual_model")
         self.save(job)
@@ -276,6 +333,7 @@ class NativeEffects:
             self.host.call("thread/name/set", {"threadId": job["thread_id"], "name": spec.get("title", "Ticket Train — " + spec["key"])})
             job["named"] = True
             self.save(job)
+        self.organize_worker(job)
         if job.get("pending_prompt") or job["status"] == "creating":
             self.start_turn(job, job.get("pending_prompt") or spec["prompt"])
         return self.read(spec["key"])
@@ -328,6 +386,8 @@ class NativeEffects:
         return True
 
     def observe(self, job):
+        self.organize_worker(job)
+        job = self.read(job["key"])
         if job.get("pending_prompt"):
             self.start_turn(job, job["pending_prompt"])
             return self.read(job["key"])

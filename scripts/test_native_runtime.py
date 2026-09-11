@@ -29,7 +29,6 @@ from test_train_controller import Harness
 class FakeServer:
     def __init__(self):
         self.threads = {}
-        self.projects = []
         self.calls = []
         self.call_params = []
         self.crash_after_create = False
@@ -51,8 +50,6 @@ class FakeServer:
                 raise thread_runtime.HostError("Connection lost after server created the task")
         elif method == "thread/list":
             result = {"data": list(self.threads.values()), "nextCursor": None}
-        elif method == "project/list":
-            result = {"data": self.projects, "nextCursor": None}
         elif method in {"thread/read", "thread/resume"}:
             if method == "thread/resume" and self.active_writer_failures:
                 self.active_writer_failures -= 1
@@ -62,10 +59,6 @@ class FakeServer:
                     })
                 raise thread_runtime.HostError("already has an active writer")
             result = {"thread": self.threads[params["threadId"]]}
-        elif method == "thread/metadata/update":
-            task = self.threads[params["threadId"]]
-            task["projectId"] = params["projectId"]
-            result = {"thread": task}
         elif method == "turn/start":
             task = self.threads[params["threadId"]]
             turn = {"id": "turn-" + str(len(task["turns"]) + 1), "status": "inProgress", "items": []}
@@ -114,6 +107,38 @@ class FakeServer:
 
     def answer_request(self, request_id, result):
         self.calls.append("answer_request")
+
+
+class FakeSidebar:
+    def __init__(self, event_log=None):
+        self.sections = []
+        self.calls = []
+        self.event_log = event_log
+        self.lose_create_response = False
+
+    @staticmethod
+    def result(value):
+        return {"content": [{"type": "text", "text": json.dumps(value)}], "isError": False}
+
+    def __call__(self, source_thread_id, name, arguments, call_id, timeout):
+        self.calls.append((name, copy.deepcopy(arguments), call_id))
+        if self.event_log is not None:
+            self.event_log.append("sidebar:" + name)
+        if name == "list_threads":
+            return self.result({"sections": copy.deepcopy(self.sections)})
+        if name == "create_sidebar_section":
+            section = {"sectionId": "section-1", "name": arguments["name"], "itemKeys": []}
+            self.sections.append(section)
+            if self.lose_create_response:
+                self.lose_create_response = False
+                raise thread_runtime.HostError("connection lost after section creation")
+            return self.result(section)
+        if name == "move_thread_to_sidebar_section":
+            return self.result({
+                "hostId": arguments["hostId"], "sectionId": arguments["sectionId"],
+                "threadId": arguments["threadId"],
+            })
+        raise AssertionError(name)
 
 
 def effects(root, server):
@@ -235,13 +260,11 @@ class NativeRuntimeTests(unittest.TestCase):
                 "id": "thread-main", "cwd": repository, "createdAt": time.time(),
                 "turns": [], "status": {"type": "idle"}, "projectId": None,
             }
-            server.projects = [{"id": "project-1", "name": "Project", "roots": [{"path": repository}]}]
             runtime = train_supervisor.NativeEffects(
                 Path(tmp) / "driver" / "effects",
                 __file__,
                 host_factory=lambda *a, **kw: server,
                 source_thread_id="thread-main",
-                repository=repository,
                 owner_relay=server.send_message_to_thread,
             )
             driver = runner.Driver(
@@ -468,16 +491,17 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(server.calls.count("turn/start"), 0)
             self.assertEqual(server.calls.count("send_message_to_thread"), 1)
 
-    def test_worker_inherits_orchestrator_project_while_keeping_its_worktree(self):
+    def test_workers_are_grouped_in_a_visible_run_section_before_their_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()
             repository = str(Path(tmp) / "project")
+            sidebar = FakeSidebar(server.calls)
             server.threads["parent"] = {"id": "parent", "cwd": repository, "createdAt": time.time(),
                                         "turns": [], "status": {"type": "idle"}, "projectId": None}
-            server.projects = [{"id": "project-1", "name": "Project", "roots": [{"path": repository}]}]
             runtime = train_supervisor.NativeEffects(
                 Path(tmp), __file__, host_factory=lambda *a, **kw: server,
-                source_thread_id="parent", repository=repository
+                source_thread_id="parent",
+                sidebar_section_name="Project · Train #1 · abc12345", sidebar_relay=sidebar,
             )
             spec = {"key": "T-1:analysis:1", "cwd": str(Path(tmp) / "worktree"), "model": "test-model",
                     "effort": "low", "prompt": "Analyze", "title": "Train worker"}
@@ -485,38 +509,46 @@ class NativeRuntimeTests(unittest.TestCase):
             job = runtime.submit(spec)
 
             start = next(params for method, params in server.call_params if method == "thread/start")
-            self.assertEqual(start["projectId"], "project-1")
             self.assertEqual(start["cwd"], spec["cwd"])
-            self.assertEqual(server.threads[job["thread_id"]]["projectId"], "project-1")
-            self.assertEqual(server.calls.count("thread/read"), 1)
-            self.assertEqual(server.calls.count("project/list"), 1)
+            self.assertNotIn("projectId", start)
+            self.assertEqual(job["sidebar_status"], "completed")
+            self.assertEqual(job["sidebar_section_id"], "section-1")
+            self.assertEqual([call[0] for call in sidebar.calls], [
+                "list_threads", "create_sidebar_section", "move_thread_to_sidebar_section",
+            ])
+            self.assertLess(
+                server.calls.index("sidebar:move_thread_to_sidebar_section"),
+                server.calls.index("turn/start"),
+            )
 
-    def test_recorded_unassigned_creation_is_repaired_without_a_second_task(self):
+    def test_lost_sidebar_creation_is_reconciled_without_blocking_or_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = FakeServer()
             repository = str(Path(tmp) / "project")
-            server.projects = [{"id": "project-1", "name": "Project", "roots": [{"path": repository}]}]
-            server.threads["worker"] = {"id": "worker", "cwd": str(Path(tmp) / "worktree"),
-                                        "createdAt": time.time(), "turns": [], "status": {"type": "idle"},
-                                        "projectId": None}
+            sidebar = FakeSidebar()
+            sidebar.lose_create_response = True
             runtime = train_supervisor.NativeEffects(
-                Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server, repository=repository
+                Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="parent",
+                sidebar_section_name="Project · Train #1 · abc12345", sidebar_relay=sidebar,
             )
-            spec = {"key": "T-1:analysis:1", "cwd": server.threads["worker"]["cwd"], "model": "test-model",
+            spec = {"key": "T-1:analysis:1", "cwd": str(Path(tmp) / "worktree"), "model": "test-model",
                     "effort": "low", "prompt": "Analyze", "title": "Train worker"}
-            runtime.prepare(spec)
-            directory = runtime.directory(spec["key"])
-            run_registry.save_json(directory / "create-response.json", {
-                "result": {"thread": copy.deepcopy(server.threads["worker"]), "model": "test-model"}
-            })
 
             job = runtime.submit(spec)
+            self.assertEqual(job["sidebar_status"], "deferred")
+            self.assertEqual(server.calls.count("turn/start"), 1)
+            self.assertEqual(len(sidebar.sections), 1)
 
-            self.assertEqual(job["thread_id"], "worker")
-            self.assertNotIn("thread/start", server.calls)
-            self.assertIn("thread/metadata/update", server.calls)
-            receipt = run_registry.load_json(directory / "create-response.json")
-            self.assertEqual(receipt["result"]["thread"]["projectId"], "project-1")
+            job["sidebar_retry_at"] = time.time() - 1
+            runtime.save(job)
+            runtime.observe(job)
+            job = runtime.read(spec["key"])
+
+            self.assertEqual(job["sidebar_status"], "completed")
+            self.assertEqual(job["sidebar_section_id"], "section-1")
+            self.assertEqual(len(sidebar.sections), 1)
+            self.assertEqual([call[0] for call in sidebar.calls].count("create_sidebar_section"), 1)
 
     def test_scope_decision_reuse_preserves_choice_and_risk_but_new_source_reopens_it(self):
         with tempfile.TemporaryDirectory() as tmp:

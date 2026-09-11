@@ -118,10 +118,13 @@ actual response before returning it to the scheduler. It reuses recorded tasks
 and turns. A missing response is reconciled through the operation's isolated cwd
 and creation interval; zero or multiple matches never authorize a new task.
 
-Worker tasks inherit the repository's Codex project through native `projectId`
-metadata. The native project catalog is matched once against the profile's exact
-repository root; the isolated worktree remains the task's `cwd`. This needs no AI
-decision.
+The native worker transport and the desktop sidebar use different project-ID
+namespaces, so raw `projectId` metadata does not place workers under the saved
+project in the UI. At creation time the runner instead creates or reconciles one
+clearly named sidebar section for the run and moves every real worker task into
+it before starting the turn. The section mutation is receipt-driven, bounded to
+three retries, and wakes no model. A temporary sidebar failure never stops the
+technical work; the task remains visible in Recents until a retry succeeds.
 
 `phase_dispatch.py` implements dispatch, collection, Git integration, verification,
 PRs and feedback. Workers return technical JSON; the adapter supplies identities

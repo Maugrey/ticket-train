@@ -27,7 +27,8 @@ resolves scope and presents decisions and results.
    wakes. Each new human gate, terminal error or completed train starts one
    receipt-backed turn in the train's owner conversation through the desktop's
    native task relay, with compact event context. Meaningful phase changes update
-   the owner conversation title through a script-only desktop call.
+   the owner conversation title through a script-only desktop call. Every worker
+   is a real Codex task grouped in a clearly named sidebar section for the run.
 7. Persist each user answer against its exact gate and revision, then continue
    the same runner. An acknowledgement or an emitted packet is not execution.
 
