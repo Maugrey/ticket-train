@@ -935,6 +935,22 @@ def ticket_verification_target(proc: dict[str, Any], ticket_id: str) -> tuple[st
     return str(phase_key), branch, str(head)
 
 
+def ticket_current_head(proc: dict[str, Any], ticket_id: str, fallback: str) -> str:
+    """Select the latest materialized ticket head for a technical decision."""
+    item = ticket(proc, ticket_id)
+    pull_request = item.get("pull_request") or {}
+    verification = item.get("verification") or {}
+    if pull_request.get("head_commit"):
+        return str(pull_request["head_commit"])
+    execution = item.get("execution") or {}
+    if execution.get("implementation_phase_key"):
+        _, _, head = ticket_verification_target(proc, ticket_id)
+        return head
+    if verification.get("ticket_head"):
+        return str(verification["ticket_head"])
+    return fallback
+
+
 def expected_unity_operation(proc: dict[str, Any], owner_key: str) -> tuple[str, str | None, str]:
     if owner_key.startswith("ticket:") and owner_key.endswith(":verification"):
         ticket_id = owner_key[len("ticket:") : -len(":verification")]

@@ -1,9 +1,29 @@
 import unittest
 
-from phase_dispatch import bind_verification_evidence
+from pathlib import Path
+
+from phase_dispatch import bind_verification_evidence, bind_verification_plan
 
 
 class VerificationIdentityTests(unittest.TestCase):
+    def test_plan_binds_fresh_command_evidence_without_mutating_template(self):
+        source = {"workdir": "old", "expected_head": "old", "commands": [
+            {"id": "unity", "argv": ["python", "verify.py", "--output-dir", "old/unity"]},
+            {"id": "lint", "argv": ["python", "lint.py"]},
+        ]}
+        bound = bind_verification_plan(source, Path("new-worktree"), "new-head", Path("attempt/evidence"))
+        self.assertEqual(bound["workdir"], "new-worktree")
+        self.assertEqual(bound["expected_head"], "new-head")
+        self.assertEqual(bound["commands"][0]["argv"][-1], str(Path("attempt/evidence/unity")))
+        self.assertEqual(bound["commands"][1]["argv"], ["python", "lint.py"])
+        self.assertEqual(source["commands"][0]["argv"][-1], "old/unity")
+
+    def test_plan_rejects_dangling_output_directory(self):
+        with self.assertRaises(ValueError):
+            bind_verification_plan(
+                {"commands": [{"id": "unity", "argv": ["verify", "--output-dir"]}]},
+                "worktree", "head", "attempt")
+
     def test_missing_identity_is_bound_without_changing_assertions_or_source(self):
         source = {"type": "VERIFICATION_RECORDED", "assertions": {"acceptance_coverage": False}}
         bound = bind_verification_evidence(source, "33")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import hashlib
 import io
@@ -508,6 +509,24 @@ def bind_verification_evidence(template, ticket_id, execution=None, acceptance_c
     return evidence
 
 
+def bind_verification_plan(template, workdir, expected_head, evidence_root):
+    """Bind a reusable verification template to one fresh deterministic attempt."""
+    plan = copy.deepcopy(template)
+    plan.update(workdir=str(workdir), expected_head=expected_head)
+    root = Path(evidence_root)
+    for index, command in enumerate(plan.get("commands", [])):
+        argv = list(command.get("argv", []))
+        command_id = str(command.get("id") or f"command-{index + 1}")
+        controller.require(command_id not in {".", ".."} and Path(command_id).name == command_id,
+                           "Verification command id must be a path-safe name")
+        positions = [position for position, value in enumerate(argv) if value == "--output-dir"]
+        for position in positions:
+            controller.require(position + 1 < len(argv), "Verification --output-dir requires a value")
+            argv[position + 1] = str(root / command_id)
+        command["argv"] = argv
+    return plan
+
+
 def verify(driver, action):
     import verification_adapter
     proc = driver.state()["procedure"]
@@ -538,8 +557,9 @@ def verify(driver, action):
     retries = [e for e in proc.get("event_log", []) if e.get("type") in {"VERIFICATION_FAILURE_CLASSIFIED", "FINAL_VERIFICATION_FAILURE_CLASSIFIED"} and e.get("ticket_id") == ticket_id]
     destination = driver.directory / "verification" / digest([ticket_id or "run", head, retries])[:24]
     destination.mkdir(parents=True, exist_ok=True)
-    plan = load(config["verification_plan_reference"])
-    plan.update(workdir=str(directory), expected_head=head)
+    plan = bind_verification_plan(
+        load(config["verification_plan_reference"]), directory, head,
+        destination / "command-evidence")
     run_registry.save_json(destination / "plan.json", plan)
     evidence = bind_verification_evidence(
         load(config["verification_evidence_reference"]), ticket_id,
@@ -1033,6 +1053,8 @@ def execute_action(driver, action):
             return False
         key = f"{action.get('ticket_id') or 'run'}:decision:{len(proc['phases']) + 1}"
         head = proc.get("train_head") or git(driver.profile["repository"], "rev-parse", proc["base_branch"])
+        if action.get("ticket_id"):
+            head = controller.ticket_current_head(proc, action["ticket_id"], head)
         payload = compact_inputs(driver, action)
         if name == "RECONCILE_CODEX_CI_COPILOT_FINDINGS":
             payload["feedback"] = driver.feedback_inputs[action["ticket_id"]]

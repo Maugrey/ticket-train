@@ -585,7 +585,7 @@ class TrainControllerTests(unittest.TestCase):
 
     def test_ticket_verification_target_uses_latest_completed_remediation(self):
         proc = {
-            "tickets": {"T-1": {"execution": {
+            "tickets": {"T-1": {"verification": {"ticket_head": "previous-verification"}, "execution": {
                 "implementation_phase_key": "T-1:implementation:1",
                 "implementation_branch": "implementation",
                 "integrated_head": "integrated",
@@ -603,6 +603,28 @@ class TrainControllerTests(unittest.TestCase):
             train_controller.ticket_verification_target(proc, "T-1"),
             ("T-1:remediation:2", "remediation", "fixed"),
         )
+
+    def test_ticket_current_head_uses_latest_completed_remediation(self):
+        proc = {
+            "tickets": {"T-1": {"execution": {
+                "implementation_phase_key": "T-1:implementation:1",
+                "implementation_branch": "implementation",
+                "integrated_head": "integrated",
+            }}},
+            "phases": {
+                "T-1:implementation:1": {"phase_key": "T-1:implementation:1"},
+                "T-1:remediation:2": {
+                    "phase_key": "T-1:remediation:2", "ticket_id": "T-1",
+                    "kind": "remediation", "launch_state": "COMPLETED", "branch": "remediation",
+                    "completion_envelope": {"artifacts": {"commit": "fixed"}},
+                },
+            },
+        }
+        self.assertEqual(train_controller.ticket_current_head(proc, "T-1", "train"), "fixed")
+
+    def test_ticket_current_head_falls_back_before_execution(self):
+        proc = {"tickets": {"T-1": {}}, "phases": {}}
+        self.assertEqual(train_controller.ticket_current_head(proc, "T-1", "train"), "train")
 
     @staticmethod
     def blocked_continuation_run(root: Path) -> Harness:
