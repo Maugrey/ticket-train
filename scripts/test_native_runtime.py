@@ -142,14 +142,15 @@ class FakeSidebar:
         if name == "wait_threads":
             target = arguments["targets"][0]
             task = self.runtime_server.threads[target["threadId"]]
-            turn = task["turns"][-1]
-            active = turn["status"] == "inProgress"
+            turn = task["turns"][-1] if task["turns"] else {}
+            active = turn.get("status") == "inProgress"
             messages = [item for item in turn.get("items", []) if item.get("type") == "agentMessage"]
             markers = [item for item in turn.get("items", []) if item.get("type") in {"commandExecution", "fileChange"}]
             return self.result({"timedOut": False, "polls": [{
                 "cursor": "cursor-1",
                 "thread": {"id": task["id"], "hostId": "local", "status": {"type": "active" if active else "idle"}},
-                "latestTurn": {"id": turn["id"], "status": turn["status"], "error": turn.get("error")},
+                "latestTurn": ({"id": turn["id"], "status": turn["status"], "error": turn.get("error")}
+                               if turn else None),
                 "latestAssistantMessage": messages[-1] if messages else None,
                 "latestToolMarker": markers[-1] if markers else None,
             }]})
@@ -531,7 +532,7 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertEqual(job["sidebar_status"], "completed")
             self.assertEqual(job["sidebar_section_id"], "section-1")
             self.assertEqual([call[0] for call in sidebar.calls], [
-                "list_threads", "create_sidebar_section", "move_thread_to_sidebar_section",
+                "list_threads", "create_sidebar_section", "move_thread_to_sidebar_section", "wait_threads",
             ])
             self.assertLess(
                 server.calls.index("sidebar:move_thread_to_sidebar_section"),
@@ -567,6 +568,29 @@ class NativeRuntimeTests(unittest.TestCase):
             completed = runtime.observe(retried)
             self.assertEqual(completed["status"], "completed")
             self.assertEqual(run_registry.load_json(completed["result_reference"])["text"], final_text)
+
+    def test_worker_relay_binds_an_existing_desktop_turn_instead_of_queuing_another(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeServer()
+            sidebar = FakeSidebar(runtime_server=server)
+            runtime = train_supervisor.NativeEffects(
+                Path(tmp), __file__, host_factory=lambda *a, **kw: server,
+                source_thread_id="parent", owner_relay=server.send_message_to_thread,
+                sidebar_relay=sidebar,
+            )
+            spec = {"key": "T-1:implementation:1", "cwd": str(Path(tmp) / "worktree"),
+                    "prompt": "Implement visibly"}
+            job = runtime.submit(spec)
+            turn = server.threads[job["thread_id"]]["turns"][-1]
+            job["attempt"] += 1
+            job["client_message_id"] = "retry-message"
+
+            runtime.start_turn(job, "duplicate retry while the desktop turn is active")
+
+            rebound = runtime.read(job["key"])
+            self.assertEqual(rebound["turn_id"], turn["id"])
+            self.assertEqual(rebound["status"], "running")
+            self.assertEqual(server.calls.count("send_message_to_thread"), 1)
 
     def test_lost_sidebar_creation_is_reconciled_without_blocking_or_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -610,6 +634,7 @@ class NativeRuntimeTests(unittest.TestCase):
             runtime = train_supervisor.NativeEffects(
                 Path(tmp) / "effects", __file__, host_factory=lambda *a, **kw: server,
                 source_thread_id="parent", owner_relay=queued,
+                sidebar_relay=FakeSidebar(runtime_server=server),
             )
             spec = {"key": "T-1:analysis:1", "cwd": tmp, "prompt": "Analyze visibly"}
 

@@ -294,6 +294,20 @@ class NativeEffects:
         observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
         turn = self.relayed_turn(observed["thread"], relay_prompt)
         if not turn and not response_path.exists():
+            # A desktop-owned turn can still be active even when a fresh raw
+            # App Server reports its old writer as interrupted. Bind that
+            # actual turn instead of queuing a duplicate prompt behind it.
+            payload, active = self.poll_desktop_worker(job, "relay-preflight")
+            if active["runtime_status"] in {"running", "needs_input"}:
+                save_json(directory / "relay-preflight-observation.json", payload)
+                job.update(
+                    turn_id=active["turn_id"], status=active["runtime_status"],
+                    started_at=job.get("started_at") or utcnow(),
+                )
+                job.pop("pending_prompt", None)
+                job.pop("retry_at", None)
+                self.save(job)
+                return True
             request = {
                 "source_thread_id": self.source_thread_id,
                 "target_thread_id": job["thread_id"],
@@ -320,6 +334,21 @@ class NativeEffects:
         job.pop("retry_at", None)
         self.save(job)
         return True
+
+    def poll_desktop_worker(self, job, purpose):
+        sequence_key = "desktop_" + purpose.replace("-", "_") + "_sequence"
+        sequence = int(job.get(sequence_key, 0)) + 1
+        job[sequence_key] = sequence
+        self.save(job)
+        payload = self.app_tool_payload(self.sidebar_relay(
+            self.source_thread_id, "wait_threads",
+            {"targets": [{"threadId": job["thread_id"], "hostId": "local"}], "timeoutMs": 0},
+            "ticket-train-worker-" + purpose + ":" + digest([
+                job["thread_id"], job.get("turn_id"), sequence,
+            ]),
+            30,
+        ))
+        return payload, thread_runtime.parse_wait_result(payload)[0]
 
     def receipt(self, directory, name):
         path = directory / (name + ".json")
@@ -466,18 +495,9 @@ class NativeEffects:
 
     def observe_relayed_worker(self, job):
         """Observe a desktop-owned worker turn through the same visible host."""
-        sequence = int(job.get("desktop_observation_sequence", 0)) + 1
-        job["desktop_observation_sequence"] = sequence
-        self.save(job)
-        payload = self.app_tool_payload(self.sidebar_relay(
-            self.source_thread_id, "wait_threads",
-            {"targets": [{"threadId": job["thread_id"], "hostId": "local"}], "timeoutMs": 0},
-            "ticket-train-worker-observe:" + digest([job["thread_id"], job.get("turn_id"), sequence]),
-            30,
-        ))
+        payload, observation = self.poll_desktop_worker(job, "observe")
         directory = self.directory(job["key"])
         save_json(directory / "observation.json", payload)
-        observation = thread_runtime.parse_wait_result(payload)[0]
         if observation.get("turn_id") != job.get("turn_id"):
             raise thread_runtime.HostError("Desktop observation returned another worker turn")
         status = observation["runtime_status"]
