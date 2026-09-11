@@ -571,10 +571,12 @@ class NativeRuntimeTests(unittest.TestCase):
             job = runtime.submit(spec)
             self.assertEqual(job["status"], "starting_turn")
             self.assertEqual(len(calls), 1)
+            relayed_prompt = calls[0][2]
+            self.assertIn("[ticket-train-relay:", relayed_prompt)
             server.threads[job["thread_id"]]["turns"].append({
                 "id": "visible-turn", "status": "inProgress",
                 "items": [{"type": "userMessage", "content": [
-                    {"type": "text", "text": spec["prompt"]},
+                    {"type": "text", "text": relayed_prompt},
                 ]}],
             })
             job["retry_at"] = time.time() - 1

@@ -283,14 +283,15 @@ class NativeEffects:
         name = "worker-relay-" + str(job["attempt"])
         request_path = directory / (name + "-request.json")
         response_path = directory / (name + "-response.json")
+        relay_prompt = "[ticket-train-relay:" + job["client_message_id"] + "]\n" + prompt
 
         observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
-        turn = self.relayed_turn(observed["thread"], prompt)
+        turn = self.relayed_turn(observed["thread"], relay_prompt)
         if not turn and not response_path.exists():
             request = {
                 "source_thread_id": self.source_thread_id,
                 "target_thread_id": job["thread_id"],
-                "prompt": prompt,
+                "prompt": relay_prompt,
                 "call_id": job["client_message_id"],
             }
             if not request_path.exists():
@@ -303,7 +304,7 @@ class NativeEffects:
             )
             save_json(response_path, {"result": result})
             observed = self.host.call("thread/read", {"threadId": job["thread_id"], "includeTurns": True})
-            turn = self.relayed_turn(observed["thread"], prompt)
+            turn = self.relayed_turn(observed["thread"], relay_prompt)
         if not turn:
             job["retry_at"] = time.time() + 2
             self.save(job)
